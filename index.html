@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>pilegen</title>
+  <style>
+    body { background: #1a1a2e; color: #e0e0e0; font-family: monospace; padding: 2rem; }
+    pre { white-space: pre-wrap; font-size: 14px; }
+    button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 0.5rem 1rem; cursor: pointer; font-family: monospace; font-size: 14px; }
+    button:hover { background: #0f3460; }
+  </style>
+</head>
+<body>
+  <button id="run">Generate Scenario</button>
+  <pre id="out">Loading WASM…</pre>
+  <script type="module">
+    import init, { run_scenario } from './pilegen/pkg/pilegen.js';
+    await init();
+    const out = document.getElementById('out');
+    const btn = document.getElementById('run');
+    out.textContent = run_scenario();
+    btn.addEventListener('click', () => { out.textContent = run_scenario(); });
+  </script>
+</body>
+</html>
