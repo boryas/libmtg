@@ -22,7 +22,7 @@
     .zone-label { font-size: 0.75rem; text-transform: uppercase; color: #666; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
 
     /* Normal card layout */
-    .cards { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .cards { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-start; }
     .card { position: relative; width: 100px; border-radius: 6px; overflow: hidden; border: 1px solid #333; transition: transform 0.15s; flex-shrink: 0; }
     .card:hover { transform: scale(1.8); z-index: 10; }
     .card img { width: 100%; display: block; }
@@ -92,16 +92,18 @@
       sel.appendChild(opt);
     }
 
-    const scryfallImg = (name) =>
-      `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image&version=small`;
+    const scryfallImg = (name) => {
+      const n = name.replace(/ Token$/, '');
+      return `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(n)}&format=image&version=small`;
+    };
 
     function renderCard(name, opts = {}) {
       const div = document.createElement('div');
       div.className = 'card' + (opts.tapped ? ' tapped' : '');
       const img = document.createElement('img');
-      img.src = scryfallImg(name);
+      img.src = opts.flipped ? scryfallImg(name) + '&face=back' : scryfallImg(name);
       img.alt = name;
-      img.title = name;
+      img.title = name + (opts.flipped ? ' (transformed)' : '');
       img.loading = 'lazy';
       div.appendChild(img);
       if (opts.badge) {
@@ -191,22 +193,26 @@
         let badge = [];
         if (p.counters) badge.push(`${p.counters > 0 ? '+' : ''}${p.counters}`);
         if (p.loyalty) badge.push(`Loy:${p.loyalty}`);
-        return renderCard(p.name, { tapped: p.tapped, badge: badge.join(' ') || undefined });
+        return renderCard(p.name, { tapped: p.tapped, flipped: p.flipped, badge: badge.join(' ') || undefined });
       });
       renderZone(el, 'Permanents', permCards);
 
       const landCards = player.lands.map(p => {
         let badge = [];
         if (p.counters) badge.push(`${p.counters > 0 ? '+' : ''}${p.counters}`);
-        return renderCard(p.name, { tapped: p.tapped, badge: badge.join(' ') || undefined });
+        return renderCard(p.name, { tapped: p.tapped, flipped: p.flipped, badge: badge.join(' ') || undefined });
       });
       renderZone(el, 'Lands', landCards);
 
       const handCards = player.hand.map(c => renderCard(c.name));
-      if (player.hand_hidden > 0) {
+      for (let i = 0; i < player.hand_hidden; i++) {
         const div = document.createElement('div');
-        div.className = 'hidden-cards';
-        div.textContent = `+ ${player.hand_hidden} hidden`;
+        div.className = 'card card-back';
+        const img = document.createElement('img');
+        img.src = 'https://cards.scryfall.io/small/back/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg';
+        img.alt = 'Hidden card';
+        img.title = 'Hidden card';
+        div.appendChild(img);
         handCards.push(div);
       }
       renderZone(el, 'Hand', handCards, { extraClass: 'hand-zone' });
