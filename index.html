@@ -7,8 +7,9 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 1.5rem; }
     h1 { font-size: 1.4rem; margin-bottom: 1rem; color: #c0c0d0; }
-    button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem; border-radius: 4px; }
-    button:hover { background: #0f3460; }
+    button, select { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem; border-radius: 4px; }
+    button:hover, select:hover { background: #0f3460; }
+    select { appearance: auto; }
     .header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
     .meta { font-size: 0.85rem; color: #888; }
     .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
@@ -38,6 +39,8 @@
 <body>
   <div class="header">
     <h1>Doomsday Pile Scenario</h1>
+    <label style="color:#888;font-size:0.85rem">vs</label>
+    <select id="matchup"></select>
     <button id="run">Generate</button>
   </div>
   <div id="loading">Loading WASM…</div>
@@ -54,8 +57,16 @@
   </div>
 
   <script type="module">
-    import init, { run_scenario } from './pilegen/pkg/pilegen.js';
+    import init, { run_scenario, list_matchups } from './pilegen/pkg/pilegen.js';
     await init();
+
+    const sel = document.getElementById('matchup');
+    for (const m of JSON.parse(list_matchups())) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      sel.appendChild(opt);
+    }
 
     const scryfallImg = (name) =>
       `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image&version=small`;
@@ -136,7 +147,7 @@
     }
 
     function render() {
-      const data = JSON.parse(run_scenario());
+      const data = JSON.parse(run_scenario(sel.value));
       document.getElementById('meta').textContent =
         `Turn ${data.turn} · ${data.stage} · ${data.on_play ? 'On the play' : 'On the draw'}`;
       renderBoard(document.getElementById('us-board'), data.us, true);
