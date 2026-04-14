@@ -11,7 +11,10 @@
     button:hover, select:hover { background: #0f3460; }
     select { appearance: auto; }
     .header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
-    .meta { font-size: 0.85rem; color: #888; margin-bottom: 1rem; }
+    .meta { font-size: 1.3rem; font-weight: bold; color: #c0c0d0; margin-bottom: 1rem; letter-spacing: 0.03em; }
+    .meta .turn-num { font-size: 1.6rem; color: #5dade2; }
+    .meta .stage { color: #9b59b6; }
+    .meta .play-draw { font-size: 0.9rem; color: #888; font-weight: normal; }
     .boards { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(8, auto); column-gap: 1.5rem; margin-bottom: 1.5rem; }
     .board { background: #16213e; border-radius: 8px; padding: 1rem; border: 1px solid #0f3460;
       display: grid; grid-row: 1 / span 8; grid-template-rows: subgrid; row-gap: 0.5rem; }
@@ -77,6 +80,10 @@
       <div class="board" id="us-board"></div>
       <div class="board" id="opp-board"></div>
     </div>
+    <details class="log" open>
+      <summary>Strategy Decisions</summary>
+      <pre id="decision-log"></pre>
+    </details>
     <details class="log">
       <summary>Turn Log</summary>
       <pre id="log"></pre>
@@ -239,13 +246,15 @@
 
     function render() {
       const data = JSON.parse(run_scenario(sel.value));
-      document.getElementById('meta').textContent =
-        `Turn ${data.turn} · ${data.stage} · ${data.on_play ? 'On the play' : 'On the draw'}`;
+      document.getElementById('meta').innerHTML =
+        `<span class="turn-num">Turn ${data.turn}</span> · <span class="stage">${data.stage}</span> · <span class="play-draw">${data.on_play ? 'On the play' : 'On the draw'}</span>`;
       // Stack — rendered above the boards, centered
       renderStack(document.getElementById('stack-bar'), data.stack);
       renderBoard(document.getElementById('us-board'), data.us, true, data);
       renderBoard(document.getElementById('opp-board'), data.opp, false, data);
-      document.getElementById('log').textContent = data.log.join('\n');
+      document.getElementById('decision-log').textContent = (data.decision_log || []).join('\n');
+      document.getElementById('log').textContent = data.log.join('\n')
+        + '\n\n' + data.text_summary;
       document.getElementById('loading').style.display = 'none';
       document.getElementById('content').style.display = '';
     }
