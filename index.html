@@ -59,6 +59,17 @@
 
     .zone.stack-zone { background: #1a1230; border-color: #5b2c8e; }
     .zone.stack-zone .zone-label { color: #9b59b6; }
+
+    /* Pile selection */
+    .card.pile-selected { border: 2px solid #2ecc71; box-shadow: 0 0 8px rgba(46, 204, 113, 0.4); }
+    .card.pile-candidate { cursor: pointer; }
+    .card.pile-candidate:not(.pile-selected) { border: 2px solid transparent; }
+    .pile-count { font-size: 0.7rem; color: #2ecc71; margin-left: 0.5rem; }
+    .pile-count.complete { color: #f1c40f; }
+
+    /* Share feedback */
+    .share-status { font-size: 0.75rem; color: #2ecc71; transition: opacity 0.5s; margin-left: 0.25rem; }
+    .shared-badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 3px; background: #1a3a1a; color: #2ecc71; border: 1px solid #2a5a2a; }
   </style>
 </head>
 <body>
@@ -67,6 +78,8 @@
     <label style="color:#888;font-size:0.85rem">vs</label>
     <select id="matchup"></select>
     <button id="run">Generate</button>
+    <button id="share" style="display:none">Share</button>
+    <span id="share-status" class="share-status" style="opacity:0"></span>
   </div>
   <div id="loading">Loading WASM…</div>
   <div id="content" style="display:none">
@@ -85,9 +98,14 @@
   </div>
 
   <script type="module">
-    import init, { run_scenario, list_matchups } from './pilegen/pkg/pilegen.js';
+    import init, { run_scenario, list_matchups, encode_snapshot, decode_snapshot } from './pilegen/pkg/pilegen.js';
     await init();
 
+    // ── State ──────────────────────────────────────────────────────────────────
+    let currentData = null;   // ScenarioResult object
+    let pileSelected = new Set();  // indices into currentData.us.library
+
+    // ── Setup ──────────────────────────────────────────────────────────────────
     const sel = document.getElementById('matchup');
     for (const m of JSON.parse(list_matchups())) {
       const opt = document.createElement('option');
@@ -96,6 +114,7 @@
       sel.appendChild(opt);
     }
 
+    // ── Card rendering ─────────────────────────────────────────────────────────
     const scryfallImg = (name) => {
       const n = name.replace(/ Token$/, '');
       return `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(n)}&format=image&version=small`;
@@ -103,7 +122,11 @@
 
     function renderCard(name, opts = {}) {
       const div = document.createElement('div');
-      div.className = 'card' + (opts.tapped ? ' tapped' : '');
+      let cls = 'card';
+      if (opts.tapped) cls += ' tapped';
+      if (opts.pileSelected) cls += ' pile-selected';
+      if (opts.pileCandidate) cls += ' pile-candidate';
+      div.className = cls;
       const img = document.createElement('img');
       img.src = opts.flipped ? scryfallImg(name) + '&face=back' : scryfallImg(name);
       img.alt = name;
@@ -124,7 +147,8 @@
       zone.className = 'zone' + (opts.extraClass ? ' ' + opts.extraClass : '');
       const lbl = document.createElement('div');
       lbl.className = 'zone-label';
-      lbl.textContent = label + (opts.count != null ? ` (${opts.count})` : '');
+      let labelText = label + (opts.count != null ? ` (${opts.count})` : '');
+      lbl.innerHTML = labelText + (opts.labelSuffix || '');
       zone.appendChild(lbl);
       if (!items.length) {
         container.appendChild(zone);
@@ -155,6 +179,7 @@
       container.appendChild(zone);
     }
 
+    // ── Board rendering ────────────────────────────────────────────────────────
     function renderBoard(el, player, isUs, data) {
       el.innerHTML = '';
 
@@ -165,15 +190,15 @@
       const lifeSpan = document.createElement('span');
       lifeSpan.className = 'life-inline';
       if (isUs && data.life_before_dd != null) {
-        lifeSpan.innerHTML = `♥ ${data.life_before_dd} <span class="life-transition">→ ${player.life}</span>`;
+        lifeSpan.innerHTML = `&#9829; ${data.life_before_dd} <span class="life-transition">&rarr; ${player.life}</span>`;
       } else {
-        lifeSpan.textContent = `♥ ${player.life}`;
+        lifeSpan.textContent = `\u2665 ${player.life}`;
       }
       h2.appendChild(lifeSpan);
       if (isUs) {
         const ld = document.createElement('span');
         ld.className = 'land-drop ' + (player.land_drop_available ? 'available' : 'used');
-        ld.textContent = player.land_drop_available ? 'Land drop ✓' : 'Land drop ✗';
+        ld.textContent = player.land_drop_available ? 'Land drop \u2713' : 'Land drop \u2717';
         h2.appendChild(ld);
         const turn = document.createElement('span');
         turn.className = 'sigil';
@@ -204,7 +229,7 @@
         renderZone(el, 'Permanents', permCards);
       }
 
-      // Row 4: lands
+      // Row 3: lands
       const landCards = player.lands.map(p => {
         let badge = [];
         if (p.counters) badge.push(`${p.counters > 0 ? '+' : ''}${p.counters}`);
@@ -226,32 +251,123 @@
       }
       renderZone(el, 'Hand', handCards, { extraClass: 'hand-zone' });
 
-      // Row 5: library
-      const libCards = player.library.map(name => renderCard(name));
-      renderZone(el, 'Library', libCards, { columns: true, count: player.library.length || undefined });
+      // Row 5: library (pile candidates for us)
+      const libCards = player.library.map((name, i) => {
+        const isPile = isUs && pileSelected.has(i);
+        const card = renderCard(name, {
+          pileSelected: isPile,
+          pileCandidate: isUs,
+        });
+        if (isUs) {
+          card.addEventListener('click', (e) => {
+            e.stopPropagation();
+            togglePile(i);
+          });
+        }
+        return card;
+      });
+      const pileCount = pileSelected.size;
+      const pileSuffix = isUs
+        ? `<span class="pile-count${pileCount === 5 ? ' complete' : ''}">${pileCount}/5 pile</span>`
+        : '';
+      renderZone(el, 'Library', libCards, {
+        columns: true,
+        count: player.library.length || undefined,
+        labelSuffix: pileSuffix,
+      });
 
       // Row 6: graveyard
       const gyCards = player.graveyard.map(name => renderCard(name));
       renderZone(el, 'Graveyard', gyCards, { grid: true, count: player.graveyard.length });
 
-      // Row 8: exile
+      // Row 7: exile
       const exCards = player.exile.map(name => renderCard(name));
       renderZone(el, 'Exile', exCards, { grid: true, count: player.exile.length });
     }
 
-    function render() {
-      const data = JSON.parse(run_scenario(sel.value));
-      renderBoard(document.getElementById('us-board'), data.us, true, data);
-      renderBoard(document.getElementById('opp-board'), data.opp, false, data);
-      document.getElementById('decision-log').textContent = (data.decision_log || []).join('\n');
-      document.getElementById('log').textContent = data.log.join('\n')
-        + '\n\n' + data.text_summary;
-      document.getElementById('loading').style.display = 'none';
-      document.getElementById('content').style.display = '';
+    // ── Pile selection ─────────────────────────────────────────────────────────
+    function togglePile(index) {
+      if (pileSelected.has(index)) {
+        pileSelected.delete(index);
+      } else {
+        pileSelected.add(index);
+      }
+      renderAll();
     }
 
-    render();
-    document.getElementById('run').addEventListener('click', render);
+    // ── Rendering ──────────────────────────────────────────────────────────────
+    function renderAll() {
+      if (!currentData) return;
+      renderBoard(document.getElementById('us-board'), currentData.us, true, currentData);
+      renderBoard(document.getElementById('opp-board'), currentData.opp, false, currentData);
+      document.getElementById('decision-log').textContent = (currentData.decision_log || []).join('\n');
+      document.getElementById('log').textContent = (currentData.log || []).join('\n')
+        + '\n\n' + (currentData.text_summary || '');
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('content').style.display = '';
+      document.getElementById('share').style.display = '';
+    }
+
+    // ── Generate scenario ──────────────────────────────────────────────────────
+    function generate() {
+      currentData = JSON.parse(run_scenario(sel.value));
+      // Default: all library cards are pile-selected.
+      pileSelected = new Set(currentData.us.library.map((_, i) => i));
+      // Clear any shared URL state.
+      if (window.location.hash.startsWith('#s=')) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+      renderAll();
+    }
+
+    // ── Share ──────────────────────────────────────────────────────────────────
+    function share() {
+      if (!currentData) return;
+      try {
+        const pileArr = Array.from(pileSelected).sort((a, b) => a - b);
+        const token = encode_snapshot(JSON.stringify(currentData), JSON.stringify(pileArr));
+        const url = window.location.origin + window.location.pathname + '#s=' + token;
+        window.history.replaceState(null, '', '#s=' + token);
+        navigator.clipboard.writeText(url).then(() => {
+          showStatus('URL copied!');
+        }).catch(() => {
+          showStatus('URL updated');
+        });
+      } catch (e) {
+        showStatus('Error: ' + e);
+      }
+    }
+
+    function showStatus(msg) {
+      const el = document.getElementById('share-status');
+      el.textContent = msg;
+      el.style.opacity = '1';
+      setTimeout(() => { el.style.opacity = '0'; }, 2500);
+    }
+
+    // ── Load from URL ──────────────────────────────────────────────────────────
+    function loadFromUrl() {
+      const hash = window.location.hash;
+      if (!hash.startsWith('#s=')) return false;
+      try {
+        const token = hash.slice(3);
+        const decoded = JSON.parse(decode_snapshot(token));
+        currentData = decoded.scenario;
+        pileSelected = new Set(decoded.pile || []);
+        renderAll();
+        return true;
+      } catch (e) {
+        console.error('Failed to decode snapshot:', e);
+        return false;
+      }
+    }
+
+    // ── Init ───────────────────────────────────────────────────────────────────
+    if (!loadFromUrl()) {
+      generate();
+    }
+    document.getElementById('run').addEventListener('click', generate);
+    document.getElementById('share').addEventListener('click', share);
   </script>
 </body>
 </html>
