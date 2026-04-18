@@ -79,6 +79,8 @@
     <select id="matchup"></select>
     <button id="run">Generate</button>
     <button id="share" style="display:none">Share</button>
+    <input id="token-input" type="text" placeholder="Paste snapshot token…" style="background:#16213e;color:#e0e0e0;border:1px solid #0f3460;padding:0.3rem 0.5rem;font-size:0.75rem;border-radius:4px;width:18ch;font-family:monospace;">
+    <button id="load-token">Load</button>
     <span id="share-status" class="share-status" style="opacity:0"></span>
   </div>
   <div id="loading">Loading WASM…</div>
@@ -328,6 +330,7 @@
         const token = encode_snapshot(JSON.stringify(currentData), JSON.stringify(pileArr));
         const url = window.location.origin + window.location.pathname + '#s=' + token;
         window.history.replaceState(null, '', '#s=' + token);
+        document.getElementById('token-input').value = token;
         navigator.clipboard.writeText(url).then(() => {
           showStatus('URL copied!');
         }).catch(() => {
@@ -346,11 +349,21 @@
     }
 
     // ── Load from URL ──────────────────────────────────────────────────────────
+    // Accept a bare token, "#s=TOKEN", "?s=TOKEN", or a full URL containing either.
+    // Base64url alphabet is [A-Za-z0-9_-], so that's what we match for bare input.
+    function extractToken(raw) {
+      if (!raw) return '';
+      const trimmed = raw.trim();
+      const paramMatch = trimmed.match(/[#?&]s=([A-Za-z0-9_-]+)/);
+      if (paramMatch) return paramMatch[1];
+      if (/^[A-Za-z0-9_-]+$/.test(trimmed)) return trimmed;
+      return '';
+    }
+
     function loadFromUrl() {
-      const hash = window.location.hash;
-      if (!hash.startsWith('#s=')) return false;
+      const token = extractToken(window.location.hash);
+      if (!token) return false;
       try {
-        const token = hash.slice(3);
         const decoded = JSON.parse(decode_snapshot(token));
         currentData = decoded.scenario;
         pileSelected = new Set(decoded.pile || []);
@@ -368,6 +381,28 @@
     }
     document.getElementById('run').addEventListener('click', generate);
     document.getElementById('share').addEventListener('click', share);
+    document.getElementById('load-token').addEventListener('click', () => {
+      const input = document.getElementById('token-input');
+      const token = extractToken(input.value);
+      if (!token) {
+        showStatus('No token found');
+        return;
+      }
+      try {
+        const decoded = JSON.parse(decode_snapshot(token));
+        currentData = decoded.scenario;
+        pileSelected = new Set(decoded.pile || []);
+        renderAll();
+        window.history.replaceState(null, '', '#s=' + token);
+        input.value = token;
+        showStatus('Loaded!');
+      } catch (e) {
+        showStatus('Error: ' + e);
+      }
+    });
+    document.getElementById('token-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') document.getElementById('load-token').click();
+    });
   </script>
 </body>
 </html>
