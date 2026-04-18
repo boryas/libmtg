@@ -27,26 +27,30 @@
     .zone:empty, .zone.zone-empty { background: none; border: none; padding: 0; }
     .zone-label { font-size: 0.65rem; text-transform: uppercase; color: #555; letter-spacing: 0.05em; margin-bottom: 0.2rem; }
 
-    /* Normal card layout */
+    /* Normal card layout. Hover zoom is applied to the <img> (not the card),
+       so the card's hit-region stays at the original size — that means moving
+       the cursor to an adjacent card works immediately instead of staying
+       trapped under the enlarged one. pointer-events: none on the scaled img
+       also lets clicks pass through the overflowing area to whatever's below. */
     .cards { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-start; }
-    .card { position: relative; width: 100px; border-radius: 6px; overflow: hidden; border: 1px solid #333; transition: transform 0.15s; flex-shrink: 0; }
-    .card:hover { transform: scale(1.8); z-index: 10; }
-    .card img { width: 100%; display: block; }
+    .card { position: relative; width: 100px; border-radius: 6px; overflow: hidden; border: 1px solid #333; flex-shrink: 0; }
+    .card img { width: 100%; display: block; transition: transform 0.12s; }
+    .card:hover { z-index: 10; overflow: visible; }
+    .card:hover img { transform: scale(1.8); pointer-events: none; }
     .card.tapped { transform: rotate(90deg); margin: 1rem 0.5rem; }
-    .card.tapped:hover { transform: rotate(90deg) scale(1.8); }
     .card-badge { position: absolute; bottom: 2px; right: 2px; background: rgba(0,0,0,0.8); color: #fff; font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; }
 
     /* Grid layout for pool zones (graveyard, exile) */
     .cards-grid { display: grid; grid-template-columns: repeat(8, 80px); gap: 4px; }
     .cards-grid .card { width: 80px; }
-    .cards-grid .card:hover { transform: scale(2); z-index: 10; }
+    .cards-grid .card:hover img { transform: scale(2); }
 
     /* Compact column layout — cards overlap vertically within columns */
     .cards-columns { display: flex; gap: 2px; flex-wrap: wrap; }
     .cards-col { display: flex; flex-direction: column; width: 68px; }
     .cards-col .card { width: 68px; margin-top: -65px; position: relative; }
     .cards-col .card:first-child { margin-top: 0; }
-    .cards-col .card:hover { transform: scale(2.2) translateY(-30px); z-index: 10; }
+    .cards-col .card:hover img { transform: scale(2.2); }
 
     .land-drop { font-size: 0.7rem; padding: 2px 6px; border-radius: 3px; display: inline-block; vertical-align: middle; }
     .land-drop.available { background: #1a3a1a; color: #6fcf6f; border: 1px solid #2a5a2a; }
@@ -60,12 +64,22 @@
     .zone.stack-zone { background: #1a1230; border-color: #5b2c8e; }
     .zone.stack-zone .zone-label { color: #9b59b6; }
 
+    .zone.pile-zone { background: #2a2410; border-color: #a8831a; margin-bottom: 0.4rem; }
+    .zone.pile-zone .zone-label { color: #f1c40f; }
+    .zone.pile-zone.unordered-tray { background: #1e1a10; border-color: #554012; margin-bottom: 0.8rem; }
+    .zone.pile-zone.unordered-tray .zone-label { color: #a08a3a; }
+    #pile-display { min-height: 0; }
+
     /* Pile selection */
     .card.pile-selected { border: 2px solid #2ecc71; box-shadow: 0 0 8px rgba(46, 204, 113, 0.4); }
     .card.pile-candidate { cursor: pointer; }
     .card.pile-candidate:not(.pile-selected) { border: 2px solid transparent; }
+    .card.order-locked { cursor: default; opacity: 0.55; }
     .pile-count { font-size: 0.7rem; color: #2ecc71; margin-left: 0.5rem; }
     .pile-count.complete { color: #f1c40f; }
+    .order-slot { position: absolute; top: 3px; left: 3px; background: #f1c40f; color: #000;
+      font-weight: 700; font-size: 0.85rem; min-width: 20px; height: 20px; line-height: 20px;
+      text-align: center; border-radius: 50%; box-shadow: 0 0 4px rgba(0,0,0,0.6); z-index: 2; }
 
     /* Share feedback */
     .share-status { font-size: 0.75rem; color: #2ecc71; transition: opacity 0.5s; margin-left: 0.25rem; }
@@ -78,6 +92,8 @@
     <label style="color:#888;font-size:0.85rem">vs</label>
     <select id="matchup"></select>
     <button id="run">Generate</button>
+    <button id="confirm-pile" style="display:none"></button>
+    <button id="edit-picks" style="display:none">← Edit picks</button>
     <button id="share" style="display:none">Share</button>
     <button id="reveal" style="display:none">Reveal pile</button>
     <input id="token-input" type="text" placeholder="Paste snapshot token…" style="background:#16213e;color:#e0e0e0;border:1px solid #0f3460;padding:0.3rem 0.5rem;font-size:0.75rem;border-radius:4px;width:18ch;font-family:monospace;">
@@ -86,6 +102,7 @@
   </div>
   <div id="loading">Loading WASM…</div>
   <div id="content" style="display:none">
+    <div id="pile-display"></div>
     <div class="boards">
       <div class="board" id="us-board"></div>
       <div class="board" id="opp-board"></div>
@@ -105,9 +122,11 @@
     await init();
 
     // ── State ──────────────────────────────────────────────────────────────────
-    let currentData = null;        // ScenarioResult object
-    let pileSelected = new Set();  // user's picks: "lib:i" or "gy:i" strings
-    let pendingPile  = new Set();  // loaded-but-hidden pile (puzzle mode)
+    let currentData = null;             // ScenarioResult object
+    let pileSelected = new Set();       // user's picks: "lib:i" or "gy:i" strings
+    let pendingPile  = new Map();       // loaded-but-hidden pile (puzzle mode) key→slot
+    let pilePhase    = 'select';        // 'select' → picking 5, 'order' → assigning slots
+    let pileSlots    = new Map();       // key → slot (1 = top of pile, PILE_MAX = bottom)
     const PILE_MAX = 5;
 
     // ── Setup ──────────────────────────────────────────────────────────────────
@@ -131,6 +150,7 @@
       if (opts.tapped) cls += ' tapped';
       if (opts.pileSelected) cls += ' pile-selected';
       if (opts.pileCandidate) cls += ' pile-candidate';
+      if (opts.orderLocked) cls += ' order-locked';
       div.className = cls;
       const img = document.createElement('img');
       img.src = opts.flipped ? scryfallImg(name) + '&face=back' : scryfallImg(name);
@@ -143,6 +163,12 @@
         badge.className = 'card-badge';
         badge.textContent = opts.badge;
         div.appendChild(badge);
+      }
+      if (opts.orderSlot) {
+        const slot = document.createElement('span');
+        slot.className = 'order-slot';
+        slot.textContent = opts.orderSlot;
+        div.appendChild(slot);
       }
       return div;
     }
@@ -259,14 +285,11 @@
       // Row 5: library (pile candidates for us)
       const libCards = player.library.map((name, i) => {
         const key = `lib:${i}`;
-        const card = renderCard(name, {
-          pileSelected: isUs && pileSelected.has(key),
-          pileCandidate: isUs,
-        });
+        const card = renderCard(name, pileCardOpts(isUs, key));
         if (isUs) {
           card.addEventListener('click', (e) => {
             e.stopPropagation();
-            togglePile(key);
+            handlePileClick(key);
           });
         }
         return card;
@@ -285,14 +308,11 @@
       // Row 6: graveyard (pile candidates for us)
       const gyCards = player.graveyard.map((name, i) => {
         const key = `gy:${i}`;
-        const card = renderCard(name, {
-          pileSelected: isUs && pileSelected.has(key),
-          pileCandidate: isUs,
-        });
+        const card = renderCard(name, pileCardOpts(isUs, key));
         if (isUs) {
           card.addEventListener('click', (e) => {
             e.stopPropagation();
-            togglePile(key);
+            handlePileClick(key);
           });
         }
         return card;
@@ -305,7 +325,26 @@
     }
 
     // ── Pile selection ─────────────────────────────────────────────────────────
-    function togglePile(key) {
+    function pileCardOpts(isUs, key) {
+      if (!isUs) return {};
+      const selected = pileSelected.has(key);
+      return {
+        pileSelected: selected,
+        pileCandidate: true,
+        orderSlot: pilePhase === 'order' ? pileSlots.get(key) : undefined,
+        orderLocked: pilePhase === 'order' && !selected,
+      };
+    }
+
+    function handlePileClick(key) {
+      if (pilePhase === 'select') {
+        togglePileSelect(key);
+      } else {
+        togglePileSlot(key);
+      }
+    }
+
+    function togglePileSelect(key) {
       if (pileSelected.has(key)) {
         pileSelected.delete(key);
       } else if (pileSelected.size >= PILE_MAX) {
@@ -317,28 +356,129 @@
       renderAll();
     }
 
-    function splitPile(set) {
-      const out = { library: [], graveyard: [] };
-      for (const key of set) {
-        const [zone, idx] = key.split(':');
-        if (zone === 'lib') out.library.push(parseInt(idx, 10));
-        else if (zone === 'gy') out.graveyard.push(parseInt(idx, 10));
+    // In order phase: click one of the 5 picks. First click takes slot PILE_MAX
+    // (bottom of pile); next click takes the next-largest empty slot, etc.
+    // Clicking an already-ordered card frees its slot without touching others.
+    function togglePileSlot(key) {
+      if (!pileSelected.has(key)) return;
+      if (pileSlots.has(key)) {
+        pileSlots.delete(key);
+      } else {
+        const used = new Set(pileSlots.values());
+        for (let slot = PILE_MAX; slot >= 1; slot--) {
+          if (!used.has(slot)) { pileSlots.set(key, slot); break; }
+        }
       }
-      out.library.sort((a, b) => a - b);
-      out.graveyard.sort((a, b) => a - b);
+      renderAll();
+    }
+
+    function enterOrderPhase() {
+      if (pileSelected.size !== PILE_MAX) return;
+      pilePhase = 'order';
+      pileSlots = new Map();
+      renderAll();
+    }
+
+    function backToSelect() {
+      pilePhase = 'select';
+      pileSlots = new Map();
+      renderAll();
+    }
+
+    function confirmPile() {
+      if (pileSlots.size !== PILE_MAX) return;
+      showStatus('Pile confirmed');
+    }
+
+    function updatePileButtons() {
+      const confirm = document.getElementById('confirm-pile');
+      const back    = document.getElementById('edit-picks');
+      if (pilePhase === 'order') {
+        confirm.style.display = '';
+        confirm.textContent = 'Confirm pile';
+        confirm.disabled = pileSlots.size !== PILE_MAX;
+        back.style.display = '';
+      } else {
+        back.style.display = 'none';
+        if (pileSelected.size === PILE_MAX) {
+          confirm.style.display = '';
+          confirm.textContent = 'Confirm pile cards';
+          confirm.disabled = false;
+        } else {
+          confirm.style.display = 'none';
+        }
+      }
+    }
+
+    // Deterministic fallback slot ordering when the user hasn't ordered picks:
+    // library indices ascending, then graveyard indices ascending.
+    function keyOrder(a, b) {
+      const [za, ia] = a.split(':'); const [zb, ib] = b.split(':');
+      if (za !== zb) return za === 'lib' ? -1 : 1;
+      return parseInt(ia, 10) - parseInt(ib, 10);
+    }
+
+    // Build {library:[[idx,slot]], graveyard:[[idx,slot]]} for the wire format.
+    // If `slots` has all PILE_MAX entries, use its slot values; otherwise assign
+    // slots 1..N deterministically so the wire always carries an order.
+    function pileToWire(keys, slots) {
+      const keyList = [...keys];
+      const ordered = slots.size === PILE_MAX;
+      if (ordered) {
+        keyList.sort((a, b) => slots.get(a) - slots.get(b));
+      } else {
+        keyList.sort(keyOrder);
+      }
+      const out = { library: [], graveyard: [] };
+      keyList.forEach((key, i) => {
+        const [zone, idxStr] = key.split(':');
+        const idx = parseInt(idxStr, 10);
+        const slot = ordered ? slots.get(key) : (i + 1);
+        const arr = zone === 'lib' ? out.library : out.graveyard;
+        arr.push([idx, slot]);
+      });
       return out;
     }
 
-    function mergePile(pile) {
-      const set = new Set();
-      for (const i of pile.library || [])   set.add(`lib:${i}`);
-      for (const i of pile.graveyard || []) set.add(`gy:${i}`);
-      return set;
+    function wireToPile(pile) {
+      const map = new Map();
+      for (const [i, slot] of pile.library || [])   map.set(`lib:${i}`, slot);
+      for (const [i, slot] of pile.graveyard || []) map.set(`gy:${i}`, slot);
+      return map;
     }
 
     // ── Rendering ──────────────────────────────────────────────────────────────
+    function renderPileDisplay() {
+      const el = document.getElementById('pile-display');
+      el.innerHTML = '';
+      if (!currentData || pilePhase !== 'order' || pileSelected.size === 0) return;
+
+      const cardFor = (key) => {
+        const [zone, idxStr] = key.split(':');
+        const idx = parseInt(idxStr, 10);
+        const name = zone === 'lib'
+          ? currentData.us.library[idx]
+          : currentData.us.graveyard[idx];
+        const card = renderCard(name, { orderSlot: pileSlots.get(key), pileCandidate: true });
+        card.addEventListener('click', (e) => {
+          e.stopPropagation();
+          handlePileClick(key);
+        });
+        return card;
+      };
+
+      const ordered   = [...pileSelected].filter(k => pileSlots.has(k))
+                        .sort((a, b) => pileSlots.get(a) - pileSlots.get(b));
+      const unordered = [...pileSelected].filter(k => !pileSlots.has(k))
+                        .sort(keyOrder);
+
+      renderZone(el, 'Pile (top → bottom)',   ordered.map(cardFor),   { extraClass: 'pile-zone' });
+      renderZone(el, 'Picks (click to order)', unordered.map(cardFor), { extraClass: 'pile-zone unordered-tray' });
+    }
+
     function renderAll() {
       if (!currentData) return;
+      renderPileDisplay();
       renderBoard(document.getElementById('us-board'), currentData.us, true, currentData);
       renderBoard(document.getElementById('opp-board'), currentData.opp, false, currentData);
       document.getElementById('decision-log').textContent = (currentData.decision_log || []).join('\n');
@@ -348,13 +488,16 @@
       document.getElementById('content').style.display = '';
       document.getElementById('share').style.display = '';
       document.getElementById('reveal').style.display = pendingPile.size > 0 ? '' : 'none';
+      updatePileButtons();
     }
 
     // ── Generate scenario ──────────────────────────────────────────────────────
     function generate() {
       currentData = JSON.parse(run_scenario(sel.value));
       pileSelected = new Set();
-      pendingPile  = new Set();
+      pendingPile  = new Map();
+      pileSlots    = new Map();
+      pilePhase    = 'select';
       // Clear any shared URL state.
       if (window.location.hash.startsWith('#s=')) {
         window.history.replaceState(null, '', window.location.pathname);
@@ -369,8 +512,12 @@
     function share() {
       if (!currentData) return;
       try {
-        const source = (pileSelected.size === 0 && pendingPile.size > 0) ? pendingPile : pileSelected;
-        const pileObj = splitPile(source);
+        let pileObj;
+        if (pileSelected.size === 0 && pendingPile.size > 0) {
+          pileObj = pileToWire([...pendingPile.keys()], pendingPile);
+        } else {
+          pileObj = pileToWire([...pileSelected], pileSlots);
+        }
         const token = encode_snapshot(JSON.stringify(currentData), JSON.stringify(pileObj));
         const url = window.location.origin + window.location.pathname + '#s=' + token;
         window.history.replaceState(null, '', '#s=' + token);
@@ -387,8 +534,10 @@
 
     function revealPile() {
       if (pendingPile.size === 0) return;
-      for (const key of pendingPile) pileSelected.add(key);
-      pendingPile = new Set();
+      pileSelected = new Set(pendingPile.keys());
+      pileSlots = new Map(pendingPile);
+      pilePhase = 'order';
+      pendingPile = new Map();
       renderAll();
     }
 
@@ -415,8 +564,10 @@
     // the puzzle before revealing. Viewer's own picks live in pileSelected.
     function applyDecodedSnapshot(decoded) {
       currentData = decoded.scenario;
-      pendingPile = mergePile(decoded.pile || {});
+      pendingPile = wireToPile(decoded.pile || {});
       pileSelected = new Set();
+      pileSlots = new Map();
+      pilePhase = 'select';
     }
 
     function loadFromUrl() {
@@ -439,6 +590,11 @@
     document.getElementById('run').addEventListener('click', generate);
     document.getElementById('share').addEventListener('click', share);
     document.getElementById('reveal').addEventListener('click', revealPile);
+    document.getElementById('confirm-pile').addEventListener('click', () => {
+      if (pilePhase === 'select') enterOrderPhase();
+      else confirmPile();
+    });
+    document.getElementById('edit-picks').addEventListener('click', backToSelect);
     document.getElementById('load-token').addEventListener('click', () => {
       const input = document.getElementById('token-input');
       const token = extractToken(input.value);
