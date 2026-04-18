@@ -79,6 +79,7 @@
     <select id="matchup"></select>
     <button id="run">Generate</button>
     <button id="share" style="display:none">Share</button>
+    <button id="reveal" style="display:none">Reveal pile</button>
     <input id="token-input" type="text" placeholder="Paste snapshot token…" style="background:#16213e;color:#e0e0e0;border:1px solid #0f3460;padding:0.3rem 0.5rem;font-size:0.75rem;border-radius:4px;width:18ch;font-family:monospace;">
     <button id="load-token">Load</button>
     <span id="share-status" class="share-status" style="opacity:0"></span>
@@ -104,8 +105,10 @@
     await init();
 
     // ── State ──────────────────────────────────────────────────────────────────
-    let currentData = null;   // ScenarioResult object
-    let pileSelected = new Set();  // indices into currentData.us.library
+    let currentData = null;        // ScenarioResult object
+    let pileSelected = new Set();  // user's picks: "lib:i" or "gy:i" strings
+    let pendingPile  = new Set();  // loaded-but-hidden pile (puzzle mode)
+    const PILE_MAX = 5;
 
     // ── Setup ──────────────────────────────────────────────────────────────────
     const sel = document.getElementById('matchup');
@@ -255,22 +258,23 @@
 
       // Row 5: library (pile candidates for us)
       const libCards = player.library.map((name, i) => {
-        const isPile = isUs && pileSelected.has(i);
+        const key = `lib:${i}`;
         const card = renderCard(name, {
-          pileSelected: isPile,
+          pileSelected: isUs && pileSelected.has(key),
           pileCandidate: isUs,
         });
         if (isUs) {
           card.addEventListener('click', (e) => {
             e.stopPropagation();
-            togglePile(i);
+            togglePile(key);
           });
         }
         return card;
       });
       const pileCount = pileSelected.size;
+      const hiddenNote = pendingPile.size > 0 ? ' · hidden pile loaded' : '';
       const pileSuffix = isUs
-        ? `<span class="pile-count${pileCount === 5 ? ' complete' : ''}">${pileCount}/5 pile</span>`
+        ? `<span class="pile-count${pileCount === PILE_MAX ? ' complete' : ''}">${pileCount}/${PILE_MAX} pile${hiddenNote}</span>`
         : '';
       renderZone(el, 'Library', libCards, {
         columns: true,
@@ -278,8 +282,21 @@
         labelSuffix: pileSuffix,
       });
 
-      // Row 6: graveyard
-      const gyCards = player.graveyard.map(name => renderCard(name));
+      // Row 6: graveyard (pile candidates for us)
+      const gyCards = player.graveyard.map((name, i) => {
+        const key = `gy:${i}`;
+        const card = renderCard(name, {
+          pileSelected: isUs && pileSelected.has(key),
+          pileCandidate: isUs,
+        });
+        if (isUs) {
+          card.addEventListener('click', (e) => {
+            e.stopPropagation();
+            togglePile(key);
+          });
+        }
+        return card;
+      });
       renderZone(el, 'Graveyard', gyCards, { grid: true, count: player.graveyard.length });
 
       // Row 7: exile
@@ -288,13 +305,35 @@
     }
 
     // ── Pile selection ─────────────────────────────────────────────────────────
-    function togglePile(index) {
-      if (pileSelected.has(index)) {
-        pileSelected.delete(index);
+    function togglePile(key) {
+      if (pileSelected.has(key)) {
+        pileSelected.delete(key);
+      } else if (pileSelected.size >= PILE_MAX) {
+        showStatus(`Pile full (${PILE_MAX}/${PILE_MAX})`);
+        return;
       } else {
-        pileSelected.add(index);
+        pileSelected.add(key);
       }
       renderAll();
+    }
+
+    function splitPile(set) {
+      const out = { library: [], graveyard: [] };
+      for (const key of set) {
+        const [zone, idx] = key.split(':');
+        if (zone === 'lib') out.library.push(parseInt(idx, 10));
+        else if (zone === 'gy') out.graveyard.push(parseInt(idx, 10));
+      }
+      out.library.sort((a, b) => a - b);
+      out.graveyard.sort((a, b) => a - b);
+      return out;
+    }
+
+    function mergePile(pile) {
+      const set = new Set();
+      for (const i of pile.library || [])   set.add(`lib:${i}`);
+      for (const i of pile.graveyard || []) set.add(`gy:${i}`);
+      return set;
     }
 
     // ── Rendering ──────────────────────────────────────────────────────────────
@@ -308,13 +347,14 @@
       document.getElementById('loading').style.display = 'none';
       document.getElementById('content').style.display = '';
       document.getElementById('share').style.display = '';
+      document.getElementById('reveal').style.display = pendingPile.size > 0 ? '' : 'none';
     }
 
     // ── Generate scenario ──────────────────────────────────────────────────────
     function generate() {
       currentData = JSON.parse(run_scenario(sel.value));
-      // Default: all library cards are pile-selected.
-      pileSelected = new Set(currentData.us.library.map((_, i) => i));
+      pileSelected = new Set();
+      pendingPile  = new Set();
       // Clear any shared URL state.
       if (window.location.hash.startsWith('#s=')) {
         window.history.replaceState(null, '', window.location.pathname);
@@ -323,11 +363,15 @@
     }
 
     // ── Share ──────────────────────────────────────────────────────────────────
+    // Shares whatever the user currently has highlighted. If a hidden pile is
+    // still unrevealed, prefer that — the shared URL is meant to preserve the
+    // original puzzle, not the viewer's empty guess.
     function share() {
       if (!currentData) return;
       try {
-        const pileArr = Array.from(pileSelected).sort((a, b) => a - b);
-        const token = encode_snapshot(JSON.stringify(currentData), JSON.stringify(pileArr));
+        const source = (pileSelected.size === 0 && pendingPile.size > 0) ? pendingPile : pileSelected;
+        const pileObj = splitPile(source);
+        const token = encode_snapshot(JSON.stringify(currentData), JSON.stringify(pileObj));
         const url = window.location.origin + window.location.pathname + '#s=' + token;
         window.history.replaceState(null, '', '#s=' + token);
         document.getElementById('token-input').value = token;
@@ -339,6 +383,13 @@
       } catch (e) {
         showStatus('Error: ' + e);
       }
+    }
+
+    function revealPile() {
+      if (pendingPile.size === 0) return;
+      for (const key of pendingPile) pileSelected.add(key);
+      pendingPile = new Set();
+      renderAll();
     }
 
     function showStatus(msg) {
@@ -360,13 +411,19 @@
       return '';
     }
 
+    // Shared state loads into pendingPile (hidden) so the viewer can solve
+    // the puzzle before revealing. Viewer's own picks live in pileSelected.
+    function applyDecodedSnapshot(decoded) {
+      currentData = decoded.scenario;
+      pendingPile = mergePile(decoded.pile || {});
+      pileSelected = new Set();
+    }
+
     function loadFromUrl() {
       const token = extractToken(window.location.hash);
       if (!token) return false;
       try {
-        const decoded = JSON.parse(decode_snapshot(token));
-        currentData = decoded.scenario;
-        pileSelected = new Set(decoded.pile || []);
+        applyDecodedSnapshot(JSON.parse(decode_snapshot(token)));
         renderAll();
         return true;
       } catch (e) {
@@ -381,6 +438,7 @@
     }
     document.getElementById('run').addEventListener('click', generate);
     document.getElementById('share').addEventListener('click', share);
+    document.getElementById('reveal').addEventListener('click', revealPile);
     document.getElementById('load-token').addEventListener('click', () => {
       const input = document.getElementById('token-input');
       const token = extractToken(input.value);
@@ -389,9 +447,7 @@
         return;
       }
       try {
-        const decoded = JSON.parse(decode_snapshot(token));
-        currentData = decoded.scenario;
-        pileSelected = new Set(decoded.pile || []);
+        applyDecodedSnapshot(JSON.parse(decode_snapshot(token)));
         renderAll();
         window.history.replaceState(null, '', '#s=' + token);
         input.value = token;
