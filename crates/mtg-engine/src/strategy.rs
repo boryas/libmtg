@@ -230,20 +230,22 @@ pub trait Strategy {
 
 /// A do-nothing strategy: no attacks/blocks, never mulligans, and the trait's
 /// default decisions everywhere else (e.g. `choose_mana_ability` = `auto_tap_plan`,
-/// `choose_targets` = `pick_targets`). Used as the `SimState::with_strategy`
-/// fallback when a player has no strategy installed (tests / uninitialized
-/// state), so resolution-time decisions always have *some* policy to consult.
-pub struct DefaultStrategy {
+/// `choose_targets` = `pick_targets`). A real, reusable `Strategy` — most notably
+/// the **goldfish opponent** (a player that never interacts) — that apps install
+/// explicitly via `set_strategy`. It is NOT substituted silently in production:
+/// `with_strategy` only falls back to it under `cfg(test)`; outside tests a missing
+/// strategy panics (a player must always have one).
+pub struct AlwaysPass {
     player_id: PlayerId,
 }
 
-impl DefaultStrategy {
-    pub(crate) fn new(player_id: PlayerId) -> Self {
-        DefaultStrategy { player_id }
+impl AlwaysPass {
+    pub fn new(player_id: PlayerId) -> Self {
+        AlwaysPass { player_id }
     }
 }
 
-impl Strategy for DefaultStrategy {
+impl Strategy for AlwaysPass {
     fn declare_attackers(&mut self, _state: &SimState) -> Vec<(ObjId, Option<ObjId>)> { Vec::new() }
     fn declare_blockers(&mut self, _state: &SimState) -> Vec<(ObjId, ObjId)> { Vec::new() }
     fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
@@ -318,14 +320,14 @@ impl Strategy for TestStrategy {
             ChoiceRequest::MayPutOnBattlefield { candidates } if self.put_first_candidate =>
                 ChoiceResult::OptionalObject(candidates.first().copied()),
             // Anything unset falls back to the trait default policy.
-            _ => DefaultStrategy::new(self.player_id).resolve_choice(source, req, state),
+            _ => AlwaysPass::new(self.player_id).resolve_choice(source, req, state),
         }
     }
 
     fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool {
         match self.surveil {
             Some(mill) => mill,
-            None => DefaultStrategy::new(self.player_id).surveil_choice(id, state),
+            None => AlwaysPass::new(self.player_id).surveil_choice(id, state),
         }
     }
 
@@ -333,7 +335,7 @@ impl Strategy for TestStrategy {
         if self.sacrifice_min_id {
             candidates.iter().min_by_key(|id| id.0).copied()
         } else {
-            DefaultStrategy::new(self.player_id).sacrifice_choice(who, candidates, state)
+            AlwaysPass::new(self.player_id).sacrifice_choice(who, candidates, state)
         }
     }
 
@@ -341,7 +343,7 @@ impl Strategy for TestStrategy {
         if self.order_reverse {
             cards.iter().rev().copied().collect()
         } else {
-            DefaultStrategy::new(self.player_id).order_top_library(cards, state)
+            AlwaysPass::new(self.player_id).order_top_library(cards, state)
         }
     }
 }

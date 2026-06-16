@@ -19,6 +19,7 @@ pub(crate) use planner::*;
 
 mod snapshot;
 mod objective;
+pub use objective::Objective;
 pub use snapshot::{
     BoardSnapshot, PlayerSnapshot, CardId, CardEntry, PermanentEntry,
     Stage, CardRegistry, SnapshotError,
@@ -27,12 +28,15 @@ pub use snapshot::{
 };
 
 mod strategy;
-use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
+// Public decision API: the trait every player decision flows through, and the
+// reusable do-nothing strategy (goldfish opponent / test stub).
+pub use strategy::{Strategy, AlwaysPass};
+use strategy::{DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
                CardCategory, dd_categorize,
                dd_plan_gap, dd_card_fills, opp_plan_gap, opp_card_fills};
 #[cfg(test)] use strategy::{dd_should_mulligan, opp_should_mulligan};
 
-mod ir;
+pub mod ir;
 
 mod playable;
 
@@ -1518,7 +1522,7 @@ pub struct PlayerState {
     library_order: std::collections::VecDeque<ObjId>,
     /// This player's decision policy (composed `Player { state, strategy }`). `None`
     /// until installed at sim init. The engine reaches it only via
-    /// `SimState::with_strategy` (which falls back to `DefaultStrategy`), so a
+    /// `SimState::with_strategy` (which falls back to `AlwaysPass`), so a
     /// player's agency is never shortcut in engine code.
     strategy: Option<Box<dyn Strategy>>,
 }
@@ -1814,9 +1818,10 @@ impl SimState {
     /// Run `f` with player `p`'s `Strategy` and an immutable view of the whole
     /// state. The strategy is moved out for the duration (breaking the
     /// self-borrow: a strategy lives *on* the state it must observe), then put
-    /// back; a `DefaultStrategy` stands in if none is installed. This is the
-    /// single channel through which engine code reaches a player's decisions —
-    /// resolution included — so player agency is never shortcut inline.
+    /// back. This is the single channel through which engine code reaches a
+    /// player's decisions — resolution included — so player agency is never
+    /// shortcut inline. A missing strategy panics in production (every player must
+    /// have one); under `cfg(test)` it falls back to `AlwaysPass` for bare states.
     /// Install player `p`'s decision policy (the composed Player { state, strategy }).
     pub(crate) fn set_strategy(&mut self, p: PlayerId, s: Box<dyn crate::strategy::Strategy>) {
         self.player_mut(p).strategy = Some(s);
@@ -1830,18 +1835,22 @@ impl SimState {
         // Move the strategy out so it and the rest of `self` are disjoint — `f`
         // gets both `&mut Strategy` and `&mut SimState` (needed by the cast/
         // activate submachines), with no self-borrow. Restored afterward.
-        // Re-entrant `with_strategy(p)` for the same `p` while it's held out
-        // falls back to `DefaultStrategy`; the engine never nests same-player
-        // decisions, so that doesn't arise in practice.
         match self.player_mut(p).strategy.take() {
             Some(mut s) => {
                 let r = f(&mut *s, self);
                 self.player_mut(p).strategy = Some(s);
                 r
             }
+            // No strategy installed (or a re-entrant same-player call, which the engine
+            // never makes). In production every player has a strategy (run_game installs
+            // both), so this is a bug — don't silently no-op. Tests resolve bare states
+            // via the AlwaysPass fallback.
             None => {
-                let mut s = crate::strategy::DefaultStrategy::new(p);
-                f(&mut s, self)
+                #[cfg(test)]
+                { let mut s = crate::strategy::AlwaysPass::new(p); f(&mut s, self) }
+                #[cfg(not(test))]
+                { panic!("with_strategy({p:?}): no strategy installed — the engine never \
+                          substitutes a silent no-op in production"); }
             }
         }
     }

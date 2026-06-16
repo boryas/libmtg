@@ -1374,7 +1374,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
 pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
         let all_targets = legal_targets(&ctx.target_spec, ctx.controller, ObjId(0), state);
-        // DefaultStrategy::choose_targets falls back to pick_targets, matching the
+        // AlwaysPass::choose_targets falls back to pick_targets, matching the
         // old `unwrap_or_else(pick_targets)`.
         let chosen_targets = state.with_strategy(ctx.controller, |s, st|
             s.choose_targets(st, ObjId(0), &all_targets, &ctx.target_spec));
