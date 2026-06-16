@@ -20,19 +20,19 @@ use crate::ObjId;
 /// expand into a single `Branch` decision plus the decisions inside the
 /// chosen branch (collected after the chooser commits).
 #[derive(Clone, Default)]
-pub(crate) struct CostSchema {
+pub struct CostSchema {
     pub decisions: Vec<Decision>,
 }
 
 #[derive(Clone)]
-pub(crate) struct Decision {
+pub struct Decision {
     /// `BindEnv` key the executor will read this decision's answer from.
     pub binding: &'static str,
     pub kind: DecisionKind,
 }
 
 #[derive(Clone)]
-pub(crate) enum DecisionKind {
+pub enum DecisionKind {
     /// Pick `count` distinct ObjIds from `candidates`. Used by Tap, Sacrifice,
     /// Discard, Exile, ReturnFromBattlefield — anything that targets one or
     /// more objects matching a Filter at announcement time.
@@ -64,7 +64,7 @@ pub(crate) enum DecisionKind {
 /// sensibly (e.g. a life-cost X is bounded by remaining life, mana-X by
 /// available mana).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum NumberKind {
+pub enum NumberKind {
     /// Pay `n` life. Bounded by `state.player(who).life - 1`.
     XLife,
     /// Pay `{n}` generic mana. Bounded by available mana.
@@ -86,7 +86,7 @@ impl CostSchema {
 /// Unrecoverable error from the cost executor. Distinct from `ManaShortage`
 /// (which is recoverable by activating mana abilities).
 #[derive(Clone, Debug)]
-pub(crate) enum PayError {
+pub enum PayError {
     /// A `Decision` in the schema was not answered in `BindEnv`.
     MissingBinding(&'static str),
     /// A binding was present but had the wrong shape for its decision.

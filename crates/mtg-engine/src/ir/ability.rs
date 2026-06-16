@@ -6,14 +6,14 @@ use crate::ir::expr::{Expr, Filter};
 
 /// A card-authored ability. One card has `Vec<Ability>`.
 #[derive(Clone)]
-pub(crate) struct Ability {
+pub struct Ability {
     pub kind: AbilityKind,
     pub text: Option<&'static str>, // Oracle snippet for docs / round-trip
 }
 
 /// The five CR ability kinds. Mirrors the event-timing taxonomy.
 #[derive(Clone)]
-pub(crate) enum AbilityKind {
+pub enum AbilityKind {
     /// "When/whenever/at [event], [effect]." Fires *after* the event.
     Triggered {
         spec: TriggerSpec,
@@ -94,7 +94,7 @@ pub(crate) enum AbilityKind {
 
 /// Trigger specification — what event fires this ability.
 #[derive(Clone)]
-pub(crate) enum TriggerSpec {
+pub enum TriggerSpec {
     /// Event pattern + optional extra condition (typically controller scope
     /// or object identity).
     When {
@@ -110,7 +110,7 @@ pub(crate) enum TriggerSpec {
 
 /// Which player's step triggers this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StepScope {
+pub enum StepScope {
     You,
     EachOpponent,
     EachPlayer,
@@ -120,7 +120,7 @@ pub(crate) enum StepScope {
 /// Pattern over `GameEvent`. Matches structurally — the engine translates each
 /// `GameEvent` variant into field bindings for the enclosing expression tree.
 #[derive(Clone)]
-pub(crate) enum EventPattern {
+pub enum EventPattern {
     /// Any event — used rarely (Orcish Bowmasters fires on any draw).
     Any,
 
@@ -182,7 +182,7 @@ pub(crate) enum EventPattern {
 
 /// How a replacement effect changes the event.
 #[derive(Clone)]
-pub(crate) enum ReplacementBody {
+pub enum ReplacementBody {
     /// Replace the event with a different action. The action sees the matched
     /// event's bindings (e.g. `Var("triggered_obj")`) via the `BindEnv`
     /// populated by `match_event_pattern`. Used for: "enters tapped" composed
@@ -203,7 +203,7 @@ pub(crate) enum ReplacementBody {
 /// `let CostBody::Ir(action) = &x.costs` continue to read clearly; future
 /// cleanup can make this a struct or alias.
 #[derive(Clone)]
-pub(crate) enum CostBody {
+pub enum CostBody {
     Ir(Action),
 }
 
@@ -400,7 +400,7 @@ fn action_replicate_cost(a: &Action) -> Option<crate::ManaCost> {
 
 /// One mode of a spell under `AbilityKind::OnResolve`.
 #[derive(Clone)]
-pub(crate) struct IrSpellMode {
+pub struct IrSpellMode {
     pub target_spec: crate::TargetSpec,
     pub body: Action,
 }

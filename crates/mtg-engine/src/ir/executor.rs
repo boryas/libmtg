@@ -23,7 +23,7 @@ use std::collections::HashMap;
 /// The "invocation frame": who's the source, who's "you", what event (if any)
 /// triggered us, plus per-step user bindings.
 #[derive(Clone, Default)]
-pub(crate) struct BindEnv {
+pub struct BindEnv {
     pub(crate) source: Option<ObjId>,
     pub(crate) controller: Option<PlayerId>,
     pub(crate) subj: Option<Value>,
@@ -73,7 +73,7 @@ impl BindEnv {
 
 // ── Execute (Stage-2 slice 2, still stubbed) ────────────────────────────────
 
-pub(crate) enum ExecResult {
+pub enum ExecResult {
     Ok,
     Unimplemented(&'static str),
     /// `Action::PayMana` reached with insufficient pool. The cost driver should
@@ -1951,7 +1951,7 @@ fn zone_id_of_obj(state: &SimState, id: ObjId) -> Option<ZoneId> {
 // which layer it modifies, and we simply list them.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Axis {
+pub enum Axis {
     /// Layer 1: full-copy effects. Writes to Copy implicitly invalidate all
     /// downstream characteristic axes, so `writes_of(CopyOf)` expands to the
     /// full characteristic set rather than a bare `Copy`.
@@ -1995,7 +1995,7 @@ pub(crate) enum Axis {
 }
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct CeDeps {
+pub struct CeDeps {
     pub reads: Vec<Axis>,
     pub writes: Vec<Axis>,
 }

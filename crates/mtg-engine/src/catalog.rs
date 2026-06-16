@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
-pub(crate) enum Keyword {
+pub enum Keyword {
     Flying,
     Haste,
     Shadow,
@@ -22,7 +22,7 @@ pub(crate) enum Keyword {
 
 /// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
 #[derive(Clone, Copy, Default, Debug)]
-pub(crate) struct Keywords(u32);
+pub struct Keywords(u32);
 
 impl Keywords {
     pub(crate) fn contains(self, kw: Keyword) -> bool {
@@ -41,7 +41,7 @@ impl Keywords {
 // ── Mana cost ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Default, Debug)]
-pub(crate) struct ManaCost {
+pub struct ManaCost {
     pub(crate) w: i32,
     pub(crate) u: i32,
     pub(crate) b: i32,
@@ -121,7 +121,7 @@ pub(crate) fn mana_value(cost: &str) -> i32 {
 
 /// Where the source object must be located for an ability to be activated.
 #[derive(Clone, Default)]
-pub(crate) enum SourceZone {
+pub enum SourceZone {
     #[default]
     Battlefield,
     Hand,
@@ -140,7 +140,7 @@ pub(crate) enum SourceZone {
 /// - `Sorcery` — only during priority when the stack is empty and it's the controller's
 ///    main phase (e.g. loyalty abilities, "activate only as a sorcery").
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ActivationTiming {
+pub enum ActivationTiming {
     #[default]
     Default,
     Instant,
@@ -150,10 +150,10 @@ pub(crate) enum ActivationTiming {
 
 /// Factory for a spell effect: takes (controller, source_id, chosen_x) and returns the resolved `Effect`.
 /// `chosen_x` is the strategy-chosen X value; 0 for spells without an X cost.
-pub(crate) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync>;
+pub type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
-pub(crate) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
+pub type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
 
 /// One way to pay for a spell instead of (or in addition to) its mana cost.
 /// Options are tried in order; the first affordable one is taken.
@@ -165,7 +165,7 @@ pub(crate) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effec
 /// `condition` — optional rules restriction on when this cost may be chosen (CR 118.9b),
 /// e.g. "If it's not your turn" on Force of Negation. `None` = always available.
 #[derive(Clone, Default)]
-pub(crate) struct AlternateCost {
+pub struct AlternateCost {
     pub(crate) costs: crate::ir::ability::CostBody,
     pub(crate) hand_min: i32,
     pub(crate) prob: Option<f64>,
@@ -178,7 +178,7 @@ pub(crate) struct AlternateCost {
 /// Describes a choice made at ability-resolution time (CR: "choose" ≠ "target").
 /// The engine enumerates valid objects and delegates the pick to `Strategy::choose_for_effect`.
 #[derive(Clone)]
-pub(crate) struct ChoiceSpec {
+pub struct ChoiceSpec {
     /// Whose objects to enumerate (relative to the ability's controller).
     pub(crate) controller: Who,
     /// Zone the chosen object must be in.
@@ -213,7 +213,7 @@ pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: 
 /// Preconditions are derived automatically: ability is available iff
 /// every cost component can be paid and a valid target exists (if required).
 #[derive(Clone)]
-pub(crate) struct AbilityDef {
+pub struct AbilityDef {
     /// Where the source must be located for this ability to be activatable.
     /// Default: Battlefield. Set to Hand for cycling, channel, ninjutsu, etc.
     pub(crate) source_zone: SourceZone,
@@ -318,7 +318,7 @@ fn action_includes_paylife_positive(a: &crate::ir::action::Action) -> bool {
 /// `who` — resolved controller; `color` — the specific color needed (`None` = generic slot).
 /// Fixed-color sources (e.g. Islands) ignore `color`; any-color sources (e.g. Lotus Petal)
 /// use `color` to produce exactly the requested pip.
-pub(crate) type ManaEffectFactory =
+pub type ManaEffectFactory =
     std::sync::Arc<dyn Fn(PlayerId, Option<Color>) -> Effect + Send + Sync>;
 
 /// How a permanent (or hand card) produces mana.
@@ -331,7 +331,7 @@ pub(crate) type ManaEffectFactory =
 ///                   can only be activated (and counts toward potential mana) if the predicate
 ///                   returns true. Used for Metalcraft, etc.
 #[derive(Clone)]
-pub(crate) struct ManaAbility {
+pub struct ManaAbility {
     pub(crate) source_zone: SourceZone,
     pub(crate) costs: crate::ir::ability::CostBody,
     pub(crate) produces: Vec<Color>,
@@ -365,7 +365,7 @@ impl Default for ManaAbility {
 /// One of the five basic land subtypes. Closed set (CR 205.3i); has not grown
 /// in the game's history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BasicLandType {
+pub enum BasicLandType {
     Plains,
     Island,
     Swamp,
@@ -417,7 +417,7 @@ impl BasicLandType {
 
 /// Set of basic land subtypes, stored as a bitset. `Copy` and allocation-free.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct LandTypes(u8);
+pub struct LandTypes(u8);
 
 impl LandTypes {
     pub(crate) fn new() -> Self {
@@ -448,14 +448,14 @@ impl LandTypes {
 // ── Per-variant data structs ──────────────────────────────────────────────────
 
 #[derive(Clone, Default)]
-pub(crate) struct LandData {
+pub struct LandData {
     pub(crate) land_types: LandTypes,
     pub(crate) mana_abilities: Vec<ManaAbility>,
     pub(crate) abilities: Vec<AbilityDef>,
 }
 
 #[derive(Clone)]
-pub(crate) struct CreatureData {
+pub struct CreatureData {
     pub(crate) mana_cost: String,
     // `power` and `toughness` are private — always read through the materialized `CardDef`
     // (which folds in counters and CE modifiers). Write only via `adjust_pt`.
@@ -471,7 +471,7 @@ pub(crate) struct CreatureData {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ArtifactData {
+pub struct ArtifactData {
     pub(crate) mana_cost: String,
     pub(crate) abilities: Vec<AbilityDef>,
     pub(crate) mana_abilities: Vec<ManaAbility>,
@@ -480,7 +480,7 @@ pub(crate) struct ArtifactData {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct EnchantmentData {
+pub struct EnchantmentData {
     pub(crate) abilities: Vec<AbilityDef>,
 }
 
@@ -584,7 +584,7 @@ impl CreatureData {
 
 /// One mode of a spell: its targeting requirement and effect factory.
 #[derive(Clone)]
-pub(crate) struct SpellMode {
+pub struct SpellMode {
     pub(crate) target_spec: TargetSpec,
     pub(crate) factory: SpellFactory,
 }
@@ -593,7 +593,7 @@ pub(crate) struct SpellMode {
 /// Non-modal spells have a single mode; modal spells ("Choose one —") have two or more.
 /// Mode is chosen at cast time (CR 700.2a) and stored in `CostsPaidCtx::chosen_mode`.
 #[derive(Clone)]
-pub(crate) enum SpellModes {
+pub enum SpellModes {
     /// Non-modal: exactly one mode.
     Single(SpellMode),
     /// Modal (CR 700.2): two or more modes, chosen at cast time via `ChoiceRequest::Mode`.
@@ -630,7 +630,7 @@ impl SpellModes {
 
 /// Spell data shared by Instant and Sorcery variants.
 #[derive(Clone)]
-pub(crate) struct SpellData {
+pub struct SpellData {
     pub(crate) mana_cost: String,
     pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
@@ -652,14 +652,14 @@ impl Default for SpellData {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct PlaneswalkerData {
+pub struct PlaneswalkerData {
     pub(crate) mana_cost: String,
     pub(crate) loyalty: i32,
     pub(crate) abilities: Vec<AbilityDef>,
 }
 
 #[derive(Clone)]
-pub(crate) enum CardKind {
+pub enum CardKind {
     Land(LandData),
     Creature(CreatureData),
     Artifact(ArtifactData),
@@ -673,7 +673,7 @@ pub(crate) enum CardKind {
 /// `Normal` = single-faced (default). `DoubleFaced` = transform DFC (e.g. Tamiyo).
 /// `Split` = two castable halves (split cards, adventures).
 #[derive(Clone, Default, Debug, PartialEq)]
-pub(crate) enum CardLayout {
+pub enum CardLayout {
     #[default]
     Normal,
     DoubleFaced,
@@ -691,7 +691,7 @@ pub(crate) enum CardLayout {
 /// `check` returns `Some(targets)` if the replacement applies to an event; `make_effect` builds
 /// the closure that runs instead of the original event.
 #[derive(Clone)]
-pub(crate) struct ReplacementDef {
+pub struct ReplacementDef {
     pub(crate) check: ReplacementCheckFn,
     /// Factory: called at evaluation time with `(source_id, controller)`.
     /// CardDef-specific data is captured inside the factory at card-load time.
@@ -707,7 +707,7 @@ pub(crate) struct ReplacementDef {
 /// Checked before replacements in `fire_event`. Takes `&SimState` so type/zone/controller
 /// checks can be performed without string dispatch.
 #[derive(Clone)]
-pub(crate) struct ProhibitionDef {
+pub struct ProhibitionDef {
     pub(crate) check: ProhibitionCheckFn,
     /// Predicate controlling when this prohibition is active.
     /// Default: source is on the battlefield (static ability prohibitions).
@@ -785,7 +785,7 @@ pub struct CardDef {
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
 /// Called when the object enters the battlefield; `source_id` and `controller` are bound then.
-pub(crate) type StaticAbilityDef =
+pub type StaticAbilityDef =
     std::sync::Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>;
 
 impl CardDef {
@@ -1131,7 +1131,7 @@ pub(crate) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef 
 
 /// Card category used by the engine and predicates.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub(crate) enum CardType {
+pub enum CardType {
     Land,
     Creature,
     Planeswalker,

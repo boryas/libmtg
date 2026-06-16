@@ -46,12 +46,12 @@ mod tests;
 /// Opaque game object identifier. Every player, card, token, and stack ability
 /// gets one at construction time and keeps it through all zone changes.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
-pub(crate) struct ObjId(u64);
+pub struct ObjId(u64);
 
 /// Type of a counter placed on a game object.
 /// Counters persist across zone changes (stored on `GameObject`, not `BattlefieldState`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum CounterType {
+pub enum CounterType {
     /// Placed on cards exiled by Dauthi Voidwalker's replacement effect.
     Void,
     /// Placed on Engineered Explosives (and similar) via sunburst on entry.
@@ -85,7 +85,7 @@ impl std::fmt::Display for PlayerId {
 
 /// Zone a card currently occupies.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum Zone {
+pub enum Zone {
     Library,
     Hand { known: bool },   // known = identity visible to opponent
     Stack,
@@ -97,7 +97,7 @@ pub(crate) enum Zone {
 /// Context recording which objects moved during cost payment.
 /// Carried on stack items so that resolution effects can inspect what was paid.
 #[derive(Clone, Default)]
-pub(crate) struct CostsPaidCtx {
+pub struct CostsPaidCtx {
     /// ObjIds of all objects moved as cost (exiled, discarded, sacrificed, returned).
     pub(crate) objects_moved: Vec<ObjId>,
     /// For each `ReturnFromBattlefield` payment, the `attack_target` the returned
@@ -119,7 +119,7 @@ pub(crate) struct CostsPaidCtx {
 /// Spell-on-stack state for a card while it's on the stack.
 /// Populated at cast time; cleared when the spell resolves or is countered.
 #[derive(Clone)]
-struct SpellState {
+pub struct SpellState {
     effect: Option<Effect>,
     chosen_targets: Vec<ObjId>,
     /// True when the back face of a split card was cast (e.g. an adventure instant).
@@ -132,7 +132,7 @@ struct SpellState {
 /// Replaces SimPermanent + SimLand. Whether a permanent is a land/creature/etc. is determined
 /// by looking up its CardDef from the catalog.
 #[derive(Clone)]
-struct BattlefieldState {
+pub struct BattlefieldState {
     tapped: bool,
     damage: i32,
     entered_this_turn: bool,
@@ -178,7 +178,7 @@ impl BattlefieldState {
 /// the graveyard) are unrepresentable. `GameObject::zone()` derives the coarse
 /// `Zone` from the variant. Players/emblems will join as their own variants —
 /// kind is a separate concern from zone (a player has no zone at all).
-pub(crate) enum ObjectRole {
+pub enum ObjectRole {
     Library,
     Hand { known: bool },
     Battlefield(BattlefieldState),
@@ -315,7 +315,7 @@ impl GameObject {
 /// The ability's controller and display name live on the `GameObject` itself
 /// (`owner`/`controller` and `catalog_key`).
 #[derive(Clone)]
-pub(crate) struct AbilityState {
+pub struct AbilityState {
     pub(crate) effect: Effect,
     pub(crate) chosen_targets: Vec<ObjId>,
     pub(crate) costs_paid_ctx: CostsPaidCtx,
@@ -332,7 +332,7 @@ pub(crate) struct AbilityState {
 
 /// Zones a card or permanent can occupy.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum ZoneId {
+pub enum ZoneId {
     Hand,
     Library,
     Battlefield,
@@ -345,7 +345,7 @@ pub(crate) enum ZoneId {
 /// trigger fires. Owned strings to avoid lifetime issues when pushing onto the stack.
 #[derive(Clone)]
 #[allow(dead_code)]
-pub(crate) enum GameEvent {
+pub enum GameEvent {
     /// A card moved from one zone to another (ETB, GY→Exile, etc.).
     /// Does NOT include drawing — use `Draw` for that.
     ZoneChange {
@@ -426,7 +426,7 @@ pub(crate) enum GameEvent {
 /// Data stored with a triggered ability waiting to be pushed onto the stack.
 /// The effect closure captures all context (targets, source data) at trigger-push time.
 #[derive(Clone)]
-pub(crate) struct TriggerContext {
+pub struct TriggerContext {
     /// Display name of the source — used for stack item naming and logging.
     pub(crate) source_name: String,
     /// Player who controls that permanent.
@@ -441,24 +441,24 @@ pub(crate) struct TriggerContext {
 
 /// Signature for a per-card trigger check function.
 /// Inspects the event and game state; if a trigger fires, appends a `TriggerContext` to `pending`.
-pub(crate) type TriggerCheckFn =
+pub type TriggerCheckFn =
     std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState, &mut Vec<TriggerContext>) + Send + Sync>;
 
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
 /// `source_id` is passed so self-ETB checks work without string dispatch.
-pub(crate) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> Option<Vec<ObjId>> + Send + Sync>;
+pub type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> Option<Vec<ObjId>> + Send + Sync>;
 
 /// Signature for a "can't happen" prohibition check (CR 614.17).
 /// Returns true if the event is prohibited. Takes `&SimState` so checks can inspect card types,
 /// controller, etc. Prohibition checks run before replacement effects (CR 614.17 — can't effects
 /// aren't replacements and take precedence over permissive effects).
-pub(crate) type ProhibitionCheckFn =
+pub type ProhibitionCheckFn =
     std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
 
 /// Predicate controlling when a card-bound trigger is armed.
 /// Receives (source_id, &SimState) and returns true if the trigger should fire.
-pub(crate) type TriggerPredicate =
+pub type TriggerPredicate =
     std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>;
 
 /// Default trigger predicate: source is on the battlefield.
@@ -486,13 +486,13 @@ pub(crate) fn tp_always() -> TriggerPredicate {
 
 /// Predicate for LatentSpellMod: given (spell ObjId, caster, &SimState), returns
 /// true if the spell qualifies for the latent modification.
-pub(crate) type SpellPredicate =
+pub type SpellPredicate =
     Arc<dyn Fn(ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
 
 /// A latent continuous effect that modifies the next qualifying spell cast
 /// (CR 611.2f). Pushed by an ability resolution; consumed during 601.2a when
 /// a qualifying spell is announced.
-pub(crate) struct LatentSpellMod {
+pub struct LatentSpellMod {
     pub(crate) controller: PlayerId,
     /// Does this spell qualify? (e.g. "the next instant or sorcery spell")
     pub(crate) predicate: SpellPredicate,
@@ -505,7 +505,7 @@ pub(crate) struct LatentSpellMod {
 /// A trigger definition on a CardDef.  Pairs the check function with a predicate
 /// that determines when the trigger is armed based on the source's game state.
 #[derive(Clone)]
-pub(crate) struct TriggerDef {
+pub struct TriggerDef {
     pub(crate) check: TriggerCheckFn,
     /// In which state is this trigger armed?
     /// Default (tp_on_battlefield): source is on the battlefield.
@@ -516,7 +516,7 @@ pub(crate) struct TriggerDef {
 /// Ephemeral trigger instance created at runtime by ability effects (e.g. Sneak Attack
 /// end-step sacrifice, Tamiyo +2 watcher). Card-bound triggers are derived from catalog
 /// at fire time via `fire_triggers`.
-pub(crate) struct TriggerInstance {
+pub struct TriggerInstance {
     pub(crate) source_id: ObjId,
     pub(crate) controller: PlayerId,
     pub(crate) check: TriggerCheckFn,
@@ -526,7 +526,7 @@ pub(crate) struct TriggerInstance {
 
 /// Ephemeral replacement instance created at runtime by ability effects (e.g. Force of Negation
 /// "exile instead of graveyard"). Card-bound replacements are derived from catalog at fire time.
-pub(crate) struct ReplacementInstance {
+pub struct ReplacementInstance {
     pub(crate) source_id: ObjId,
     pub(crate) controller: PlayerId,
     pub(crate) check: ReplacementCheckFn,
@@ -537,7 +537,7 @@ pub(crate) struct ReplacementInstance {
 
 /// The five colors of Magic.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Color { White, Blue, Black, Red, Green }
+pub enum Color { White, Blue, Black, Red, Green }
 
 /// A typed choice that an effect needs to make at resolution/ETB time.
 /// Passed to `Strategy::resolve_choice` (reached per-player via `with_strategy`);
@@ -545,7 +545,7 @@ pub(crate) enum Color { White, Blue, Black, Red, Green }
 /// targets (`TargetSpec`) and not object selections (`ChoiceSpec`) —
 /// specifically, choices over abstract typed values.
 #[derive(Clone)]
-pub(crate) enum ChoiceRequest {
+pub enum ChoiceRequest {
     /// Choose one of the five colors (e.g. Painter's Servant ETB).
     Color,
     /// Choose a creature type by name (e.g. Cavern of Souls ETB).
@@ -569,7 +569,7 @@ pub(crate) enum ChoiceRequest {
 
 /// The value returned by `Strategy::resolve_choice` for a given `ChoiceRequest`.
 #[derive(Clone)]
-pub(crate) enum ChoiceResult {
+pub enum ChoiceResult {
     Color(Color),
     CreatureType(String),
     CardName(String),
@@ -582,13 +582,13 @@ pub(crate) enum ChoiceResult {
 
 /// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Supertype { Legendary, Basic, Snow }
+pub enum Supertype { Legendary, Basic, Snow }
 
 /// The seven layers in which continuous effects are applied (MTG rule 613).
 /// Ordering is derived: effects in earlier layers apply before later ones.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[allow(dead_code)] // L1–L5 are defined for completeness; only L6–L7 are currently used
-pub(crate) enum ContinuousLayer {
+pub enum ContinuousLayer {
     L1CopyEffects      = 1,
     L2ControlEffects   = 2,
     L3TextEffects      = 3,
@@ -600,19 +600,19 @@ pub(crate) enum ContinuousLayer {
 
 /// Closure that mutates a cloned `CardDef` to apply a continuous effect modifier.
 /// Receives `&SimState` so CDAs (characteristic-defining abilities) can read live game state.
-pub(crate) type ContinuousModFn =
+pub type ContinuousModFn =
     std::sync::Arc<dyn Fn(&mut CardDef, &SimState) + Send + Sync>;
 
 /// Predicate that decides whether a continuous effect applies to a given object.
 /// Receives (target_id, target_controller, state).
-pub(crate) type ContinuousFilterFn =
+pub type ContinuousFilterFn =
     std::sync::Arc<dyn Fn(ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
 
 /// What characteristics a CE reads from targets (for CR 613.7 dependency analysis).
 /// If CE_A reads a category that CE_B writes, A depends on B within the same layer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
-pub(crate) enum CeReads {
+pub enum CeReads {
     LandTypes,
     Supertypes,
     Abilities,
@@ -624,7 +624,7 @@ pub(crate) enum CeReads {
 /// What characteristics a CE writes (modifies) on targets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
-pub(crate) enum CeWrites {
+pub enum CeWrites {
     LandTypes,
     Supertypes,
     Abilities,
@@ -635,7 +635,7 @@ pub(crate) enum CeWrites {
 
 /// When a `ContinuousInstance` expires and should be removed.
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) enum Expiry {
+pub enum Expiry {
     /// Removed during the Cleanup step of the current turn.
     EndOfTurn,
     /// Removed at the start of the controlling player's next Untap step.
@@ -653,7 +653,7 @@ pub(crate) enum Expiry {
 /// A single registered continuous-effect instance.
 /// Created when a spell or ability that grants a CE resolves.
 /// Removed when `expiry` is met.
-pub(crate) struct ContinuousInstance {
+pub struct ContinuousInstance {
     /// Object that generated this effect (for expiry tracking and logging).
     pub(crate) source_id: ObjId,
     /// Controller of the source at the time the effect was created.
@@ -928,7 +928,7 @@ pub(crate) fn recompute(state: &mut SimState) {
 // ── Turn structure ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum PhaseKind {
+pub enum PhaseKind {
     Beginning,
     PreCombatMain,
     Combat,
@@ -943,7 +943,7 @@ enum TurnPosition {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum StepKind {
+pub enum StepKind {
     Untap,
     Upkeep,
     Draw,
@@ -977,13 +977,13 @@ impl Phase {
 
 /// Which face of a card to cast. `Back` = adventure/split second half.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum SpellFace { Main, Back }
+pub enum SpellFace { Main, Back }
 
 // ── Priority action types (CR 601.2 state machine) ──────────────────────────
 
 /// Engine-provided legal action. Strategy picks one via `choose_action`.
 #[derive(Clone)]
-enum LegalAction {
+pub enum LegalAction {
     Pass,
     LandDrop(ObjId),
     /// Normal cast from hand, adventure back-face, or free cast from exile.
@@ -996,14 +996,14 @@ enum LegalAction {
 }
 
 /// Options presented to strategy at the Announce step (CR 601.2b).
-struct AnnounceOptions {
+pub struct AnnounceOptions {
     available_modes: Vec<usize>,
     available_alt_costs: Vec<AlternateCost>,
     has_x_cost: bool,
 }
 
 /// Strategy's choices at the Announce step.
-struct AnnounceChoice {
+pub struct AnnounceChoice {
     chosen_mode: usize,
     /// Index into `AnnounceOptions.available_alt_costs` (= `def.alternate_costs()`).
     /// `None` = pay mana cost normally.
@@ -1013,7 +1013,7 @@ struct AnnounceChoice {
 
 /// A mana ability the strategy can activate during ActivateMana.
 #[derive(Clone)]
-pub(crate) struct ManaAbilityOption {
+pub struct ManaAbilityOption {
     source_id: ObjId,
     ability_index: usize,
     produces: Vec<Color>,
@@ -1022,7 +1022,7 @@ pub(crate) struct ManaAbilityOption {
 
 /// Strategy's decision to activate a mana ability.
 #[derive(Clone)]
-pub(crate) struct ManaActivation {
+pub struct ManaActivation {
     source_id: ObjId,
     ability_index: usize,
     /// Which color to produce (None = colorless/any, for generic mana needs).
@@ -1498,7 +1498,7 @@ fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut 
 // ── Simulation types ──────────────────────────────────────────────────────────
 
 
-struct PlayerState {
+pub struct PlayerState {
     id: ObjId,
     deck_name: String,
     life: i32,
@@ -4162,7 +4162,7 @@ fn do_turn(
 /// cards are valued, and *when* the run ends (via the `Objective`). This is the
 /// seam between the engine and concrete apps (dd-pilegen, dd-goldfish, ...).
 /// (pub(crate) for now — becomes `pub` when the apps are split into their own crates.)
-pub(crate) struct Scenario {
+pub struct Scenario {
     pub us_label: String,
     pub opp_label: String,
     pub catalog: HashMap<String, CardDef>,
@@ -4180,7 +4180,7 @@ pub(crate) struct Scenario {
 /// Run one game to completion on the generic engine loop. Application-agnostic:
 /// every app-specific behavior arrives via `scenario`. Returns the final state —
 /// inspect `state.terminal` (and the objective) for the outcome.
-pub(crate) fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
+pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
     let Scenario {
         us_label, opp_label, catalog, us_deck, opp_deck,
         us_strategy, opp_strategy, evaluate_card, objective, max_turns, on_play,

@@ -21,7 +21,7 @@ use crate::{
 /// What kind of playable action this is. Activated abilities reference the
 /// ability inside the card's `abilities()` slice; casting is just "the spell."
 #[derive(Clone, Debug)]
-pub(crate) enum PlayableKind {
+pub enum PlayableKind {
     Cast,
     Activate { ability_index: usize },
 }
@@ -31,7 +31,7 @@ pub(crate) enum PlayableKind {
 /// handles); `None` when the cost shape is outside the shim's scope and the
 /// caller must fall back to the legacy per-decision callbacks.
 #[derive(Clone)]
-pub(crate) struct PlayableAction {
+pub struct PlayableAction {
     pub source: ObjId,
     pub kind: PlayableKind,
     pub schema: Option<CostSchema>,

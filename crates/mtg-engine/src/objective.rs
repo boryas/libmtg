@@ -16,7 +16,7 @@ use crate::{GameEvent, PlayerId, SimState};
 /// Decides simulation termination off the event stream. `observe` is called for
 /// every event that fires; returning `true` ends the simulation. Implementors
 /// may mutate state to record app-specific capture (e.g. pre-resolution life).
-pub(crate) trait Objective {
+pub trait Objective {
     fn observe(&mut self, event: &GameEvent, state: &mut SimState) -> bool;
 }
 
@@ -26,7 +26,7 @@ pub(crate) trait Objective {
 /// deferred to the human (via the web UI), so resolution is the stopping point —
 /// the card body itself is a no-op and this objective owns the terminal logic.
 #[derive(Default)]
-pub(crate) struct DoomsdayResolvedObjective;
+pub struct DoomsdayResolvedObjective;
 
 impl Objective for DoomsdayResolvedObjective {
     fn observe(&mut self, event: &GameEvent, state: &mut SimState) -> bool {

@@ -13,7 +13,7 @@ use crate::GameEvent;
 /// it occurred. Kept minimal; per-event structural fields live on `GameEvent`
 /// itself and are projected out via `EventField`.
 #[derive(Clone)]
-pub(crate) struct LoggedEvent {
+pub struct LoggedEvent {
     pub seq: u64,
     pub turn: u32,
     pub event: GameEvent,
@@ -21,7 +21,7 @@ pub(crate) struct LoggedEvent {
 
 /// Time window for event-log queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Window {
+pub enum Window {
     /// Since the current turn began.
     ThisTurn,
     /// Since the current game began.
@@ -33,7 +33,7 @@ pub(crate) enum Window {
 
 /// The log itself. Owns its entries; queried by `filter` / `count` / `any`.
 #[derive(Default, Clone)]
-pub(crate) struct EventLog {
+pub struct EventLog {
     pub(crate) entries: Vec<LoggedEvent>,
     pub(crate) next_seq: u64,
     pub(crate) turn_start_seq: u64,

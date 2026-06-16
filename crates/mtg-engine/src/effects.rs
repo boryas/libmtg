@@ -5,7 +5,7 @@ use crate::ir::expr::Filter;
 /// Actor-relative player reference used in effect primitives.
 /// `Actor` = the spell's controller; `Opp` = their opponent.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Who { Actor, Opp }
+pub enum Who { Actor, Opp }
 
 impl Who {
     pub(crate) fn resolve(&self, actor: PlayerId) -> PlayerId {
@@ -16,7 +16,7 @@ impl Who {
 /// A composable game effect. Wraps a closure that mutates SimState.
 /// Built from primitives (eff_draw, eff_destroy_target, etc.) and chained with `.then()`.
 /// Effects that need randomness access `state.rng` directly inside their closure.
-pub(crate) struct Effect(pub(crate) Arc<dyn Fn(&mut SimState, u8, &[ObjId]) + Send + Sync>);
+pub struct Effect(pub(crate) Arc<dyn Fn(&mut SimState, u8, &[ObjId]) + Send + Sync>);
 
 impl Clone for Effect {
     fn clone(&self) -> Self { Effect(Arc::clone(&self.0)) }

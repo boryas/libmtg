@@ -8,7 +8,7 @@ use crate::CounterType;
 
 /// How long a `CEMod` application lasts.
 #[derive(Clone)]
-pub(crate) enum Expiry {
+pub enum Expiry {
     EndOfTurn,
     EndOfCombat,
     UntilYourNextTurn,
@@ -21,7 +21,7 @@ pub(crate) enum Expiry {
 /// isn't enough: bf→gy can be Sacrifice (CR 701.16 triggers) or a Destroy
 /// effect's zone movement; hand→gy is Discard (CR 701.8 triggers); etc.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum MoveVerb {
+pub enum MoveVerb {
     /// "Return ~ to its owner's hand" / "Bounce ~ to library" — the standard
     /// zone-change family. No special trigger family beyond zone-change.
     Return,
@@ -37,7 +37,7 @@ pub(crate) enum MoveVerb {
 
 /// Who is performing the action / receiving the choice.
 #[derive(Clone)]
-pub(crate) enum Who {
+pub enum Who {
     You,
     EachOpponent,
     Opponent,
@@ -52,7 +52,7 @@ pub(crate) enum Who {
 /// to the strategy. This is the structural decomposition of "unless X pays Y"
 /// patterns — no `CounterUnlessPays`-style named primitive exists by design.
 #[derive(Clone)]
-pub(crate) struct ChoiceOption {
+pub struct ChoiceOption {
     pub label: &'static str,
     /// Cost to pick this option (if present); the executor filters out
     /// unpayable options before offering the chooser. `None` = free option.
@@ -62,7 +62,7 @@ pub(crate) struct ChoiceOption {
 
 /// One-shot mutations.
 #[derive(Clone)]
-pub(crate) enum Action {
+pub enum Action {
     // ── state movement ───────────────────────────────────────────────────
     /// Move `what` to zone `to`. The object's current zone is read from state
     /// — no `from` field is required. (`change_zone` handles all departures
@@ -389,7 +389,7 @@ pub(crate) enum Action {
 
 /// What mana an `AddMana` action produces.
 #[derive(Clone)]
-pub(crate) enum ManaSpec {
+pub enum ManaSpec {
     /// Fixed colors (e.g. `[Blue]` for Island, `[]` for a colorless source).
     /// If shorter than `count`, the remainder is padded with colorless.
     Fixed(Vec<crate::Color>),
@@ -401,7 +401,7 @@ pub(crate) enum ManaSpec {
 
 /// Token specification — kept minimal; grows as token-generating cards land.
 #[derive(Clone)]
-pub(crate) struct TokenSpec {
+pub struct TokenSpec {
     pub name: &'static str,
     pub types: Vec<crate::CardType>,
     pub subtypes: Vec<&'static str>,

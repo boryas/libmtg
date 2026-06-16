@@ -6,7 +6,7 @@
 
 /// Runtime-bound pointers. Evaluated against the current `BindEnv`.
 #[derive(Debug, Clone)]
-pub(crate) enum Ctx {
+pub enum Ctx {
     /// The source object of the ability/spell — the object that "has" this IR.
     Source,
     /// "You" — controller of the source.
@@ -29,7 +29,7 @@ pub(crate) enum Ctx {
 /// Flat enum — the engine resolves each field against the event pointed to by
 /// the enclosing `Ctx::Triggering(_)` or `Ctx::ThisCast(_)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EventField {
+pub enum EventField {
     // spell-cast properties
     ManaSpent,
     AltCost,
@@ -64,7 +64,7 @@ pub(crate) enum EventField {
 
 /// Layer C — game-level designations and flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GameCtx {
+pub enum GameCtx {
     Monarch,
     Initiative,
     DayNight,

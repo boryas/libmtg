@@ -8,7 +8,7 @@ use crate::{CardType, Color, CounterType, Keyword, Supertype, ZoneId};
 
 /// Pure queries over game state. No side effects.
 #[derive(Debug, Clone)]
-pub(crate) enum Expr {
+pub enum Expr {
     // ── literals / context ───────────────────────────────────────────────
     Num(i64),
     Bool(bool),
@@ -122,7 +122,7 @@ pub(crate) enum Expr {
 /// demand-driven — each variant maps to one `GameEvent` family with the
 /// specific field selectors that show up in real cards.
 #[derive(Debug, Clone)]
-pub(crate) enum EventFilter {
+pub enum EventFilter {
     /// A spell was cast. `caster` optionally filters by the player who cast it
     /// (resolves against the event's `caster` field).
     SpellCast { caster: Option<Box<Expr>> },
@@ -130,7 +130,7 @@ pub(crate) enum EventFilter {
 
 /// Which zone to scan, possibly controller-scoped.
 #[derive(Debug, Clone)]
-pub(crate) enum ZoneSel {
+pub enum ZoneSel {
     /// Absolute zone reference (e.g. a specific object's current zone kind).
     Id(ZoneId),
     /// "Your graveyard", "any opponent's library", etc. — resolved against
@@ -143,7 +143,7 @@ pub(crate) enum ZoneSel {
 /// Zone kinds as a selector — distinct from `ZoneId` which is the engine's
 /// already-instantiated-per-player enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ZoneKindSel {
+pub enum ZoneKindSel {
     Library,
     Hand,
     Battlefield,
@@ -155,7 +155,7 @@ pub(crate) enum ZoneKindSel {
 
 /// Evaluation result. Union over the kinds of values Expr can produce.
 #[derive(Debug, Clone)]
-pub(crate) enum Value {
+pub enum Value {
     Num(i64),
     Bool(bool),
     Obj(crate::ObjId),
@@ -180,4 +180,4 @@ pub(crate) enum Value {
 
 /// Readability newtype — signatures that want "a predicate" can say so.
 #[derive(Debug, Clone)]
-pub(crate) struct Filter(pub Expr);
+pub struct Filter(pub Expr);

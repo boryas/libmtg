@@ -6,7 +6,7 @@ use super::*;
 
 /// What broad role does this card serve in a player's plan?
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum CardCategory {
+pub enum CardCategory {
     Mana,        // lands, rituals, petals
     Threat,      // creatures, PWs, Doomsday (combo is a subset of threat)
     Interaction, // counters, removal, discard
@@ -15,7 +15,7 @@ pub(crate) enum CardCategory {
 
 /// Opponent characteristics that shift card evaluation weights.
 #[derive(Clone, Debug)]
-pub(crate) struct MatchupInfo {
+pub struct MatchupInfo {
     pub(crate) opp_has_counters: bool,
     pub(crate) opp_fast_clock: bool,
     /// Colors that fetch lands in this deck can find (deck-level, not per-card).
@@ -35,7 +35,7 @@ impl Default for MatchupInfo {
 /// How far the current game state is from the player's target hand shape.
 /// Each field is 0.0 (fully satisfied) to 1.0+ (completely missing).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct TargetGap {
+pub struct TargetGap {
     pub(crate) mana: f64,
     pub(crate) threat: f64,
     pub(crate) interaction: f64,
@@ -43,7 +43,7 @@ pub(crate) struct TargetGap {
 
 // ── Strategy trait ────────────────────────────────────────────────────────────
 
-pub(crate) trait Strategy {
+pub trait Strategy {
     fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)>;
     fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)>;
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool;
@@ -233,7 +233,7 @@ pub(crate) trait Strategy {
 /// `choose_targets` = `pick_targets`). Used as the `SimState::with_strategy`
 /// fallback when a player has no strategy installed (tests / uninitialized
 /// state), so resolution-time decisions always have *some* policy to consult.
-pub(crate) struct DefaultStrategy {
+pub struct DefaultStrategy {
     player_id: PlayerId,
 }
 
@@ -262,7 +262,7 @@ impl Strategy for DefaultStrategy {
 /// the engine uses, rather than mutating a global callback. Shared by both
 /// `tests.rs` and `ir/tests.rs`.
 #[cfg(test)]
-pub(crate) struct TestStrategy {
+pub struct TestStrategy {
     player_id: PlayerId,
     color: Option<Color>,
     card_name: Option<String>,
@@ -370,7 +370,7 @@ fn hand_category_summary(
 
 // ── DoomsdayStrategy ─────────────────────────────────────────────────────────
 
-pub(crate) struct DoomsdayStrategy {
+pub struct DoomsdayStrategy {
     player_id: PlayerId,
     rng: SmallRng,
     /// Set when a black-producing land must be played next main phase.
@@ -631,7 +631,7 @@ impl Strategy for DoomsdayStrategy {
 
 // ── GenericOppStrategy ────────────────────────────────────────────────────────
 
-pub(crate) struct GenericOppStrategy {
+pub struct GenericOppStrategy {
     player_id: PlayerId,
     rng: SmallRng,
     matchup: MatchupInfo,

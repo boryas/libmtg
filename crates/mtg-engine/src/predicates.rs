@@ -167,7 +167,7 @@ pub(crate) fn is_hexproof_from(target_id: ObjId, source_controller: PlayerId, st
 /// Declarative description of what targets a spell or ability may choose from.
 /// Used both to enumerate legal choices and to re-validate at resolution.
 #[derive(Clone)]
-pub(crate) enum TargetSpec {
+pub enum TargetSpec {
     None,
     /// A specific player (`who` resolved relative to the acting controller).
     Player(Who),

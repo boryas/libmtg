@@ -13,7 +13,7 @@ pub(crate) use crate::catalog::BasicLandType;
 
 /// Alternative cost spec — what you pay instead of the card's mana cost.
 #[derive(Clone)]
-pub(crate) enum CostSpec {
+pub enum CostSpec {
     Free,
     Mana(&'static str),           // "{2}{U}"
     ExileFromGraveyard { n: Expr, filter: crate::ir::expr::Filter },
@@ -25,7 +25,7 @@ pub(crate) enum CostSpec {
 /// or (for the permission family) a cost/rule override consumed by
 /// `Action::OfferCast`.
 #[derive(Clone)]
-pub(crate) enum CEMod {
+pub enum CEMod {
     // ── layer 1 (copy) ───────────────────────────────────────────────────
     CopyOf(Expr), // characteristics copy of target
 

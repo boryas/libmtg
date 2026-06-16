@@ -8,7 +8,7 @@ use super::*;
 /// Lightweight snapshot of turn-relevant state for the main-phase planner.
 /// The planner projects future states by cloning and modifying this struct.
 #[derive(Clone)]
-pub(crate) struct TurnPlanState {
+pub struct TurnPlanState {
     /// Current floating mana.
     pub(crate) pool: ManaPool,
     /// Permanents that are tapped (pre-existing + newly tapped by plan actions).
@@ -31,7 +31,7 @@ pub(crate) struct TurnPlanState {
 
 /// An action the planner can consider taking during a main phase.
 #[derive(Clone, Debug)]
-pub(crate) enum PlanAction {
+pub enum PlanAction {
     /// Tap (or sac) a mana source to add mana to pool.
     TapForMana { source_id: ObjId, ability_index: usize, color: Option<Color> },
     /// Cast a spell from hand (costs mana from pool).
@@ -269,7 +269,7 @@ fn spell_mana_production(name: &str) -> Option<ManaPool> {
 
 /// Evaluation function that scores a plan state. Higher = better.
 /// Each deck archetype provides its own implementation.
-pub(crate) type PlanEvalFn = fn(&TurnPlanState, &SimState) -> f64;
+pub type PlanEvalFn = fn(&TurnPlanState, &SimState) -> f64;
 
 /// Evaluate a plan state for the Doomsday pilot.
 /// DD cast dominates; otherwise value cantrips, interaction, and land drops.
