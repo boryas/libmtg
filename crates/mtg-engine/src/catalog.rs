@@ -789,6 +789,13 @@ pub(crate) type StaticAbilityDef =
     std::sync::Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>;
 
 impl CardDef {
+    /// Name of the back/second face (DFC, split, adventure), if any. Public
+    /// accessor so app crates (e.g. the pilegen snapshot registry) can enumerate
+    /// face names without touching the private `back` field.
+    pub fn back_name(&self) -> Option<&str> {
+        self.back.as_ref().map(|b| b.name.as_str())
+    }
+
     pub(crate) fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
     pub(crate) fn is_creature(&self) -> bool { matches!(self.kind, CardKind::Creature(_)) }
     pub(crate) fn is_instant(&self) -> bool { matches!(self.kind, CardKind::Instant(_)) }
