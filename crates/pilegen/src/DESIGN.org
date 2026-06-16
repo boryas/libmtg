@@ -1,0 +1,558 @@
+#+TITLE: Pilegen Engine Design
+#+STARTUP: content
+#+OPTIONS: toc:2 num:nil
+
+Engine architecture and primitive vocabulary. For mechanic↔card mapping and
+decomposition of MTG mechanics into IR primitives, see [[file:CARD_INDEX.org][CARD_INDEX.org]].
+
+* Central state: ~SimState~
+
+Everything lives in ~SimState~. Key fields:
+
+- ~objects: HashMap<ObjId, GameObject>~ — every card in every zone, keyed by stable id
+- ~catalog: HashMap<String, CardDef>~ — base card definitions; populated once at init, never mutated
+- ~stack: Vec<ObjId>~ — spell/ability stack (LIFO)
+- ~abilities: HashMap<ObjId, StackAbility>~ — triggered/activated abilities on the stack
+- ~trigger_instances~, ~replacement_instances~, ~prohibition_instances~, ~continuous_instances~ — live ability registrations
+- ~us: PlayerState~, ~opp: PlayerState~ — player state (life, mana pool, draw count, etc.)
+
+* Identity: ~ObjId~
+
+A single ~u64~ newtype. Every object in the game — permanents, spells on stack, triggered
+abilities, players — is identified by an ~ObjId~. ~ObjId::UNSET~ (0) is the null sentinel.
+~state.alloc_id()~ is the only way to mint a new one.
+
+* Objects and zones
+
+~GameObject~ carries ~catalog_key~ (card name), ~owner~, ~controller~, ~is_token~,
+~materialized: Option<CardDef>~, and a single ~role: ObjectRole~ that encodes *what kind*
+of object it is plus the per-kind state:
+- ~Library~ · ~Hand { known }~ · ~Graveyard~ · ~Exile { on_adventure }~ (payload-free)
+- ~Battlefield(BattlefieldState)~ — a permanent
+- ~StackSpell(SpellState)~ — a spell on the stack
+- ~StackAbility(AbilityState)~ — a card-less ability on the stack
+- ~Player(PlayerState)~ — a player; **no zone** (kind is separate from zone)
+This makes illegal states (a permanent with no battlefield state, an ability in the graveyard)
+unrepresentable. **Players are first-class objects**: the two players are ~GameObject~s in
+~objects~ (ids ~us_id~/~opp_id~); reach their state via ~player(who)~/~player_mut(who)~. So
+targeting, filtering, damage and iteration treat players uniformly — e.g. Price of Progress is
+~ForEach(Expr::Players, …)~ and ~DealDamage~ to a player object is life loss. (Emblems will join
+the same way, in the command zone.)
+Accessors: ~obj.zone() -> Option<Zone>~ (None for a player) — prefer ~obj.in_zone(z) -> bool~,
+which matches on the role kind and is false for zoneless objects; ~obj.bf()/.bf_mut()~,
+~obj.spell()/.spell_mut()~, ~obj.ability()~, ~obj.player_state()/.player_state_mut()~ return the
+payload for the matching role. ~obj.set_zone(zone)~ transitions to a payload-free zone or the battlefield.
+
+~Zone~ is the (optional) derived coarse zone (fine variants ~Hand { known }~, ~Exile { on_adventure }~).
+~ZoneId~ is the coarse enum used in events and effects. ~card_zone_to_id~ converts between them.
+
+All zone transitions go through ~change_zone(id, to, state, t, actor)~, which fires the event
+pipeline. Never move a card by writing to ~obj.role~ directly outside the central writers.
+
+* Two views of a card's characteristics
+
+~state.catalog.get(name)~ — the base ~CardDef~ as defined at load time. Use for
+bootstrap lookups (e.g. cards in library/graveyard that have no in-play state).
+
+~state.def_of(id)~ — the materialized ~CardDef~ for an object currently in play,
+with all continuous effects applied. Use this for any characteristic read of an
+object on the battlefield. Returns ~None~ if the object has no materialized state.
+
+~recompute(state)~ rebuilds all materialized views by folding continuous instances
+over the base catalog entry for each object. Call it before any decision that
+reads P/T, types, or abilities of permanents.
+
+* The event pipeline: ~fire_event~
+
+Every observable game action fires a ~GameEvent~ through ~fire_event~, which runs:
+
+1. *Prohibition check* (CR 614.17) — any active ~ProhibitionInstance~ whose ~check~
+   returns ~true~ suppresses the event entirely. "Can't" effects take precedence over
+   replacements (CR 101.2); the event never reaches Stage 2.
+2. *Replacement check* — first matching active ~ReplacementInstance~ intercepts;
+   its effect runs instead and may re-fire a modified event. Loop prevention via
+   ~repl_applied~ (cleared at depth 0).
+3. *State mutation* — the event's own effect runs (zone change, draw, etc.).
+4. *Trigger check* — ~fire_triggers~ walks all active ~TriggerInstance~ s;
+   matching ones append ~TriggerContext~ s to ~pending_triggers~.
+5. *Log* — ~log_event~ derives display info from ~state.objects~ via ~id~.
+
+~GameEvent~ variants: ~ZoneChange { id, actor, from, to, controller }~, ~Draw~,
+~EnteredStep~, ~EnteredPhase~, ~CreatureAttacked~, ~SpellBeingCast { caster, card_id, mana_value, is_noncreature }~,
+~SpellCast { caster, card_id, mana_spent }~.
+
+~fire_event~ returns ~bool~ — ~true~ iff the event was suppressed by a prohibition.
+Callers that need to gate on prohibition (e.g. ~cast_spell~) check the return value;
+all other call sites ignore it.
+
+* The three instance types
+
+** ~TriggerInstance~
+
+A card's triggered ability registration.
+- ~check: TriggerCheckFn~ — ~fn(&GameEvent, source_id, controller, &SimState, &mut Vec<TriggerContext>)~
+- Appends a ~TriggerContext~ to ~pending~ if the event matches.
+- ~TriggerContext~ carries the effect closure and target spec; pushed to the stack
+  as a ~StackAbility~ at the next priority window.
+
+** ~ProhibitionInstance~
+
+A "can't happen" suppression (CR 614.17).
+- ~check: ProhibitionCheckFn~ — ~Arc<dyn Fn(&GameEvent, source_id, controller, &SimState) -> bool>~
+- Returns ~true~ if the event is prohibited; the event is dropped with no state mutation.
+- Takes ~&SimState~ (unlike ~ReplacementCheckFn~) because prohibition often needs to inspect
+  the type of the affected object (e.g. Grafdigger's Cage checks ~is_creature()~ on the card
+  entering from GY/library). Checked before replacements (Stage 1).
+- Stored on ~CardDef.prohibition_defs: Vec<ProhibitionDef>~ and activated with the permanent.
+
+** ~ReplacementInstance~
+
+A replacement effect registration.
+- ~check: ReplacementCheckFn~ — ~Arc<dyn Fn(&GameEvent, source_id, controller) -> Option<Vec<ObjId>>>~ (Arc allows captures)
+- Returns ~Some(targets)~ if it applies, ~None~ otherwise.
+- ~effect: Effect~ — runs instead of the original event.
+
+** ~ContinuousInstance~
+
+A static or temporary ability affecting characteristics.
+- ~layer: ContinuousLayer~ — determines application order (L4 = type-changing, L7 = P/T).
+- ~reads: Vec<CeReads>~ — what characteristics this CE reads from targets (CR 613.7).
+- ~writes: Vec<CeWrites>~ — what characteristics this CE writes on targets.
+- ~timestamp: u32~ — registration sequence; tiebreaker after dependency ordering (CR 613.6).
+- ~filter: ContinuousFilterFn~ — which objects it applies to.
+- ~modifier: ContinuousModFn~ — mutates a ~CardDef~ in place.
+- ~expiry: ContinuousExpiry~ — ~EndOfTurn~, ~WhileSourceOnBattlefield~,
+  ~StartOfControllerNextTurn~.
+
+*CE application order* — ~recompute~ applies CIs *CE-by-CE* (not object-by-object).
+Within each layer, CIs are topologically sorted by dependency (CR 613.7): if CE_B writes
+a category that CE_A reads, A depends on B and B applies first. Ties broken by timestamp
+(CR 613.6). Cycles fall back to timestamp order. After each CI is applied, CIs from
+~WhileSourceOnBattlefield~ sources whose static abilities were stripped by an earlier CE
+(e.g. Blood Moon stripping Yavimaya) are skipped.
+
+*~CeReads~ / ~CeWrites~* — descriptor enums with variants: ~LandTypes~, ~Supertypes~,
+~Abilities~, ~Color~, ~PowerToughness~, ~CardTypes~. Each CI declares what it reads and
+writes; the topo sort uses same-category overlap to detect dependencies.
+
+* Instance lifecycle
+
+Two categories: *card-bound* and *ephemeral*.
+
+*Card-bound* — triggers, replacements, prohibitions, and static abilities defined in
+~CardDef~. Evaluated from the catalog at event/recompute time; never stored as instances.
+~active_when~ predicates (e.g. ~tp_on_battlefield()~) gate whether they apply.
+
+*Ephemeral* — runtime-created ~TriggerInstance~, ~ReplacementInstance~, and
+~ContinuousInstance~. Created by ability effects (e.g. Sneak Attack's delayed trigger).
+Principle: *existence = active* — no ~active~ flag; presence in the vec means active.
+
+- ~Expiry::WhileSourceOnBattlefield~ — CIs removed in ~change_zone~ when source leaves BF.
+- ~Expiry::OneShot~ — triggers removed after firing once (e.g. delayed triggers).
+- ~Expiry::EndOfTurn~ — CIs removed at cleanup step.
+
+~LatentSpellMod~ — pre-cast hook (CR 611.2f). When a spell is cast, ~consume_latent_spell_mod~
+checks if any latent mod's predicate matches; if so, materializes a CI for that spell.
+Used by Mistrise Village ("next spell can't be countered").
+
+* Effects and factories
+
+~Effect~ wraps ~Arc<dyn Fn(&mut SimState, u8, &[ObjId])>~.
+Built from composable primitives (~eff_draw~, ~eff_destroy_target~, ~eff_fetch_search~, etc.)
+and chained with ~.then()~. Never inspect card names or types inside an effect —
+use predicates and ~ObjId~ s captured at factory time.
+
+- ~SpellFactory = Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect>~ — built at card load time, called at cast time.
+  The ~u32~ is ~chosen_x~ (strategy-chosen X value; 0 for non-X spells). ~SpellData.has_x_cost: bool~
+  marks X spells; the engine pays ~Life(chosen_x)~ and ~Strategy::choose_x_for_spell~ (default: 3) picks X.
+- ~AbilityFactory = Arc<dyn Fn(PlayerId, ObjId) -> Effect>~ — same pattern.
+- ~StaticAbilityDef = Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance>~ — called during recompute for BF sources.
+- ~ReplacementDef.check~ receives ~(&GameEvent, ObjId, PlayerId, &SimState)~ — state access enables checks like ~is_token~ or ~is_creature~.
+
+* Card definitions
+
+~CardDef~ holds ~kind: CardKind~ (Land/Creature/Artifact/Instant/Sorcery/Planeswalker/Enchantment),
+~colors~, ~types~, ~supertypes~, ~trigger_defs~, ~replacement_defs~, ~prohibition_defs~, ~static_ability_defs~.
+
+Cards are defined in [[file:card_defs.rs][card_defs.rs]] using ~CardDef::new(...)~. The engine never references
+specific card names — it only calls the closures stored on the def.
+
+* Composition primitives
+
+Before adding a new variant or primitive, check whether the concept decomposes into
+existing ones. The available layers:
+
+** ~CardPredicate~
+
+([[file:predicates.rs][predicates.rs]]) — ~Arc<dyn Fn(&CardDef) -> bool>~.
+- Combinators: ~pred_and~, ~pred_or~, ~pred_not~, ~pred_any~.
+- Atomics: ~pred_type_eq~, ~pred_has_color~, ~pred_has_supertype~, ~pred_land_subtype~,
+  ~pred_mana_value_le~, ~pred_toughness_le~, ~pred_no_colored_pips~.
+- Used for: targeting filters, fetch search, continuous effect applicability.
+
+** ~ObjPredicate~
+
+([[file:predicates.rs][predicates.rs]]) — ~Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>~.
+State-aware predicate over any game object. Renamed from ~CostPredicate~; now also used for
+~ObjectInZone.filter~ (targeting) and ~ChoiceSpec.filter~ (resolution-time choice enumeration).
+- Combinators: ~cost_pred_and~, ~cost_pred_or~, ~cost_pred_not~.
+- Atomics: ~obj_pred_from_card~ (lifts ~CardPredicate~),
+  ~cost_pred_unblocked_attacker~, ~cost_pred_land~, ~pred_has_counter(ct: CounterType)~.
+- Used for: cost component predicates (~DiscardCard~, ~ExileFromHand~, etc.), ~ObjectInZone~ targeting,
+  and ~ChoiceSpec~ choice enumeration.
+
+** ~TargetSpec~
+
+([[file:predicates.rs][predicates.rs]]) — declarative target description.
+- ~None~ — no target required.
+- ~Player(Who)~ — a player.
+- ~ObjectInZone { controller, zone, filter: Filter }~ — any object in a zone, spells
+  AND abilities included (everything on the stack is a ~GameObject~). "Counter target
+  spell" = ~filter: ir_spell()~; "counter target ability" = ~ir_ability()~; "spell or
+  ability" = one ~ir_or(...)~. (There is no longer an ~AbilityOnStack~ variant.)
+- ~Union(Vec<TargetSpec>)~ — logical OR; use to express "A or B" targets.
+
+** ~ChoiceSpec~
+
+([[file:catalog.rs][catalog.rs]]) — resolution-time "choose" (CR: not targeting).
+Stored on ~AbilityDef.choice_spec: Option<ChoiceSpec>~ and carried into ~StackAbility~.
+At resolution, ~enumerate_choices(spec, controller, state)~ builds the candidate list;
+~strategy.choose_for_effect(effect_id, &choices, state)~ picks one; the chosen ~ObjId~
+is prepended to the effect's ~targets~ slice. ~effect_id~ is the ~StackAbility~ 's ObjId.
+
+** ~CounterType~
+
+([[file:mod.rs][mod.rs]]) — typed enum of counter kinds (currently: ~Void~).
+Stored in ~GameObject.counters: HashMap<CounterType, u32>~ — survives zone changes.
+
+** Free-cast grants
+
+Dauthi Voidwalker, Omniscience work via continuous effects that set
+~castable = true~ and push ~AlternateCost::default()~ (a {0} cost) onto the card's
+~alternate_costs~. No special engine plumbing — the card goes through the normal cast
+sub-machine. ~collect_legal_actions~ scans exile (and hand) for castable cards.
+
+** ~ManaAbility~
+
+([[file:catalog.rs][catalog.rs]]) — how a permanent produces mana.
+Fields: ~costs: Vec<CostComponent>~, ~produces: Vec<Color>~ (for affordability prediction),
+~produces_count: usize~ (default 1; 2 for Ancient Tomb), ~make_effect: ManaEffectFactory~.
+
+~ManaEffectFactory = Arc<dyn Fn(PlayerId, Option<Color>) -> Effect + Send + Sync>~ — factory
+called at activation time. ~Option<Color>~ is the specific pip being drawn in the color loop
+(~None~ for generic-slot activation). Fixed-color sources ignore it; any-color sources
+(Lotus Petal, Cavern) use it to produce the right pip. ~eff_mana~ is the standard primitive.
+Side effects (e.g. Ancient Tomb: "deal 2 damage") are chained via ~.then()~.
+
+~GameEvent::ManaProduced { who: PlayerId, spec: String }~ — fired by ~eff_mana~ through the
+event pipeline so replacement effects can intercept (e.g. Damping Sphere). State mutation
+(~do_effect~) parses ~spec~ and adds to ~ManaPool~. Mana abilities bypass the stack per
+CR 605.3b; ~produce_mana~ remains a synchronous call path.
+
+** ~CostComponent~
+
+([[file:catalog.rs][catalog.rs]]) — a single payable cost.
+- Combinators: ~CostAnd(Vec<CostComponent>)~, ~CostOr(Vec<CostComponent>)~.
+- Atomics: ~Mana~, ~TapSelf~, ~SacSelf~, ~DiscardSelf~, ~Life~, ~SacPermanent~,
+  ~DiscardCard~, ~ExileFromHand~, ~ReturnFromBattlefield~, ~TapPermanent~, ~LoyaltyAdjust~,
+  ~Replicate(ManaCost)~ (optional, repeatable — see ~cast_spell~ for copy logic),
+  ~XLife~ (variable life payment; X is strategy-chosen — see [[*X spells and ~XLife~][X spells and XLife]]).
+
+** ~ChoiceRequest~ / ~ChoiceResult~
+
+([[file:mod.rs][mod.rs]]) — typed strategy choices inside effects.
+Used when an effect needs a decision that is not a target (~TargetSpec~) and not an object
+selection (~ChoiceSpec~): specifically, choices over abstract typed values.
+- Variants: ~ChoiceRequest::Color~, ~CreatureType~, ~CardName~, ~Mode~, ~WardPayment~,
+  ~MayPutOnBattlefield~, ~MayAttach~.
+- Routed through the deciding player's strategy: ~Strategy::resolve_choice(source, &req, state) -> ChoiceResult~.
+- Engine code reaches it via ~state.with_strategy(decider, |s, st| s.resolve_choice(source, &req, st))~ —
+  identify *which player* makes the choice and pass that ~PlayerId~ as ~decider~.
+- Default (trait default method): Blue / "Wizard" / "" / Mode 0 / pay-ward / decline-may.
+  Tests ~set_strategy~ a ~TestStrategy~ on the relevant player to force a specific choice.
+- Current users: Painter's Servant ETB (Color), Cavern of Souls ETB (CreatureType), Disruptor Flute ETB (CardName).
+
+** ~Strategy::surveil_choice~
+
+([[file:strategy.rs][strategy.rs]]) — ~fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool~.
+Strategy method for surveil. Given the ~ObjId~ of the card being surveiled, returns ~true~
+to put it in the graveyard, ~false~ to keep it on top. Reached per-player via ~with_strategy~.
+Default: bin cards the evaluator scores below 0.3 (delegates to ~state.evaluate_card~).
+Tests force outcomes via ~TestStrategy::surveil(mill)~. Current user: ~eff_surveil~ in [[file:effects.rs][effects.rs]].
+
+** ~BattlefieldState.etb_choice~
+
+([[file:mod.rs][mod.rs]]) — ~Option<ChoiceResult>~. Uniform storage for the
+choice a permanent made as it entered. Written by ETB replacement closures that call
+~resolve_choice~; cleared automatically on LTB when ~bf~ is dropped. Convention: any ETB
+replacement that calls ~resolve_choice~ MUST write the result here. Most cards also capture
+the value in their CE closure; ~etb_choice~ is the side-channel for abilities needing to
+inspect "what was named" without a captured copy.
+
+** ~CardDef.casting_cost_modifier~
+
+([[file:catalog.rs][catalog.rs]], default 0) — generic-mana surcharge ~i32~
+applied by CE (e.g. Disruptor Flute). Added to ~ManaCost.generic~ during affordability checks
+in ~spell_is_affordable~. Reset to 0 each ~recompute~ (materialized starts from catalog clone).
+
+** ~CardDef.non_mana_abilities_suppressed~
+
+([[file:catalog.rs][catalog.rs]], default false) — ~bool~ set by CE
+to suppress non-mana activated abilities (e.g. Disruptor Flute, Pithing Needle). Checked by
+~ability_available~ in [[file:strategy.rs][strategy.rs]]. Does NOT affect ~ManaAbility~ s — those are a separate
+type on a separate code path. Null Rod (suppress ALL activated abilities including mana) would
+need a companion ~mana_abilities_suppressed~ field.
+
+** ~etb_self_replacement~
+
+([[file:catalog.rs][catalog.rs]]) — ~fn<F>(extra) -> ReplacementDef~. Builds an ETB
+self-replacement that handles the boilerplate (extract id, ~current_zone_id~, ~fire_event~) and
+calls ~extra(source_id, id, controller, state, t)~ after the zone-change fires.
+
+** ~etb_self_trigger~
+
+([[file:catalog.rs][catalog.rs]]) — ~fn<F>(source_name, target_spec, make_effect) -> TriggerCheckFn~.
+Builds a trigger check fn that fires when this permanent enters under its controller's control
+and pushes a ~TriggerContext~ with the given spec and effect.
+
+** X spells and ~XLife~
+
+Cards with "as an additional cost, pay X life" (e.g. Toxic Deluge)
+use ~CardDef.additional_costs = vec![CostComponent::XLife]~. The X value flows as:
+
+- ~Strategy::choose_x_for_spell(card_id, state) -> u32~ — trait method, default 3.
+- ~AnnounceChoice { chosen_x: u32, .. }~ — strategy communicates the choice via ~announce~ callback.
+- ~can_pay_costs(..., chosen_x: u32)~ / ~pay_costs(..., chosen_x: u32)~ — both accept X.
+  ~XLife~ checks ~life >= chosen_x~ and deducts on payment, recording in ~CostsPaidCtx.chosen_x~.
+- ~SpellFactory = Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect>~ — third arg is ~chosen_x~;
+  non-X spells receive 0 and ignore it (~_x~).
+- ~CardDef.additional_costs~ lives on the ~CardDef~ wrapper, not on ~SpellData~.
+
+* IR Census
+
+Tracks the generality and composability of the IR vocabulary over time. See
+[[file:CARD_INDEX.org::*Mechanic → IR Decomposition][Mechanic → IR Decomposition]] for
+the canonical mapping from MTG mechanics to IR primitives.
+
+** Principle: the filter space is the materialized game state
+
+The ~Filter~/~Expr~ space should, *in principle*, be able to project **every axis
+of the materialized game state** — because that is how Magic works (CR 109.3
+characteristics + zone/player/global state, any of which a filter may reference).
+The target is every axis of materialized *state* (card characteristics *plus*
+player/global state: life, hand size, "controls N artifacts", monarch, the spell
+being cast), not just card characteristics. It is finite and enumerable, so the
+space is exhaustible in principle. **Filter-completeness is downstream of
+state-modelling completeness:** you can filter exactly what the engine chooses to
+materialise.
+
+Because filters are pure queries over the one materialised, effects-applied view
+("reads see all writes"), they respect CEs/replacements for free. The invariant:
+*the only legitimate reason a filter cannot be written is missing state
+vocabulary — never missing compute.* No closures.
+
+This makes "can't express it as a projection of materialised state" a two-way
+bug detector:
+1. *Needs an escape-hatch closure* → either (a) the state is real but unmodelled
+   — add the ~Expr~ projection (this is what ~ZoneLit~ / ~IsToken~ /
+   ~GameCtx::CastingSpell~ were), or (b) it is not actually a filter — it is an
+   action or context masquerading as a characteristic test.
+2. *Reads the printed/catalog value instead of the materialised view* → a CE bug
+   ("target red creature" means red *now*, post-layers; read ~Colors(It)~ →
+   ~card_def_of~, never ~CardDef.colors~).
+
+Subtleties: filters are unary over *(object, context)* — "another creature",
+"equipped by me", "It != Source" need a reference frame (Source / controller /
+triggering event), supplied via the ~obj_matches~ env contract; and some axes are
+*temporal* (died this turn, spells cast this turn), living in the event
+log / per-turn accumulators, so "materialised state" means snapshot **+** history.
+
+*Read/write mirror — a concrete completeness criterion for this census:* the state
+axes are the spine. ~Expr~ *reads* an axis; ~CEMod~ *writes* it. For a real
+characteristic you usually want both (test a colour and change a colour; test a
+type and add a type). Auditing "is the filter space complete" is the same as "is
+the CE space complete": enumerate the materialised state's fields and check each
+has a projection (~Expr~) and, where the rules allow, a modifier (~CEMod~). Any
+axis with one and not the other is an asymmetry worth a second look.
+
+** Discipline rules
+
+1. *No mechanic-named Action/CEMod/Expr variants.* Names describe *structural*
+   operations (~Move~, ~PutCounters~, ~IfThen~), never MTG mechanics (no ~Amass~,
+   ~Flashback~, ~Cascade~, ~Storm~). Every new mechanic must map into existing
+   primitives or justify a new primitive in structural terms.
+2. *No escape hatches.* ~Action::Custom~ is deleted and stays deleted. If a card
+   cannot be expressed, the answer is either (a) a new *structural* primitive with
+   written justification, or (b) extending an existing primitive's fields. Never a closure.
+3. *Justification bar for new variants.* Adding an ~Action~, ~CEMod~, ~Expr~, or
+   ~AbilityKind~ variant requires:
+   - Written rationale: what structural operation does it represent, not what mechanic.
+   - Survey: which other existing/future cards would reuse it? (Min 2 unrelated uses,
+     or a clear CR-level concept like "continuous effect" that is obviously general.)
+   - Decomposition attempt: show the ~Sequence~/~IfThen~/~ForEach~ version and argue why
+     it's insufficient (not expressible, loses agency, crosses a layering boundary).
+
+** Red flags
+
+- A variant whose doc comment names a specific MTG mechanic.
+- Multiple variants that differ only in one field (merge them).
+- ~if let Action::X~ dispatch in the executor that special-cases one mechanic.
+- Strategy callbacks making mechanic-specific decisions vs. answering generic questions
+  ("pick a target" vs. "pick a flashback target").
+
+** Review cadence
+
+- *Every 5 cards ported*: quick audit — did new variants appear? Justified?
+- *Every 20 cards*: full census update below. Look for unused primitives (candidates for
+  removal) and near-duplicates (candidates for merging).
+- *Before adding any card*: check if its mechanic is already in the
+  [[file:CARD_INDEX.org::*Mechanic → IR Decomposition][decomposition table]].
+  If not, design the decomposition *before* writing code.
+
+** Current census
+
+*** 2026-04-25 — Stage 4 Phase 1 (ManaAbility IR migration)
+
+*SUPERSEDED (see 2026-06-03 below): ~AbilityKind::Mana~ and ~ProducesSpec~ were
+later deleted — mana production folded into ~AbilityKind::Activated~ +
+~Action::AddMana~, with a structural ~is_mana_ability~ detector replacing the
+variant. Kept as a point-in-time record.*
+
+One new ~AbilityKind~ variant (~Mana~) and one supporting enum (~ProducesSpec~ —
+~Fixed(Vec<Color>)~ / ~AnyOneColor~) cover ~33 cards in this batch. ~Mana~ takes
+~cost~, ~produces~, ~produces_count~, ~on_activate: Option<Action>~,
+~condition: Option<Expr>~, ~timing~, and ~active_zone: ZoneKindSel~. CR 605.3b
+stack-bypass is enforced by the executor (the ~ir_mana_as_legacy~ bridge in
+~ir/executor.rs~ synthesizes a legacy ~ManaAbility~ at ~build_catalog~ time so
+the existing synchronous mana sub-loop picks them up unchanged).
+
+Cards ported this round:
+- 18 lands: Island, Swamp, Plains, Mountain, Forest, Wastes, all 6 snow basics,
+  all 10 ABU duals, Great Furnace, Ancient Tomb (~on_activate~ → ~PayLife 2~).
+- 4 mana-ability artifacts: Lotus Petal, Lion's Eye Diamond (~Instant~ timing),
+  Mox Opal (~condition~ = ~Count(controller's artifacts) >= 3~), Simian Spirit
+  Guide (~active_zone: Hand~).
+- 4 vanillas already IR-clean (no abilities to port): Barrowgoyf, Orc Army,
+  Phyrexian Germ, Mysterious Creature.
+
+Reuse: ~AbilityKind::Mana~ used by 23 distinct cards in one phase — easily
+clears the ≥2-reuse bar. ~ProducesSpec::Fixed~ used by 21 cards;
+~ProducesSpec::AnyOneColor~ used by 3.
+
+Decomposition attempt: a flat ~AbilityKind::Activated~ with mana-side-effect in
+the body was rejected because activated abilities use the stack (CR 113.3, CR
+605.3b) — mana abilities specifically do not. Splitting into ~Activated~ + a
+sentinel "this resolves synchronously" flag would be a mechanic-named escape
+hatch on a structural variant; ~Mana~ is the structurally honest split.
+
+Decomposition depth of hardest mechanic this round: Ancient Tomb's
+~on_activate~ chain composes ~Mana~ + ~Action::PayLife~ via factory
+composition in the bridge — depth 2.
+
+Next census round due after Phase 2 (fetch lands).
+
+*** 2026-06-03 — Catch-up snapshot (mana fold-in → replacements → Search → cost-IR complete)
+
+Census lapsed ~6 weeks; the 2026-04-25 entry was the last. Rather than narrate
+each batch, this entry re-snapshots the *live* vocabulary (source of truth = the
+enums) and records the standing breadth gaps.
+
+**Corrections to prior entries.** ~AbilityKind::Mana~ + ~ProducesSpec~ (deleted).
+Mana production is now ~Action::AddMana { who, count, spec: ManaSpec::Fixed(Vec<Color>)
+| AnyOneColor }~ inside an ordinary ~AbilityKind::Activated~ body; CR 605.1a
+stack-bypass is detected *structurally* via ~is_mana_ability~ (target_spec == None
+&& body produces mana), not a variant. This reverses the 2026-04-25 "Mana is the
+honest split" conclusion — the structural detector removed the need for the variant.
+
+**Live vocabulary.**
+- ~Action~ (43, incl. ~Noop~): Move · Search · Return · Discard · Mill · Shuffle · Counter ·
+  OfferCast · CopySpell · Draw · DealDamage · PayLife · GainLife · PutCounters ·
+  RemoveCounters · Tap · Untap · Transform · Attach · Destroy · Exile · Sacrifice · MoveByChoice · ApplyCE ·
+  Sequence · IfThen · MayDo · ForEach · Choose · ScheduleDelayedTrigger ·
+  GrantCEToNextSpellCast · Scry · Surveil · Reveal · Look · CreateToken · AddMana ·
+  PayMana · PayManaX · LoyaltyAdjust · Replicate · PutOnLibrary.
+- ~AbilityKind~ (6): Triggered · Replacement · Prohibition · Static · Activated ·
+  OnResolve — the complete reactive/static/activated/resolution taxonomy.
+- ~Expr~ (~72): full object/player/combat/set/arithmetic/binding read surface
+  (incl. ~IsAbility~ / ~AbilityIsTriggered~ — the stack-object kind axes).
+- ~CEMod~ (~30): CR 613 layer coverage (types/colors/PT/keywords/subtypes,
+  grant/copy abilities, cost mods, cast permissions, protection, step skips).
+
+**Folded in since Phase 1.**
+- *Replacements:* ~EventMod~ / ~ReplacementBody::ModifyEvent~ deleted;
+  ~ReplacementBody::Replace(Action)~ (+ ~Prevent~) is the only structural variant.
+  Body reads the matched event via ~Ctx::Var("triggered_obj")~. Added universal
+  ~Action::Tap~ / ~Untap~.
+- *Fetch lands:* ~Action::Search~ (library → zone, strategy picks).
+- *Cost sub-language fully on IR* (plan ~inherited-kindling-neumann.md~). New:
+  ~Action::PayManaX { generic: Expr }~ — variable-X *generic* mana, the mirror of
+  ~PayLife { amount: Expr }~. ~Action::Choose~ gained ~bind_as~ + ~DecisionKind::Branch.branches~
+  so a cost-tree branch can carry its own object decision (Bitter Triumph). ~CostComponent~,
+  ~pay_costs~/~can_pay_costs~ and the legacy-cost shims deleted; ~CardDef.additional_costs~
+  is now ~CostBody~.
+
+**Reuse / health.** No single-use structural variants spotted in the cost layer.
+~MoveByChoice~ (with the ~MoveVerb~ tag) *absorbed* the Sacrifice/Discard/Return/
+Exile-from-zone cost shapes — a merge, not proliferation. ~Choose~ now serves both
+effect resolution (~resolve_choice~ callback) and cost context (~bind_as~ + BindEnv) —
+one primitive, two drivers.
+
+**Breadth gaps — the standing "cannot yet express" list.**
+*None.* All structural gaps are closed (see RESOLVED notes below). Remaining work is
+per-card depth (the ~28 ~eff_*~ spell bodies) and optional representational tightening
+(the ~bf~/~spell~/~ability~ optionals → a ~role~ enum; see "object model" note).
+
+*RESOLVED 2026-06-04 — Split stack (object-model unification).* Abilities on the stack
+are now card-less ~GameObject~ s in ~state.objects~ (zone=Stack, ~ability=Some~), not a
+separate ~state.abilities~ map. ~ObjectInZone { zone: Stack }~ reaches every stack object,
+so ~TargetSpec::AbilityOnStack~ + ~AbilityType~ are deleted: "counter spell" = ~ir_spell()~
+(on-stack ∧ not-ability), "counter ability" = ~ir_ability()~, "spell or ability" = one
+~ir_or~. New ~Expr::IsAbility~ / ~AbilityIsTriggered~ project the stack-object kind. A
+resolved/countered ability ceases to exist by removal (CR 608.2m), *not* a zone SBA — the
+704.5 "ceases to exist" SBAs cover only tokens (704.5d) and copies (704.5e). The universal
+Object:Zone model (tokens already proved it — 704.5d) now covers abilities too.
+
+*RESOLVED 2026-06-04 — Shuffle.* ~Action::Shuffle { who }~ added: a zero-agency effect
+(randomisation is not a choice). "You may shuffle" decomposes to ~MayDo { Shuffle }~ —
+the ~eff_maybe_shuffle~ closure (which baked the may-decision into an evaluator threshold)
+is deleted; Ponder now composes ~MayDo { Shuffle }~ via the ~eff_ir~ bridge. The
+~Search.shuffle~ flag remains as a fetch-path convenience. *Every effect verb now has an
+IR home.*
+
+*RESOLVED 2026-06-04 — Transform / DFC.* ~Action::Transform { target }~ = in-place face
+flip (CR 712.4); sets the new face's printed loyalty if it's a planeswalker; fires the new
+~GameEvent::Transformed~ so triggers can react. Delver uses it directly. *Tamiyo is modeled
+honestly as a new object* — "exile, then return transformed" = ~Sequence([Exile, Move→bf,
+Transform])~, which re-enters a fresh, summoning-sick permanent (tests assert in-place
+preserves bf state vs. exile-return resets it). ~do_flip_tamiyo~ and both ad-hoc
+~bf.active_face = 1~ writes are deleted.
+
+*RESOLVED 2026-06-04 — Attachment.* ~Action::Attach { what, to }~ sets ~attached_to~ and
+fires the new ~GameEvent::BecameAttached~ (so "whenever ~ becomes equipped/enchanted"
+triggers are expressible). The read side was already generic (CEMods filter on
+~bf.attached_to~). All 8 hand-rolled ~bf.attached_to = Some(_)~ writes across the 5
+equipment cards (equip ability, Living Weapon, ETB-attach) now route through it via the
+~do_attach~ closure bridge. Detachment needs no action — ~change_zone~ clears ~attached_to~
+on LTB (CR 704.5q). Reconfigure/move-equipment not yet needed.
+
+**Not a breadth gap.** ~28 instant/sorcery bodies still on legacy ~eff_*~ closures
+(the ~SpellFactory~ path) — mechanical translation, every verb has an IR home.
+~IrSpellMode~ (~17 cards) proves spell bodies can be IR. New: ~eff_ir(who, action)~
+bridges a self-contained IR ~Action~ into a still-closure body — the migration adapter.
+
+Next: no structural gaps remain. Per-card ~eff_*~ → ~IrSpellMode~ translation continues
+opportunistically. Census review due every 20 cards / on any new structural variant.
+
+* Known seams
+
+*Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less
+~GameObject~ s in ~state.objects~ (zone=Stack, ~ability: Some(AbilityState)~); the separate
+~state.abilities~ map and ~StackAbility~ are deleted. ~ObjectInZone { zone: Stack }~ reaches
+every stack object, so the one ~Filter~ language covers it: ~ir_spell()~ (on-stack ∧
+not-ability), ~ir_ability()~, ~ir_triggered_ability()~. ~TargetSpec::AbilityOnStack~ +
+~AbilityType~ are gone; "counter spell or ability" is a single ~ir_or~ filter, no ~Union~.
+
+Object-model note: ~GameObject~ now carries three per-zone payload optionals
+(~bf~/~spell~/~ability~). The remaining (optional, behavior-free) tightening is to collapse
+them into one ~role: ObjectRole~ enum so illegal states are unrepresentable — deferred
+pending a thoughtful trait/interface design.

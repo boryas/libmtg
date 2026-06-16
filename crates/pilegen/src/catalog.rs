@@ -1,0 +1,1690 @@
+use super::*;
+
+// ── Keywords ──────────────────────────────────────────────────────────────────
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum Keyword {
+    Flying,
+    Haste,
+    Shadow,
+    Lifelink,
+    Vigilance,
+    Deathtouch,
+    Annihilator6,
+    FirstStrike,
+    DoubleStrike,
+    Trample,
+    Flash,
+    Hexproof,
+    Reach,
+}
+
+/// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Keywords(u32);
+
+impl Keywords {
+    pub(crate) fn contains(self, kw: Keyword) -> bool {
+        self.0 & (1 << kw as u32) != 0
+    }
+    pub(crate) fn insert(&mut self, kw: Keyword) {
+        self.0 |= 1 << kw as u32;
+    }
+    pub(crate) fn from_slice(kws: &[Keyword]) -> Self {
+        let mut s = Self(0);
+        for &kw in kws { s.insert(kw); }
+        s
+    }
+}
+
+// ── Mana cost ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Default, Debug)]
+pub(crate) struct ManaCost {
+    pub(crate) w: i32,
+    pub(crate) u: i32,
+    pub(crate) b: i32,
+    pub(crate) r: i32,
+    pub(crate) g: i32,
+    pub(crate) c: i32,       // colorless pips {C}
+    pub(crate) generic: i32, // any-color pips {1}, {2}, ...
+}
+
+impl ManaCost {
+    pub(crate) fn total_specific(&self) -> i32 { self.w + self.u + self.b + self.r + self.g + self.c }
+    pub(crate) fn mana_value(&self) -> i32 { self.total_specific() + self.generic }
+
+    /// Reconstruct a compact display string (e.g. `ManaCost{generic:1,u:1}` → `"1U"`).
+    pub(crate) fn display(&self) -> String {
+        let mut s = String::new();
+        if self.generic > 0 { s.push_str(&self.generic.to_string()); }
+        for _ in 0..self.w { s.push('W'); }
+        for _ in 0..self.u { s.push('U'); }
+        for _ in 0..self.b { s.push('B'); }
+        for _ in 0..self.r { s.push('R'); }
+        for _ in 0..self.g { s.push('G'); }
+        for _ in 0..self.c { s.push('C'); }
+        s
+    }
+}
+
+/// Parse a mana cost string into a ManaCost.
+/// Leading digits → generic; W/U/B/R/G/C → specific color pips.
+/// Empty string = no castable mana cost (alt-cost-only or uncostable cards like Daze/FoW).
+/// "0" = genuinely free (Lotus Petal, LED).
+pub(crate) fn parse_mana_cost(cost: &str) -> ManaCost {
+    let mut mc = ManaCost::default();
+    let mut chars = cost.trim().chars().peekable();
+    let mut num = String::new();
+    while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        num.push(chars.next().unwrap());
+    }
+    if !num.is_empty() {
+        mc.generic = num.parse().unwrap_or(0);
+    }
+    for c in chars {
+        match c {
+            'W' => mc.w += 1,
+            'U' => mc.u += 1,
+            'B' => mc.b += 1,
+            'R' => mc.r += 1,
+            'G' => mc.g += 1,
+            'C' => mc.c += 1,
+            _ => mc.generic += 1,
+        }
+    }
+    mc
+}
+
+/// Convert a mana-production string (e.g. "U", "WUBRG") to a Vec<Color>.
+/// Each character maps to the corresponding Color; unknown chars are ignored.
+pub(crate) fn produces_colors(s: &str) -> Vec<Color> {
+    s.chars().filter_map(|c| match c {
+        'W' => Some(Color::White),
+        'U' => Some(Color::Blue),
+        'B' => Some(Color::Black),
+        'R' => Some(Color::Red),
+        'G' => Some(Color::Green),
+        _ => None,
+    }).collect()
+}
+
+/// Total mana value (CMC) of a cost string.
+pub(crate) fn mana_value(cost: &str) -> i32 {
+    parse_mana_cost(cost).mana_value()
+}
+
+// ── Effect factories ──────────────────────────────────────────────────────────
+
+// ── Cost types ────────────────────────────────────────────────────────────────
+
+/// Where the source object must be located for an ability to be activated.
+#[derive(Clone, Default)]
+pub(crate) enum SourceZone {
+    #[default]
+    Battlefield,
+    Hand,
+}
+
+/// When an ability can be activated (CR 602.5b, 605.3a).
+///
+/// Each ability type has a natural default speed:
+/// - `ManaAbility`: usable in the mana sub-loop of spell casting (CR 601.2g)
+/// - `AbilityDef`: instant speed (any time you have priority)
+///
+/// `ActivationTiming` overrides that default:
+/// - `Default` — use the natural speed for this ability type.
+/// - `Instant` — only during priority windows (any stack state). For `ManaAbility` this
+///    excludes it from the CR 601.2g mana sub-loop (e.g. Lion's Eye Diamond).
+/// - `Sorcery` — only during priority when the stack is empty and it's the controller's
+///    main phase (e.g. loyalty abilities, "activate only as a sorcery").
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ActivationTiming {
+    #[default]
+    Default,
+    Instant,
+    Sorcery,
+}
+
+
+/// Factory for a spell effect: takes (controller, source_id, chosen_x) and returns the resolved `Effect`.
+/// `chosen_x` is the strategy-chosen X value; 0 for spells without an X cost.
+pub(crate) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync>;
+
+/// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
+pub(crate) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
+
+/// One way to pay for a spell instead of (or in addition to) its mana cost.
+/// Options are tried in order; the first affordable one is taken.
+///
+/// `hand_min` and `prob` are strategy metadata, not rules costs.
+/// Per CR 118.9d, additional costs apply on top when an AlternateCost is chosen;
+/// that is enforced at the cast-spell call site.
+///
+/// `condition` — optional rules restriction on when this cost may be chosen (CR 118.9b),
+/// e.g. "If it's not your turn" on Force of Negation. `None` = always available.
+#[derive(Clone, Default)]
+pub(crate) struct AlternateCost {
+    pub(crate) costs: crate::ir::ability::CostBody,
+    pub(crate) hand_min: i32,
+    pub(crate) prob: Option<f64>,
+    pub(crate) condition: Option<std::sync::Arc<dyn Fn(PlayerId, &SimState) -> bool + Send + Sync>>,
+}
+
+
+/// An activated ability a permanent or hand card can use.
+///
+/// Describes a choice made at ability-resolution time (CR: "choose" ≠ "target").
+/// The engine enumerates valid objects and delegates the pick to `Strategy::choose_for_effect`.
+#[derive(Clone)]
+pub(crate) struct ChoiceSpec {
+    /// Whose objects to enumerate (relative to the ability's controller).
+    pub(crate) controller: Who,
+    /// Zone the chosen object must be in.
+    pub(crate) zone: ZoneId,
+    /// Predicate the chosen object must satisfy.
+    pub(crate) filter: crate::ir::expr::Filter,
+}
+
+/// Enumerate valid choices for a `ChoiceSpec` from the perspective of `controller`.
+pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: &SimState) -> Vec<ObjId> {
+    let target_who = spec.controller.resolve(controller);
+    state.objects.values()
+        .filter(|o| {
+            let zone_match = match spec.zone {
+                ZoneId::Exile => o.in_zone(Zone::Exile { on_adventure: false }),
+                ZoneId::Hand => o.in_zone(Zone::Hand { known: false }),
+                ZoneId::Battlefield => o.in_zone(Zone::Battlefield),
+                ZoneId::Graveyard  => o.in_zone(Zone::Graveyard),
+                ZoneId::Stack      => o.in_zone(Zone::Stack),
+                ZoneId::Library    => o.in_zone(Zone::Library),
+            };
+            zone_match && (o.owner == target_who || o.controller == target_who)
+        })
+        .filter(|o| {
+            let env = crate::ir::executor::BindEnv::new().with_controller(controller);
+            crate::ir::executor::matches(&spec.filter, o.id, state, &env)
+        })
+        .map(|o| o.id)
+        .collect()
+}
+
+/// Preconditions are derived automatically: ability is available iff
+/// every cost component can be paid and a valid target exists (if required).
+#[derive(Clone)]
+pub(crate) struct AbilityDef {
+    /// Where the source must be located for this ability to be activatable.
+    /// Default: Battlefield. Set to Hand for cycling, channel, ninjutsu, etc.
+    pub(crate) source_zone: SourceZone,
+    /// All costs to activate this ability, paid simultaneously. Single-
+    /// variant `CostBody::Ir(Action)` after Phase 6 collapsed the dual world.
+    pub(crate) costs: crate::ir::ability::CostBody,
+
+    // ── Target (optional) ─────────────────────────────────────────────────────
+    /// If not `TargetSpec::None`, a valid target must exist for the ability to be available.
+    pub(crate) target_spec: TargetSpec,
+
+    // ── Choice (optional, CR "choose" ≠ "target") ────────────────────────────
+    /// If `Some`, the engine enumerates matching objects at resolution time and
+    /// delegates the pick to `Strategy::choose_for_effect`. The chosen ObjId is
+    /// passed to the effect closure via its `targets` slice.
+    pub(crate) choice_spec: Option<ChoiceSpec>,
+
+    // ── Effect ────────────────────────────────────────────────────────────────
+    pub(crate) ability_factory: Option<AbilityFactory>,
+    /// IR resolution body. When set, preferred over `ability_factory`.
+    pub(crate) ir_body: Option<crate::ir::action::Action>,
+
+    /// False when a CE prevents activation (e.g. Disruptor Flute, Karn).
+    /// Reset to true each recompute. Checked by ability_available / collect_legal_actions.
+    pub(crate) activatable: bool,
+    /// Timing override. Default = instant speed. Sorcery = empty stack + main phase only.
+    pub(crate) timing: ActivationTiming,
+}
+
+impl Default for AbilityDef {
+    fn default() -> Self {
+        AbilityDef {
+            source_zone: SourceZone::Battlefield,
+            costs: crate::ir::ability::CostBody::default(),
+            target_spec: TargetSpec::None,
+            choice_spec: None,
+            ability_factory: None,
+            ir_body: None,
+            activatable: true,
+            timing: ActivationTiming::Default,
+        }
+    }
+}
+
+impl AbilityDef {
+    /// True if this is a loyalty ability (costs contain a `LoyaltyAdjust`).
+    pub(crate) fn is_loyalty_ability(&self) -> bool {
+        self.loyalty_delta().is_some()
+    }
+
+    /// Returns the loyalty delta if this is a loyalty ability — walks the
+    /// IR action tree for `Action::LoyaltyAdjust(n)`.
+    pub(crate) fn loyalty_delta(&self) -> Option<i32> {
+        let crate::ir::ability::CostBody::Ir(a) = &self.costs;
+        action_loyalty_delta(a)
+    }
+
+    /// True if this looks like a fetch land activation (SacSelf + Life cost > 0).
+    pub(crate) fn is_fetch_ability(&self) -> bool {
+        if !self.costs.requires_sac_self() {
+            return false;
+        }
+        let crate::ir::ability::CostBody::Ir(a) = &self.costs;
+        action_includes_paylife_positive(a)
+    }
+}
+
+fn action_loyalty_delta(a: &crate::ir::action::Action) -> Option<i32> {
+    use crate::ir::action::Action::*;
+    match a {
+        LoyaltyAdjust(n) => Some(*n),
+        Sequence(actions) => actions.iter().find_map(action_loyalty_delta),
+        IfThen { then, else_, .. } => action_loyalty_delta(then)
+            .or_else(|| else_.as_ref().and_then(|e| action_loyalty_delta(e))),
+        MayDo { action, .. } => action_loyalty_delta(action),
+        ForEach { body, .. } => action_loyalty_delta(body),
+        Choose { options, .. } => options.iter().find_map(|o| action_loyalty_delta(&o.action)),
+        _ => None,
+    }
+}
+
+fn action_includes_paylife_positive(a: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::expr::Expr;
+    match a {
+        PayLife { amount: Expr::Num(n), .. } => *n > 0,
+        Sequence(actions) => actions.iter().any(action_includes_paylife_positive),
+        IfThen { then, else_, .. } => {
+            action_includes_paylife_positive(then)
+                || else_.as_ref().map_or(false, |e| action_includes_paylife_positive(e))
+        }
+        MayDo { action, .. } => action_includes_paylife_positive(action),
+        ForEach { body, .. } => action_includes_paylife_positive(body),
+        Choose { options, .. } => options.iter().any(|o| action_includes_paylife_positive(&o.action)),
+        _ => false,
+    }
+}
+
+// ── Mana ability types ────────────────────────────────────────────────────────
+
+/// Factory that builds the mana-production effect for one activation.
+/// `who` — resolved controller; `color` — the specific color needed (`None` = generic slot).
+/// Fixed-color sources (e.g. Islands) ignore `color`; any-color sources (e.g. Lotus Petal)
+/// use `color` to produce exactly the requested pip.
+pub(crate) type ManaEffectFactory =
+    std::sync::Arc<dyn Fn(PlayerId, Option<Color>) -> Effect + Send + Sync>;
+
+/// How a permanent (or hand card) produces mana.
+/// `source_zone`   — where the source must be to activate (default Battlefield).
+/// `costs`         — what must be paid to activate (typically TapSelf or SacSelf).
+/// `produces`      — colors produced; empty vec → colorless only. Used for affordability prediction.
+/// `produces_count`— number of mana produced per activation (default 1). Used for prediction.
+/// `make_effect`   — factory that builds the actual production effect (add mana + any side effects).
+/// `condition`     — optional gate: `(source_id, &SimState) -> bool`. When `Some`, the ability
+///                   can only be activated (and counts toward potential mana) if the predicate
+///                   returns true. Used for Metalcraft, etc.
+#[derive(Clone)]
+pub(crate) struct ManaAbility {
+    pub(crate) source_zone: SourceZone,
+    pub(crate) costs: crate::ir::ability::CostBody,
+    pub(crate) produces: Vec<Color>,
+    pub(crate) produces_count: usize,
+    pub(crate) make_effect: ManaEffectFactory,
+    pub(crate) condition: Option<crate::ir::expr::Filter>,
+    /// False when a CE prevents activation (e.g. Karn, Null Rod).
+    /// Reset to true each recompute. Checked by collect_legal_actions and mana sub-loop.
+    pub(crate) activatable: bool,
+    /// Timing override. Default = usable in mana sub-loop (CR 601.2g).
+    /// Instant = excluded from sub-loop, available during priority (LED).
+    /// Sorcery = priority only, empty stack + main phase.
+    pub(crate) timing: ActivationTiming,
+}
+
+impl Default for ManaAbility {
+    fn default() -> Self {
+        Self {
+            source_zone: SourceZone::Battlefield,
+            costs: crate::ir::ability::CostBody::default(),
+            produces: vec![],
+            produces_count: 1,
+            make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),
+            condition: None,
+            activatable: true,
+            timing: ActivationTiming::Default,
+        }
+    }
+}
+
+/// One of the five basic land subtypes. Closed set (CR 205.3i); has not grown
+/// in the game's history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BasicLandType {
+    Plains,
+    Island,
+    Swamp,
+    Mountain,
+    Forest,
+}
+
+impl BasicLandType {
+    const ALL: [BasicLandType; 5] = [
+        BasicLandType::Plains,
+        BasicLandType::Island,
+        BasicLandType::Swamp,
+        BasicLandType::Mountain,
+        BasicLandType::Forest,
+    ];
+
+    fn bit(self) -> u8 {
+        match self {
+            BasicLandType::Plains => 1,
+            BasicLandType::Island => 2,
+            BasicLandType::Swamp => 4,
+            BasicLandType::Mountain => 8,
+            BasicLandType::Forest => 16,
+        }
+    }
+
+    /// Intrinsic mana color (CR 305.6).
+    pub(crate) fn mana_color(self) -> &'static str {
+        match self {
+            BasicLandType::Plains => "W",
+            BasicLandType::Island => "U",
+            BasicLandType::Swamp => "B",
+            BasicLandType::Mountain => "R",
+            BasicLandType::Forest => "G",
+        }
+    }
+
+    /// Lowercase subtype name ("plains", "island", …) — matches predicate strings.
+    pub(crate) fn as_lower(self) -> &'static str {
+        match self {
+            BasicLandType::Plains => "plains",
+            BasicLandType::Island => "island",
+            BasicLandType::Swamp => "swamp",
+            BasicLandType::Mountain => "mountain",
+            BasicLandType::Forest => "forest",
+        }
+    }
+}
+
+/// Set of basic land subtypes, stored as a bitset. `Copy` and allocation-free.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LandTypes(u8);
+
+impl LandTypes {
+    pub(crate) fn new() -> Self {
+        LandTypes(0)
+    }
+
+    pub(crate) fn from_types(types: &[BasicLandType]) -> Self {
+        let mut out = LandTypes(0);
+        for &t in types {
+            out.insert(t);
+        }
+        out
+    }
+
+    pub(crate) fn contains(self, t: BasicLandType) -> bool {
+        self.0 & t.bit() != 0
+    }
+
+    pub(crate) fn insert(&mut self, t: BasicLandType) {
+        self.0 |= t.bit();
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = BasicLandType> {
+        BasicLandType::ALL.into_iter().filter(move |&t| self.contains(t))
+    }
+}
+
+// ── Per-variant data structs ──────────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+pub(crate) struct LandData {
+    pub(crate) land_types: LandTypes,
+    pub(crate) mana_abilities: Vec<ManaAbility>,
+    pub(crate) abilities: Vec<AbilityDef>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CreatureData {
+    pub(crate) mana_cost: String,
+    // `power` and `toughness` are private — always read through the materialized `CardDef`
+    // (which folds in counters and CE modifiers). Write only via `adjust_pt`.
+    power: i32,
+    toughness: i32,
+    pub(crate) legendary: bool,
+    pub(crate) delve: bool,
+    pub(crate) abilities: Vec<AbilityDef>,
+    pub(crate) mana_abilities: Vec<ManaAbility>,
+    pub(crate) keywords: Keywords,
+    /// Creature subtypes (e.g. "Ninja", "Wizard", "Human"). Used for emblem/CE filters.
+    pub(crate) creature_subtypes: Vec<String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ArtifactData {
+    pub(crate) mana_cost: String,
+    pub(crate) abilities: Vec<AbilityDef>,
+    pub(crate) mana_abilities: Vec<ManaAbility>,
+    /// Artifact subtypes (e.g. "Equipment", "Treasure"). CR 205.3g.
+    pub(crate) subtypes: Vec<String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct EnchantmentData {
+    pub(crate) abilities: Vec<AbilityDef>,
+}
+
+/// Build a ninjutsu activated ability (CR 702.49).
+///
+/// Costs: mana + return an unblocked attacker. Source zone: Hand.
+/// Effect: put this card onto the battlefield tapped and attacking the same target.
+///
+/// Cost is `Sequence([PayMana(mc), MoveByChoice(BF→Hand, Return,
+/// unblocked-attacker-controlled-by-you, count=1, bind=$ninjutsu_attacker)])`.
+/// `cost_exec::pay` (`capture_returned_attack_targets`) captures the chosen
+/// attacker's pre-move `attack_target` into `CostsPaidCtx`, which the
+/// resolution effect reads to inherit the same combat target.
+pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
+    use crate::ir::action::{Action, MoveVerb, Who};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+    let mc = parse_mana_cost(mana_cost);
+    let unblocked_attacker = Filter(Expr::And(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+            Box::new(Expr::Ctx(Ctx::Controller)),
+        )),
+        Box::new(Expr::And(
+            Box::new(Expr::Attacking(Box::new(Expr::Ctx(Ctx::It)))),
+            Box::new(Expr::Unblocked(Box::new(Expr::Ctx(Ctx::It)))),
+        )),
+    ));
+    AbilityDef {
+        source_zone: SourceZone::Hand,
+        costs: crate::ir::ability::CostBody::Ir(Action::Sequence(vec![
+            Action::PayMana(mc),
+            Action::MoveByChoice {
+                who: Who::You,
+                from: ZoneKindSel::Battlefield,
+                to: ZoneKindSel::Hand,
+                verb: MoveVerb::Return,
+                filter: unblocked_attacker,
+                count: Expr::Num(1),
+                bind_as: Some("$ninjutsu_attacker"),
+            },
+        ])),
+        ability_factory: Some(std::sync::Arc::new(|who, source_id| {
+            Effect(std::sync::Arc::new(move |state: &mut SimState, t, _targets: &[ObjId]| {
+                let attack_target = state.resolving_costs_ctx.returned_attack_targets
+                    .first().copied().flatten();
+                let ninja_name = state.objects.get(&source_id)
+                    .map(|c| c.catalog_key.clone())
+                    .unwrap_or_default();
+                if ninja_name.is_empty() { return; }
+                // Move the source card from Stack to Battlefield (not a new object).
+                change_zone(source_id, ZoneId::Battlefield, state, t, who);
+                if let Some(bf) = state.permanent_bf_mut(source_id) {
+                    bf.tapped = true;
+                    bf.entered_this_turn = true;
+                    bf.attacking = true;
+                    bf.unblocked = true;
+                    bf.attack_target = attack_target;
+                }
+                state.combat_attackers.push(source_id);
+                state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
+            }))
+        })),
+        ..Default::default()
+    }
+}
+
+impl CreatureData {
+    /// Read effective power — call only on a value from `MaterializedState.defs`, never
+    /// directly from `catalog_map`, so continuous effects are always reflected.
+    pub(crate) fn power(&self) -> i32 { self.power }
+
+    /// Read effective toughness — same rule as `power()`.
+    pub(crate) fn toughness(&self) -> i32 { self.toughness }
+
+    /// Apply a power/toughness delta. Used exclusively by `fold_game_state_into_def`
+    /// (counters + temporary mods) and `ContinuousModFn` closures in CE machinery.
+    pub(crate) fn adjust_pt(&mut self, delta_power: i32, delta_toughness: i32) {
+        self.power     += delta_power;
+        self.toughness += delta_toughness;
+    }
+
+    /// Construct a `CreatureData` with the mandatory fields.
+    /// All optional fields (legendary, delve, abilities, keywords)
+    /// default to false/empty and can be set on the returned value.
+    pub(crate) fn new(mana_cost: impl Into<String>, power: i32, toughness: i32) -> Self {
+        CreatureData {
+            mana_cost: mana_cost.into(),
+            power,
+            toughness,
+            legendary: false,
+            delve: false,
+            abilities: vec![],
+            mana_abilities: vec![],
+            keywords: Keywords::default(),
+            creature_subtypes: vec![],
+        }
+    }
+}
+
+
+/// One mode of a spell: its targeting requirement and effect factory.
+#[derive(Clone)]
+pub(crate) struct SpellMode {
+    pub(crate) target_spec: TargetSpec,
+    pub(crate) factory: SpellFactory,
+}
+
+/// The mode structure of a spell (CR 700.2).
+/// Non-modal spells have a single mode; modal spells ("Choose one —") have two or more.
+/// Mode is chosen at cast time (CR 700.2a) and stored in `CostsPaidCtx::chosen_mode`.
+#[derive(Clone)]
+pub(crate) enum SpellModes {
+    /// Non-modal: exactly one mode.
+    Single(SpellMode),
+    /// Modal (CR 700.2): two or more modes, chosen at cast time via `ChoiceRequest::Mode`.
+    /// Invariant: len >= 2 (enforced by `SpellModes::modal`).
+    Modal(Vec<SpellMode>),
+}
+
+impl SpellModes {
+    /// Construct a modal spell. Panics if fewer than 2 modes are provided.
+    pub(crate) fn modal(modes: Vec<SpellMode>) -> Self {
+        assert!(modes.len() >= 2, "modal spells require at least 2 modes, got {}", modes.len());
+        SpellModes::Modal(modes)
+    }
+
+    pub(crate) fn get(&self, mode: usize) -> Option<&SpellMode> {
+        match self {
+            SpellModes::Single(m) if mode == 0 => Some(m),
+            SpellModes::Modal(modes) => modes.get(mode),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            SpellModes::Single(_) => 1,
+            SpellModes::Modal(modes) => modes.len(),
+        }
+    }
+
+    pub(crate) fn is_modal(&self) -> bool {
+        matches!(self, SpellModes::Modal(_))
+    }
+}
+
+/// Spell data shared by Instant and Sorcery variants.
+#[derive(Clone)]
+pub(crate) struct SpellData {
+    pub(crate) mana_cost: String,
+    pub(crate) delve: bool,
+    /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
+    pub(crate) subtypes: Vec<String>,
+    /// Spell modes (CR 700.2). `None` for default-constructed placeholders;
+    /// real spells always have `Some`.
+    pub(crate) modes: Option<SpellModes>,
+}
+
+impl Default for SpellData {
+    fn default() -> Self {
+        SpellData {
+            mana_cost: String::new(),
+            delve: false,
+            subtypes: Vec::new(),
+            modes: None,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PlaneswalkerData {
+    pub(crate) mana_cost: String,
+    pub(crate) loyalty: i32,
+    pub(crate) abilities: Vec<AbilityDef>,
+}
+
+#[derive(Clone)]
+pub(crate) enum CardKind {
+    Land(LandData),
+    Creature(CreatureData),
+    Artifact(ArtifactData),
+    Instant(SpellData),
+    Sorcery(SpellData),
+    Planeswalker(PlaneswalkerData),
+    Enchantment(EnchantmentData),
+}
+
+/// Layout of a multi-face card. Determines how `back` is interpreted at cast/flip time.
+/// `Normal` = single-faced (default). `DoubleFaced` = transform DFC (e.g. Tamiyo).
+/// `Split` = two castable halves (split cards, adventures).
+#[derive(Clone, Default, Debug, PartialEq)]
+pub(crate) enum CardLayout {
+    #[default]
+    Normal,
+    DoubleFaced,
+    Split,
+}
+
+// ── CardDef wrapper ───────────────────────────────────────────────────────────
+
+/// A card the generator knows about. Cards not in the catalog are treated as
+/// generic non-land spells: hand-eligible, not permanent candidates.
+///
+/// Wrapper struct preserving direct `.catalog_key` access and stable HashMap keys while
+/// holding a typed `kind` that enforces card-category invariants.
+/// A replacement effect definition stored directly on a `CardDef`.
+/// `check` returns `Some(targets)` if the replacement applies to an event; `make_effect` builds
+/// the closure that runs instead of the original event.
+#[derive(Clone)]
+pub(crate) struct ReplacementDef {
+    pub(crate) check: ReplacementCheckFn,
+    /// Factory: called at evaluation time with `(source_id, controller)`.
+    /// CardDef-specific data is captured inside the factory at card-load time.
+    pub(crate) make_effect: std::sync::Arc<dyn Fn(ObjId, PlayerId) -> Effect + Send + Sync>,
+    /// Predicate controlling when this replacement is active.
+    /// Default: source is on the battlefield (static ability replacements).
+    /// ETB-self replacements (CR 614.1c/d): always active regardless of zone —
+    /// the check fn guards specificity (id == source_id && to == Battlefield).
+    pub(crate) active_when: TriggerPredicate,
+}
+
+/// A "can't happen" prohibition stored on a `CardDef` (CR 614.17).
+/// Checked before replacements in `fire_event`. Takes `&SimState` so type/zone/controller
+/// checks can be performed without string dispatch.
+#[derive(Clone)]
+pub(crate) struct ProhibitionDef {
+    pub(crate) check: ProhibitionCheckFn,
+    /// Predicate controlling when this prohibition is active.
+    /// Default: source is on the battlefield (static ability prohibitions).
+    /// "This spell can't be countered": tp_on_stack (active while on the stack).
+    pub(crate) active_when: TriggerPredicate,
+}
+
+#[derive(Clone)]
+pub struct CardDef {
+    pub(crate) name: String,
+    /// Relative likelihood of appearing as a permanent in play (default 100).
+    #[allow(dead_code)]
+    pub(crate) play_weight: Option<u32>,
+    pub(crate) kind: CardKind,
+    /// Colors of this card, derived from mana cost and explicit color flags at load time.
+    pub(crate) colors: Vec<Color>,
+    /// Card types (Land, Creature, Instant, etc.) — mirrors the `kind` discriminant but
+    /// allows multi-type and is accessible without pattern-matching on `kind`.
+    pub(crate) types: Vec<CardType>,
+    /// Supertypes (Legendary, Basic, Snow).
+    pub(crate) supertypes: Vec<Supertype>,
+    /// Layout of a multi-face card (Normal / DoubleFaced / Split).
+    pub(crate) layout: CardLayout,
+    /// Back/second face for DFCs and split/adventure cards.
+    /// For DoubleFaced cards, this is the transformed face.
+    /// For Split cards (including adventures), this is the second castable half.
+    pub(crate) back: Option<Box<CardDef>>,
+    /// Trigger check functions for this card (set at card definition time).
+    pub(crate) trigger_defs: Vec<TriggerDef>,
+    /// Replacement effect definitions for this card (set at card definition time).
+    pub(crate) replacement_defs: Vec<ReplacementDef>,
+    /// Prohibition definitions for this card (CR 614.17 — "can't" effects).
+    /// Checked before replacements in `fire_event`; if any match, the event is suppressed.
+    pub(crate) prohibition_defs: Vec<ProhibitionDef>,
+    /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
+    /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
+    pub(crate) static_ability_defs: Vec<StaticAbilityDef>,
+    /// Trigger check functions granted to this object by continuous effects (Layer 6).
+    /// Reset to empty at the start of each `recompute` cycle (since recompute clones from the
+    /// catalog where this is always empty). CE modifiers push to this during recompute.
+    /// Checked by `fire_triggers` for each active battlefield object.
+    pub(crate) granted_trigger_defs: Vec<TriggerCheckFn>,
+    /// Costs that must always be paid in addition to the chosen base/alternative cost.
+    /// Per CR 118.9d these apply regardless of which cost path is taken. Single-
+    /// variant `CostBody::Ir(Action)`; X-cost amounts use `Expr::Ctx(Ctx::Var("$x"))`
+    /// bound to the announced `chosen_x` at pay time.
+    pub(crate) additional_costs: crate::ir::ability::CostBody,
+    /// False iff this spell can't be countered (CR 608.2b). Checked at resolution by
+    /// `eff_counter_target`; the spell is still a legal target for counterspells.
+    /// Modifiable by continuous effects.
+    pub(crate) counterable: bool,
+    /// Generic-mana surcharge applied to this card's casting cost by a CE (e.g. Disruptor Flute).
+    /// Added to `ManaCost.generic` during affordability checks. Reset to 0 on each `recompute`
+    /// because materialized views start from a fresh catalog clone.
+    pub(crate) casting_cost_modifier: i32,
+    /// True when this card may be cast from its current zone.
+    /// Default true for cards in hand, false for other zones. CEs can override:
+    /// Dauthi Voidwalker sets true on exiled cards, Lavinia sets false on opponent hand cards.
+    /// Reset to zone-based default each recompute. Checked by collect_legal_actions.
+    pub(crate) castable: bool,
+    /// Alternate costs granted by continuous effects (e.g. Omniscience grants a zero-cost
+    /// alternate). Works for ALL card types, unlike `SpellData.alternate_costs` which only
+    /// covers Instant/Sorcery. Reset to empty on each `recompute`.
+    pub(crate) alternate_costs: Vec<AlternateCost>,
+    /// Protection predicates (CR 702.16). Each predicate tests a *source* ObjId:
+    /// if any returns true, the source cannot target, damage, or block this object.
+    /// Uses `ObjPredicate` — the predicate can inspect the source's CardDef, zone,
+    /// controller, etc. via the uniform id model.
+    pub(crate) protection_from: Vec<crate::ir::expr::Filter>,
+    /// Data-based IR abilities (Stage 3 dual-pathway: coexists with the
+    /// closure-based fields above). When non-empty, the engine dispatches
+    /// this card's behavior through the IR executor.
+    pub(crate) abilities: Vec<crate::ir::ability::Ability>,
+}
+
+/// Factory that creates a `ContinuousInstance` for a specific game object.
+/// Called when the object enters the battlefield; `source_id` and `controller` are bound then.
+pub(crate) type StaticAbilityDef =
+    std::sync::Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>;
+
+impl CardDef {
+    pub(crate) fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
+    pub(crate) fn is_creature(&self) -> bool { matches!(self.kind, CardKind::Creature(_)) }
+    pub(crate) fn is_instant(&self) -> bool { matches!(self.kind, CardKind::Instant(_)) }
+    #[allow(dead_code)]
+    pub(crate) fn is_sorcery(&self) -> bool { matches!(self.kind, CardKind::Sorcery(_)) }
+
+    pub(crate) fn mana_cost(&self) -> &str {
+        match &self.kind {
+            CardKind::Land(_) | CardKind::Enchantment(_) => "",
+            CardKind::Creature(c) => &c.mana_cost,
+            CardKind::Artifact(a) => &a.mana_cost,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.mana_cost,
+            CardKind::Planeswalker(p) => &p.mana_cost,
+        }
+    }
+
+    pub(crate) fn abilities(&self) -> &[AbilityDef] {
+        match &self.kind {
+            CardKind::Land(l) => &l.abilities,
+            CardKind::Creature(c) => &c.abilities,
+            CardKind::Artifact(a) => &a.abilities,
+            CardKind::Planeswalker(p) => &p.abilities,
+            CardKind::Enchantment(e) => &e.abilities,
+            CardKind::Instant(_) | CardKind::Sorcery(_) => &[],
+        }
+    }
+
+    pub(crate) fn alternate_costs(&self) -> &[AlternateCost] {
+        &self.alternate_costs
+    }
+
+    /// Target spec for mode 0 (non-modal spells) or the given mode.
+    pub(crate) fn target_spec(&self) -> &TargetSpec {
+        self.target_spec_for_mode(0)
+    }
+
+    pub(crate) fn target_spec_for_mode(&self, mode: usize) -> &TargetSpec {
+        // IR path: prefer data-based modes when present.
+        for a in &self.abilities {
+            if let crate::ir::ability::AbilityKind::OnResolve { modes } = &a.kind {
+                if let Some(m) = modes.get(mode) {
+                    return &m.target_spec;
+                }
+            }
+        }
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => {
+                s.modes.as_ref()
+                    .and_then(|m| m.get(mode))
+                    .map(|m| &m.target_spec)
+                    .unwrap_or(&TargetSpec::None)
+            }
+            _ => &TargetSpec::None,
+        }
+    }
+
+    /// Number of modes (CR 700.2) available for this spell.
+    /// Returns the IR mode count when `abilities` carries an `OnResolve`;
+    /// otherwise falls back to legacy `SpellData.modes`. `None` if neither.
+    pub(crate) fn mode_count(&self) -> Option<usize> {
+        for a in &self.abilities {
+            if let crate::ir::ability::AbilityKind::OnResolve { modes } = &a.kind {
+                return Some(modes.len());
+            }
+        }
+        self.spell_modes().map(|m| m.len())
+    }
+
+    pub(crate) fn spell_modes(&self) -> Option<&SpellModes> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.modes.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn delve(&self) -> bool {
+        match &self.kind {
+            CardKind::Creature(c) => c.delve,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.delve,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn legendary(&self) -> bool {
+        match &self.kind {
+            CardKind::Creature(c) => c.legendary,
+            CardKind::Planeswalker(_) => true,  // all PWs are legendary since 2013
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_blue(&self) -> bool { self.colors.contains(&Color::Blue) }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_black(&self) -> bool { self.colors.contains(&Color::Black) }
+
+    pub(crate) fn mana_abilities(&self) -> &[ManaAbility] {
+        match &self.kind {
+            CardKind::Land(l) => &l.mana_abilities,
+            CardKind::Creature(c) => &c.mana_abilities,
+            CardKind::Artifact(a) => &a.mana_abilities,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn abilities_mut(&mut self) -> &mut [AbilityDef] {
+        match &mut self.kind {
+            CardKind::Land(l) => &mut l.abilities,
+            CardKind::Creature(c) => &mut c.abilities,
+            CardKind::Artifact(a) => &mut a.abilities,
+            CardKind::Planeswalker(p) => &mut p.abilities,
+            CardKind::Enchantment(e) => &mut e.abilities,
+            CardKind::Instant(_) | CardKind::Sorcery(_) => &mut [],
+        }
+    }
+
+    /// Mutable access to the owning `Vec<AbilityDef>` for this card's kind,
+    /// for push/append. Returns `None` for spell kinds (which have no
+    /// activated-ability list).
+    pub(crate) fn abilities_vec_mut(&mut self) -> Option<&mut Vec<AbilityDef>> {
+        match &mut self.kind {
+            CardKind::Land(l) => Some(&mut l.abilities),
+            CardKind::Creature(c) => Some(&mut c.abilities),
+            CardKind::Artifact(a) => Some(&mut a.abilities),
+            CardKind::Planeswalker(p) => Some(&mut p.abilities),
+            CardKind::Enchantment(e) => Some(&mut e.abilities),
+            CardKind::Instant(_) | CardKind::Sorcery(_) => None,
+        }
+    }
+
+    pub(crate) fn mana_abilities_mut(&mut self) -> &mut [ManaAbility] {
+        match &mut self.kind {
+            CardKind::Land(l) => &mut l.mana_abilities,
+            CardKind::Creature(c) => &mut c.mana_abilities,
+            CardKind::Artifact(a) => &mut a.mana_abilities,
+            _ => &mut [],
+        }
+    }
+
+    /// Mutable access to the owning `Vec<ManaAbility>` for push/append.
+    /// Returns `None` for kinds without mana-ability lists.
+    pub(crate) fn mana_abilities_vec_mut(&mut self) -> Option<&mut Vec<ManaAbility>> {
+        match &mut self.kind {
+            CardKind::Land(l) => Some(&mut l.mana_abilities),
+            CardKind::Creature(c) => Some(&mut c.mana_abilities),
+            CardKind::Artifact(a) => Some(&mut a.mana_abilities),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_land(&self) -> Option<&LandData> {
+        match &self.kind { CardKind::Land(l) => Some(l), _ => None }
+    }
+
+    pub(crate) fn as_creature(&self) -> Option<&CreatureData> {
+        match &self.kind { CardKind::Creature(c) => Some(c), _ => None }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn as_spell(&self) -> Option<&SpellData> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Returns the adventure/split second face if this is a `Split`-layout card.
+    pub(crate) fn adventure(&self) -> Option<&CardDef> {
+        if self.layout == CardLayout::Split { self.back.as_deref() } else { None }
+    }
+
+
+    pub(crate) fn keywords(&self) -> Keywords {
+        match &self.kind {
+            CardKind::Creature(c) => c.keywords,
+            _ => Keywords::default(),
+        }
+    }
+
+    pub(crate) fn has_keyword(&self, kw: Keyword) -> bool {
+        self.keywords().contains(kw)
+    }
+
+    /// Returns true if this card has the given subtype (e.g. `"adventure"`, `"Ninja"`, `"Equipment"`).
+    pub(crate) fn has_subtype(&self, st: &str) -> bool {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.subtypes.iter().any(|t| t == st),
+            CardKind::Creature(c) => c.creature_subtypes.iter().any(|t| t == st),
+            CardKind::Artifact(a) => a.subtypes.iter().any(|t| t == st),
+            _ => false,
+        }
+    }
+
+    /// False iff this spell can't be countered (CR 608.2b).
+    pub(crate) fn counterable(&self) -> bool { self.counterable }
+}
+
+// ── CardDef constructor + card type helpers ───────────────────────────────────
+
+/// Map a `CardKind` to the corresponding `CardType` enum value.
+pub(crate) fn card_type_of(kind: &CardKind) -> CardType {
+    match kind {
+        CardKind::Land(_)         => CardType::Land,
+        CardKind::Creature(_)     => CardType::Creature,
+        CardKind::Artifact(_)     => CardType::Artifact,
+        CardKind::Instant(_)      => CardType::Instant,
+        CardKind::Sorcery(_)      => CardType::Sorcery,
+        CardKind::Planeswalker(_) => CardType::Planeswalker,
+        CardKind::Enchantment(_)  => CardType::Enchantment,
+    }
+}
+
+
+impl CardDef {
+    /// Construct a `CardDef` from its parts. Used by `cards.rs` to define cards in Rust.
+    /// `colors` must be pre-computed (use `parse_colors`).
+    pub(crate) fn new(
+        name: impl Into<String>,
+        kind: CardKind,
+        colors: Vec<Color>,
+        play_weight: Option<u32>,
+        supertypes: Vec<Supertype>,
+        layout: CardLayout,
+        back: Option<Box<CardDef>>,
+        trigger_defs: Vec<TriggerDef>,
+        replacement_defs: Vec<ReplacementDef>,
+        prohibition_defs: Vec<ProhibitionDef>,
+        static_ability_defs: Vec<StaticAbilityDef>,
+    ) -> Self {
+        let types = vec![card_type_of(&kind)];
+        CardDef {
+            name: name.into(),
+            play_weight,
+            kind,
+            colors,
+            types,
+            supertypes,
+            layout,
+            back,
+            trigger_defs,
+            replacement_defs,
+            prohibition_defs,
+            static_ability_defs,
+            granted_trigger_defs: vec![],
+            additional_costs: crate::ir::ability::CostBody::empty(),
+            counterable: true,
+            casting_cost_modifier: 0,
+            castable: false,
+            alternate_costs: vec![],
+            protection_from: vec![],
+            abilities: vec![],
+        }
+    }
+}
+
+// ── ETB replacement / trigger helpers ────────────────────────────────────────
+
+/// Build a `ReplacementDef` for self-ETB replacement effects.
+///
+/// Eliminates the repeated boilerplate (extract id, `current_zone_id`, `fire_event`) present in
+/// every ETB replacement. `extra` is called **after** the zone-change event fires, so
+/// `state.permanent_bf_mut(id)` is live by the time it runs.
+///
+/// Signature: `extra(source_id, id, controller, state, t)`
+///
+/// Cards that need pre-fire mutation (e.g. Murktide setting counters before entering) keep their
+/// replacement inline with a custom check fn.
+pub(crate) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
+where
+    F: Fn(ObjId, ObjId, PlayerId, &mut SimState, u8) + Send + Sync + 'static,
+{
+    let extra = std::sync::Arc::new(extra);
+    ReplacementDef {
+        check: std::sync::Arc::new(etb_self_check),
+        make_effect: std::sync::Arc::new(move |source_id, controller: PlayerId| {
+            let extra = std::sync::Arc::clone(&extra);
+            Effect(std::sync::Arc::new(move |state, t, targets| {
+                let Some(&id) = targets.first() else { return };
+                let from = current_zone_id(id, state);
+                fire_event(
+                    GameEvent::ZoneChange { id, actor: controller, from, to: ZoneId::Battlefield, controller },
+                    state, t, controller,
+                );
+                extra(source_id, id, controller, state, t);
+            }))
+        }),
+        // CR 614.1c/d: intrinsic entry replacements are always active.
+        active_when: tp_always(),
+    }
+}
+
+/// Build a `TriggerDef` for simple self-ETB triggers.
+///
+/// Fires when this permanent enters the battlefield under its controller's control.
+/// Pushes a `TriggerContext` with the given `source_name`, `target_spec`, and effect.
+/// Always-active: the event match (`id == source_id`) is the guard.
+///
+/// Cards with combined ETB+other triggers (e.g. Orcish Bowmasters) or effects that read state
+/// at trigger-push time keep their trigger inline.
+pub(crate) fn etb_self_trigger<F>(
+    source_name: &'static str,
+    target_spec: TargetSpec,
+    make_effect: F,
+) -> TriggerDef
+where
+    F: Fn(ObjId, PlayerId) -> Effect + Send + Sync + 'static,
+{
+    TriggerDef {
+        check: std::sync::Arc::new(move |event, source_id, controller, _state, pending| {
+            if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+                if *id == source_id && *ctlr == controller {
+                    pending.push(TriggerContext {
+                        source_name: source_name.into(),
+                        controller,
+                        target_spec: target_spec.clone(),
+                        effect: make_effect(source_id, controller),
+                    });
+                }
+            }
+        }),
+        active_when: tp_on_battlefield(),
+    }
+}
+
+/// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
+pub(crate) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
+    etb_self_replacement(move |_, id, _, state, _| {
+        if let Some(bf) = state.permanent_bf_mut(id) { bf.loyalty = base_loyalty; }
+    })
+}
+
+// ── Card type enum ─────────────────────────────────────────────────────────────
+
+/// Card category used by the engine and predicates.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub(crate) enum CardType {
+    Land,
+    Creature,
+    Planeswalker,
+    Artifact,
+    #[default]
+    Instant,
+    Sorcery,
+    Enchantment,
+}
+
+
+/// Derive the color identity of a card from its mana cost string and explicit
+/// per-color override flags (used for cards whose cost doesn't reflect their color,
+/// e.g. Force of Will alternative-cost pitch cards).
+pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Color> {
+    let mut colors = Vec::new();
+    if mana_cost.contains('W') { colors.push(Color::White); }
+    if mana_cost.contains('U') || blue { colors.push(Color::Blue); }
+    if mana_cost.contains('B') || black { colors.push(Color::Black); }
+    if mana_cost.contains('R') { colors.push(Color::Red); }
+    if mana_cost.contains('G') { colors.push(Color::Green); }
+    colors
+}
+
+// ── Trigger check functions (one per trigger-having card) ─────────────────────
+
+/// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
+/// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
+pub(crate) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+        if *id == source_id && *ctlr == controller {
+            let pred = ir_and(ir_type(CardType::Creature), ir_toughness_le(2));
+            pending.push(TriggerContext {
+                source_name: "Recruiter of the Guard".into(),
+                controller,
+                target_spec: TargetSpec::None,
+                effect: eff_fetch_search(controller, pred, ZoneId::Hand),
+            });
+        }
+    }
+}
+
+/// ETB trigger for Atraxa, Grand Unifier: placeholder — adds 4 cards to hand.
+/// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
+pub(crate) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+        if *id == source_id && *ctlr == controller {
+            pending.push(TriggerContext {
+                source_name: "Atraxa, Grand Unifier".into(),
+                controller,
+                target_spec: TargetSpec::None,
+                effect: eff_hand_boost(controller, 4),
+            });
+        }
+    }
+}
+
+
+pub(crate) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+    match event {
+        // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
+        GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
+            if *active_player == controller =>
+        {
+            pending.push(TriggerContext {
+                source_name: "Tamiyo, Inquisitive Student".into(),
+                controller,
+                target_spec: TargetSpec::None,
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
+                    if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
+                        do_create_token("Clue Token", controller, state, t);
+                    }
+                })),
+            });
+        }
+        // Controller draws their 3rd card this turn.
+        GameEvent::Draw { controller: drawer, draw_index: 3, .. }
+            if *drawer == controller =>
+        {
+            pending.push(TriggerContext {
+                source_name: "Tamiyo, Inquisitive Student".into(),
+                controller,
+                target_spec: TargetSpec::None,
+                effect: Effect(std::sync::Arc::new(move |state, _t, _targets| {
+                    // Only transform if still on the front face.
+                    if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
+                    // "Exile Tamiyo, then return her transformed" — a genuinely new
+                    // object (CR 712 / 701.28): exile, re-enter the battlefield (fresh,
+                    // summoning-sick), then flip to the back face. `Transform` sets the
+                    // planeswalker's starting loyalty.
+                    use crate::ir::action::Action;
+                    use crate::ir::expr::{Expr, ZoneKindSel};
+                    let seq = Action::Sequence(vec![
+                        Action::Exile { target: Expr::ObjLit(source_id), bind_as: None },
+                        Action::Move {
+                            what: Expr::ObjLit(source_id),
+                            to: ZoneKindSel::Battlefield,
+                            to_owner: None,
+                            bind_as: None,
+                        },
+                        Action::Transform { target: Expr::ObjLit(source_id) },
+                    ]);
+                    let env = crate::ir::executor::BindEnv::new().with_controller(controller);
+                    crate::ir::executor::execute(&seq, state, &env);
+                })),
+            });
+        }
+        _ => {}
+    }
+}
+
+
+/// Check all triggers for the given event.
+/// Part 1: Card-bound triggers — walks all objects, checks trigger_defs from catalog,
+///         filtered by `active_when` predicate. No instances needed.
+/// Part 2: Ephemeral triggers — walks trigger_instances (runtime-created, e.g. delayed sac).
+/// Part 3: CE-granted triggers — walks materialized defs for Layer 6 ability grants.
+/// Returns (pending triggers, indices of OneShot trigger instances that fired).
+/// The caller must remove the OneShot instances from `state.trigger_instances`.
+pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<TriggerContext>, Vec<usize>) {
+    let mut pending: Vec<TriggerContext> = Vec::new();
+
+    // Part 1: Card-bound triggers derived from catalog definitions.
+    for (id, obj) in &state.objects {
+        let card_def = match state.catalog.get(&obj.catalog_key) {
+            Some(d) => d,
+            None => continue,
+        };
+        for tdef in &card_def.trigger_defs {
+            if (tdef.active_when)(*id, state) {
+                (tdef.check)(event, *id, obj.controller, state, &mut pending);
+            }
+        }
+    }
+
+    // Part 2: Ephemeral trigger instances (runtime-created by abilities).
+    // Track OneShot instances that fire so the caller can remove them.
+    let mut one_shot_fired: Vec<usize> = Vec::new();
+    for (i, inst) in state.trigger_instances.iter().enumerate() {
+        let before = pending.len();
+        (inst.check)(event, inst.source_id, inst.controller, state, &mut pending);
+        if pending.len() > before && inst.expiry == Some(Expiry::OneShot) {
+            one_shot_fired.push(i);
+        }
+    }
+
+    // Part 3: CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
+    let bf_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
+        .filter(|(_, o)| matches!(o.zone(), Some(Zone::Battlefield)) && o.materialized.is_some())
+        .map(|(id, o)| (*id, o.controller))
+        .collect();
+    for (obj_id, controller) in bf_ids {
+        if let Some(mat) = state.objects.get(&obj_id).and_then(|o| o.materialized.as_ref()) {
+            for check in &mat.granted_trigger_defs {
+                (check)(event, obj_id, controller, state, &mut pending);
+            }
+        }
+    }
+
+    // Part 4: IR-based triggered abilities from CardDef.abilities.
+    // Each Triggered ability declares an `active_zone` — the source must be
+    // in that zone for the trigger to be armed. Default Battlefield; Stack
+    // for self-triggering spell abilities (storm, cascade, "when you cast").
+    let all_ids: Vec<(ObjId, PlayerId, String, crate::ir::expr::ZoneKindSel)> = state
+        .objects
+        .iter()
+        .filter_map(|(id, o)| {
+            // `zone()?` skips players (zoneless) — they carry no triggered abilities.
+            let zk = match o.zone()? {
+                Zone::Battlefield => crate::ir::expr::ZoneKindSel::Battlefield,
+                Zone::Stack => crate::ir::expr::ZoneKindSel::Stack,
+                Zone::Graveyard => crate::ir::expr::ZoneKindSel::Graveyard,
+                Zone::Exile { .. } => crate::ir::expr::ZoneKindSel::Exile,
+                Zone::Hand { .. } => crate::ir::expr::ZoneKindSel::Hand,
+                Zone::Library => crate::ir::expr::ZoneKindSel::Library,
+            };
+            Some((*id, o.controller, o.catalog_key.clone(), zk))
+        })
+        .collect();
+    for (obj_id, controller, key, obj_zone) in all_ids {
+        let Some(card_def) = state.catalog.get(&key) else { continue };
+        for ability in &card_def.abilities {
+            let crate::ir::ability::AbilityKind::Triggered {
+                spec,
+                target_spec,
+                body,
+                active_zone,
+            } = &ability.kind
+            else {
+                continue;
+            };
+            if *active_zone != obj_zone {
+                continue;
+            }
+            let Some(match_env) = crate::ir::executor::match_trigger(spec, event, obj_id, controller, state)
+            else { continue };
+            // Capture bindings from the matched event (e.g. triggered_obj,
+            // triggered_mana_spent) so the body can reference them on resolution.
+            let match_bindings: Vec<(&'static str, crate::ir::expr::Value)> =
+                match_env.bindings.iter().map(|(k, v)| (*k, v.clone())).collect();
+            let body = body.clone();
+            let source_name = card_def.name.clone();
+            let effect = Effect(std::sync::Arc::new(move |state, _t, targets| {
+                use crate::ir::executor::{execute, BindEnv};
+                use crate::ir::expr::Value;
+                let mut env = BindEnv::new()
+                    .with_source(obj_id)
+                    .with_controller(controller);
+                for (k, v) in &match_bindings {
+                    env = env.with_var(k, v.clone());
+                }
+                if let Some(&tgt) = targets.first() {
+                    let v = if tgt == state.us_id || tgt == state.opp_id {
+                        Value::Player(state.who_pid(tgt))
+                    } else {
+                        Value::Obj(tgt)
+                    };
+                    env = env.with_var("target", v);
+                }
+                let _ = execute(&body, state, &env);
+            }));
+            // "Another target X" is expressed by excluding the ability's own
+            // source from every object filter in the spec. Harmless for specs
+            // that already exclude self (the id just never matches the zone).
+            let target_spec = crate::predicates::exclude_from_target_spec(target_spec, obj_id);
+            pending.push(TriggerContext {
+                source_name,
+                controller,
+                target_spec,
+                effect,
+            });
+        }
+    }
+
+    (pending, one_shot_fired)
+}
+
+/// Push a vec of `TriggerContext`s onto the stack as triggered ability items.
+/// Target selection goes through the controller's strategy (CR 601.2c).
+pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
+    for ctx in triggers {
+        let all_targets = legal_targets(&ctx.target_spec, ctx.controller, ObjId(0), state);
+        // DefaultStrategy::choose_targets falls back to pick_targets, matching the
+        // old `unwrap_or_else(pick_targets)`.
+        let chosen_targets = state.with_strategy(ctx.controller, |s, st|
+            s.choose_targets(st, ObjId(0), &all_targets, &ctx.target_spec));
+        let ab_id = state.alloc_id();
+        state.insert_stack_ability(ab_id, ctx.source_name.clone(), ctx.controller, crate::AbilityState {
+            effect: ctx.effect.clone(),
+            chosen_targets,
+            costs_paid_ctx: CostsPaidCtx::default(),
+            is_triggered: true,
+            counterable: true,
+            choice_spec: None,
+        });
+    }
+}
+
+/// Trigger check for Tamiyo +2: fires for each opposing creature that attacks.
+/// Produces a trigger whose effect registers a -1/0 ContinuousInstance (L7) for that attacker.
+pub(crate) fn tamiyo_plus_two_check(
+    event: &GameEvent,
+    source_id: ObjId,
+    controller: PlayerId,
+    _state: &SimState,
+    pending: &mut Vec<TriggerContext>,
+) {
+    if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
+        if *attacker_controller != controller {
+            let attacker_id = *attacker_id;
+            let tamiyo_id = source_id;
+            pending.push(TriggerContext {
+                source_name: "Tamiyo, Seasoned Scholar".into(),
+                controller,
+                target_spec: TargetSpec::None,
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
+                    let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
+                    if state.permanent_bf(attacker_id).is_some() {
+                        let ts = state.next_ci_timestamp();
+                        state.continuous_instances.push(ContinuousInstance {
+                            source_id: tamiyo_id,
+                            controller,
+                            layer: ContinuousLayer::L7PowerToughness,
+                            reads: vec![],
+                            writes: vec![CeWrites::PowerToughness],
+                            timestamp: ts,
+                            filter: std::sync::Arc::new(move |id, _, _| id == attacker_id),
+                            modifier: std::sync::Arc::new(|def, _state| {
+                                if let CardKind::Creature(c) = &mut def.kind {
+                                    c.adjust_pt(-1, 0);
+                                }
+                            }),
+                            expiry: Expiry::EndOfTurn,
+                        });
+                    }
+                    state.log(t, controller, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
+                })),
+            });
+        }
+    }
+}
+
+pub(crate) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        // Register a floating trigger watcher that fires for each opposing attacker.
+        // Expires at the start of our next turn (StartOfControllerNextTurn).
+        state.trigger_instances.push(TriggerInstance {
+            source_id,
+            controller: who,
+            check: std::sync::Arc::new(tamiyo_plus_two_check),
+            expiry: Some(Expiry::StartOfControllerNextTurn),
+        });
+        state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
+    }))
+}
+
+/// Tamiyo −3: return target instant or sorcery from your graveyard to your hand.
+/// If it's a green card, add one mana of any color.
+pub(crate) fn build_tamiyo_minus_three(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let Some(&target_id) = targets.first() else { return; };
+        // Check if the card is green before moving it.
+        let is_green = state.objects.get(&target_id)
+            .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
+            .map_or(false, |d| d.colors.contains(&Color::Green));
+        let card_name = state.objects.get(&target_id)
+            .map(|o| o.catalog_key.clone())
+            .unwrap_or_default();
+        change_zone(target_id, ZoneId::Hand, state, t, who);
+        state.log(t, who, format!("{} −3: return {} to hand", source_name, card_name));
+        if is_green {
+            // "Add one mana of any color" — use strategy color choice.
+            let ChoiceResult::Color(chosen) =
+                state.with_strategy(who, |s, st| s.resolve_choice(source_id, &ChoiceRequest::Color, st)) else { return };
+            let spec = match chosen {
+                Color::White => "W",
+                Color::Blue  => "U",
+                Color::Black => "B",
+                Color::Red   => "R",
+                Color::Green => "G",
+            };
+            fire_event(GameEvent::ManaProduced { who, spec: spec.into() }, state, t, who);
+            state.log(t, who, format!("  (green card → add {{{}}})", spec));
+        }
+    }))
+}
+
+/// Kaito −2: tap target creature, put two stun counters on it.
+pub(crate) fn build_kaito_minus_two(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let Some(&target_id) = targets.first() else { return; };
+        let target_name = state.permanent_name(target_id).unwrap_or_default();
+        if let Some(bf) = state.permanent_bf_mut(target_id) {
+            bf.tapped = true;
+            bf.stun_counters += 2;
+        }
+        state.log(t, who, format!("{} −2: tap {} + 2 stun counters", source_name, target_name));
+    }))
+}
+
+/// Kaito 0: surveil 2, then draw a card for each opponent who lost life this turn.
+/// In a 1v1 game, this draws 0 or 1 card.
+pub(crate) fn build_kaito_zero(who: PlayerId, source_id: ObjId) -> Effect {
+    let surveil = eff_surveil(who, 2);
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        surveil.call(state, t, &[]);
+        // 1v1: check if the single opponent lost life this turn.
+        let opp = who.opp();
+        let opp_lost = state.player(opp).life_lost_this_turn > 0;
+        let draw_count = if opp_lost { 1 } else { 0 };
+        if draw_count > 0 {
+            eff_draw(who, draw_count).call(state, t, &[]);
+        }
+        state.log(t, who, format!(
+            "{} 0: surveil 2{}",
+            source_name,
+            if draw_count > 0 { ", draw 1 (opp lost life)" } else { "" }
+        ));
+    }))
+}
+
+/// Tamiyo −7: draw cards equal to half library (rounded up).
+/// You get an emblem with "You have no maximum hand size."
+pub(crate) fn build_tamiyo_minus_seven(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let lib_size = state.library_size(who);
+        let draw_count = (lib_size + 1) / 2; // rounded up
+        eff_draw(who, draw_count).call(state, t, &[]);
+        state.player_mut(who).no_max_hand_size = true;
+        state.log(t, who, format!(
+            "{} −7: draw {} (half library), emblem: no max hand size",
+            source_name, draw_count
+        ));
+    }))
+}
+
+/// Kaito +1: you get an emblem with "Ninjas you control get +1/+1."
+/// Modeled as a permanent L7 CE (Expiry::Never).
+pub(crate) fn build_kaito_plus_one(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let ts = state.next_ci_timestamp();
+        state.continuous_instances.push(ContinuousInstance {
+            source_id,
+            controller: who,
+            layer: ContinuousLayer::L7PowerToughness,
+            reads: vec![],
+            writes: vec![CeWrites::PowerToughness],
+            timestamp: ts,
+            filter: std::sync::Arc::new(move |id, _controller, state| {
+                let obj = match state.objects.get(&id) { Some(o) => o, None => return false };
+                if obj.controller != who { return false; }
+                state.def_of(id).map_or(false, |d| d.has_subtype("Ninja"))
+            }),
+            modifier: std::sync::Arc::new(|def, _state| {
+                if let CardKind::Creature(c) = &mut def.kind {
+                    c.adjust_pt(1, 1);
+                }
+            }),
+            expiry: Expiry::Never,
+        });
+        state.log(t, who, format!("{} +1: emblem — Ninjas you control get +1/+1", source_name));
+    }))
+}
+
+/// Build an `Effect` closure for an activated ability at push time.
+pub(crate) fn build_ability_effect(
+    ability: &AbilityDef,
+    who: PlayerId,
+    source_id: ObjId,
+) -> Effect {
+    if let Some(body) = &ability.ir_body {
+        let body = body.clone();
+        return Effect(std::sync::Arc::new(move |state, _t, targets| {
+            use crate::ir::executor::{execute, BindEnv};
+            use crate::ir::expr::Value;
+            let mut env = BindEnv::new()
+                .with_source(source_id)
+                .with_controller(who);
+            if let Some(&tgt) = targets.first() {
+                let v = if tgt == state.us_id || tgt == state.opp_id {
+                    Value::Player(state.who_pid(tgt))
+                } else {
+                    Value::Obj(tgt)
+                };
+                env = env.with_var("target", v);
+            }
+            let _ = execute(&body, state, &env);
+        }));
+    }
+    if let Some(factory) = &ability.ability_factory {
+        return factory(who, source_id);
+    }
+    // No factory — no-op (e.g. a loyalty ability that only adjusts loyalty counters).
+    Effect(std::sync::Arc::new(|_state, _t, _targets| {}))
+}
+
+/// Build a `(TargetSpec, Effect)` for a spell at cast time.
+///
+/// For spells with modes: uses the chosen mode's factory and target spec.
+/// For non-spell cards (permanents): returns `eff_enter_permanent`.
+pub(crate) fn build_spell_effect(
+    def: &CardDef,
+    who: PlayerId,
+    source_id: ObjId,
+    chosen_x: u32,
+    chosen_mode: usize,
+) -> (TargetSpec, Effect) {
+    // IR path: a CardDef may carry a data-based resolution body.
+    for a in &def.abilities {
+        if let crate::ir::ability::AbilityKind::OnResolve { modes } = &a.kind {
+            if let Some(mode) = modes.get(chosen_mode) {
+                let body = mode.body.clone();
+                let eff = Effect(std::sync::Arc::new(move |state, _t, targets| {
+                    use crate::ir::executor::{execute, BindEnv};
+                    use crate::ir::expr::Value;
+                    let mut env = BindEnv::new()
+                        .with_source(source_id)
+                        .with_controller(who)
+                        // The announced X for this spell (CR 601.2b), so resolution
+                        // bodies can read it as `Ctx::Var("x")` (e.g. Meltdown's MV ≤ X).
+                        .with_var("x", Value::Num(chosen_x as i64));
+                    if let Some(&tgt) = targets.first() {
+                        let v = if tgt == state.us_id || tgt == state.opp_id {
+                            Value::Player(state.who_pid(tgt))
+                        } else {
+                            Value::Obj(tgt)
+                        };
+                        env = env.with_var("target", v);
+                    }
+                    let _ = execute(&body, state, &env);
+                }));
+                return (mode.target_spec.clone(), eff);
+            }
+        }
+    }
+    // Legacy path
+    if let Some(mode) = def.spell_modes().and_then(|m| m.get(chosen_mode)) {
+        return (mode.target_spec.clone(), (mode.factory)(who, source_id, chosen_x));
+    }
+    (TargetSpec::None, eff_enter_permanent(who, def.name.clone()))
+}
+
+
+/// Pre-register instances for a card object at simulation init.
+// ── Grafdigger's Cage creature-entry check ───────────────────────────────────
+
+/// Matches any ZoneChange where a card moves from a graveyard or library to the battlefield.
+/// Zone-direction predicate (no creature-type check); useful as a building block for cards
+/// that restrict or replace all GY/library → BF transitions.
+#[allow(dead_code)]
+pub(crate) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
+    if let GameEvent::ZoneChange { id, from: ZoneId::Graveyard | ZoneId::Library, to: ZoneId::Battlefield, .. } = event {
+        Some(vec![*id])
+    } else {
+        None
+    }
+}
+
+// ── Leyline of the Void ───────────────────────────────────────────────────────
+
+pub(crate) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
+        Some(vec![*id])
+    } else {
+        None
+    }
+}
+
+// ── Shared ETB-self check ─────────────────────────────────────────────────────
+
+/// Matches any ZoneChange where this permanent is the object entering the battlefield.
+pub(crate) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
+        if *id == source_id {
+            return Some(vec![*id]);
+        }
+    }
+    None
+}
+
+/// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
+/// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
+pub(crate) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
+    state.objects.get(&id).and_then(|c| c.zone()).map(|z| card_zone_to_id(&z)).unwrap_or(ZoneId::Hand)
+}
+
+// ── Murktide Regent ETB ───────────────────────────────────────────────────────
+
+pub(crate) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+        if *id == source_id && *ctlr == controller {
+            return Some(vec![*id]);
+        }
+    }
+    None
+}
+

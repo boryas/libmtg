@@ -1,0 +1,1725 @@
+use rand::Rng;
+use rand::rngs::SmallRng;
+use super::*;
+
+// ── Card evaluation types ────────────────────────────────────────────────────
+
+/// What broad role does this card serve in a player's plan?
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum CardCategory {
+    Mana,        // lands, rituals, petals
+    Threat,      // creatures, PWs, Doomsday (combo is a subset of threat)
+    Interaction, // counters, removal, discard
+    Selection,   // cantrips — digs toward missing pieces
+}
+
+/// Opponent characteristics that shift card evaluation weights.
+#[derive(Clone, Debug)]
+pub(crate) struct MatchupInfo {
+    pub(crate) opp_has_counters: bool,
+    pub(crate) opp_fast_clock: bool,
+    /// Colors that fetch lands in this deck can find (deck-level, not per-card).
+    pub(crate) fetch_colors: Vec<Color>,
+}
+
+impl Default for MatchupInfo {
+    fn default() -> Self {
+        MatchupInfo {
+            opp_has_counters: true,
+            opp_fast_clock: false,
+            fetch_colors: vec![Color::Blue, Color::Black],
+        }
+    }
+}
+
+/// How far the current game state is from the player's target hand shape.
+/// Each field is 0.0 (fully satisfied) to 1.0+ (completely missing).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TargetGap {
+    pub(crate) mana: f64,
+    pub(crate) threat: f64,
+    pub(crate) interaction: f64,
+}
+
+// ── Strategy trait ────────────────────────────────────────────────────────────
+
+pub(crate) trait Strategy {
+    fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)>;
+    fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)>;
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool;
+
+    /// Called when an ability resolves with a `ChoiceSpec` (CR "choose" ≠ "target").
+    /// `effect_id` is the `ObjId` of the ability object that is resolving.
+    /// Default: pick the first valid option.
+    fn choose_for_effect(&mut self, _effect_id: ObjId, choices: &[ObjId], _state: &SimState) -> Option<ObjId> {
+        choices.first().copied()
+    }
+
+    // ── CR 601.2 state machine methods ──────────────────────────────────
+
+    /// Pick from engine-provided legal actions.
+    fn choose_action(&mut self, _state: &SimState, _ap: PlayerId,
+                     _legal_actions: &[LegalAction]) -> LegalAction {
+        LegalAction::Pass
+    }
+
+    /// 601.2b: choose mode, alt cost, X. Default: mode 0, no alt cost, X=3.
+    fn announce(&mut self, _state: &SimState, _card_id: ObjId,
+                _options: &AnnounceOptions) -> AnnounceChoice {
+        AnnounceChoice { chosen_mode: 0, alt_cost_index: None, chosen_x: 3 }
+    }
+
+    /// 601.2g: pick a mana ability to activate, or None to stop.
+    /// Called in a loop during ActivateMana. Default: auto_tap_plan heuristic.
+    fn choose_mana_ability(&mut self, state: &SimState, who: PlayerId,
+                           available: &[ManaAbilityOption],
+                           mana_cost: &ManaCost) -> Option<ManaActivation> {
+        let plan = auto_tap_plan(state, who, mana_cost);
+        plan.into_iter().find(|act| {
+            available.iter().any(|a| a.source_id == act.source_id && a.ability_index == act.ability_index)
+        })
+    }
+
+    /// 601.2c: choose targets from legal candidates. Default: pick_targets heuristic.
+    fn choose_targets(&mut self, state: &SimState, _card_id: ObjId,
+                      legal: &[ObjId], spec: &TargetSpec) -> Vec<ObjId> {
+        pick_targets(spec, legal, state)
+    }
+
+    /// Phase 3 cost-IR: announcement-time decision plan for an IR cost tree.
+    ///
+    /// Returns a `BindEnv` answering every `Decision` in `schema`. Replaces the
+    /// per-decision callbacks (`announce` / `choose_targets` / `choose_mana_ability`
+    /// / `choose_cost_payment`) for IR-cost cards: one structured call covers
+    /// modes, targets, and cost bindings in a single round-trip.
+    ///
+    /// Default impl picks the first `count` candidates for `Objects` decisions,
+    /// the first payable index for `Branch`, and a sensible default for `Number`
+    /// (XLife/XMana = min(3, max); Replicate = 0). Strategies override to plan
+    /// across decisions (e.g. choose Force-of-Will pitch only if the card is
+    /// safely held).
+    fn propose_announcement(
+        &mut self,
+        _state: &SimState,
+        _source: ObjId,
+        schema: &crate::ir::cost::CostSchema,
+    ) -> crate::ir::executor::BindEnv {
+        default_announcement(schema)
+    }
+
+    /// Phase 3 cost-IR: resolution-time payment plan (CR 701 "as ~ resolves, …"
+    /// kicker-style payments). Same `CostSchema`/`BindEnv` shape as
+    /// `propose_announcement`; called at a different point in the pipeline.
+    /// Default impl is identical to `propose_announcement`.
+    fn propose_resolution_payment(
+        &mut self,
+        _state: &SimState,
+        _source: ObjId,
+        schema: &crate::ir::cost::CostSchema,
+    ) -> crate::ir::executor::BindEnv {
+        default_announcement(schema)
+    }
+
+    /// CR 509.1h: when an attacker is blocked by 2+ creatures, the attacking player
+    /// chooses the damage assignment order. Default: keep declaration order.
+    fn order_blockers(&mut self, _state: &SimState, _attacker_id: ObjId,
+                      blockers: &[ObjId]) -> Vec<ObjId> {
+        blockers.to_vec()
+    }
+
+    /// CR 510.1c: the attacking player divides the attacker's combat damage among
+    /// `ordered_blockers`, but must assign at least lethal damage to each blocker
+    /// before assigning any to the next one. Returns one amount per blocker; sum ≤
+    /// `total_damage`. The engine spills any leftover (`total_damage - sum`) to the
+    /// defending player or planeswalker only when the attacker has trample.
+    /// Without trample, leftover is dumped onto the last blocker (CR 510.1c sentence 3).
+    ///
+    /// Default heuristic: assign exactly lethal in order, then put any remainder onto
+    /// the last blocker (or leave for trample spillover, decided by the engine).
+    /// `lethal_per_blocker` is the engine-computed minimum for each blocker, already
+    /// reflecting deathtouch (CR 702.2c) and pre-existing damage.
+    fn assign_combat_damage(&mut self, _state: &SimState, _attacker_id: ObjId,
+                            ordered_blockers: &[ObjId], total_damage: i32,
+                            lethal_per_blocker: &[i32], has_trample: bool) -> Vec<i32> {
+        let n = ordered_blockers.len();
+        let mut out = vec![0i32; n];
+        let mut remaining = total_damage.max(0);
+        for i in 0..n {
+            if remaining <= 0 { break; }
+            let lethal = lethal_per_blocker[i].max(0);
+            let take = remaining.min(lethal);
+            out[i] = take;
+            remaining -= take;
+        }
+        // Without trample, all damage must be assigned to blockers — pile the rest on the last.
+        if !has_trample && remaining > 0 && n > 0 {
+            out[n - 1] += remaining;
+        }
+        out
+    }
+
+    // ── Card evaluation (Phase 3) ──────────────────────────────────────────
+
+    /// The player this strategy controls.
+    fn player_id(&self) -> PlayerId;
+
+    /// What categories does my plan still need? Considers hand + board + game state.
+    fn plan_gap(&self, state: &SimState) -> TargetGap;
+
+    /// How much does this card close the current gap? Higher = more useful.
+    fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64;
+
+    /// A typed, non-object choice during resolution (CR 601.2 / 700): choose a
+    /// color, name a creature type / card, pick a mode, pay a ward tax,
+    /// may-put-on-battlefield, may-attach. Reached per-player via `with_strategy`.
+    fn resolve_choice(&mut self, _source: ObjId, req: &ChoiceRequest, _state: &SimState) -> ChoiceResult {
+        match req {
+            ChoiceRequest::Color                    => ChoiceResult::Color(Color::Blue),
+            ChoiceRequest::CreatureType             => ChoiceResult::CreatureType("Wizard".to_string()),
+            ChoiceRequest::CardName                 => ChoiceResult::CardName(String::new()),
+            ChoiceRequest::Mode(_)                  => ChoiceResult::Mode(0),
+            ChoiceRequest::WardPayment {..}         => ChoiceResult::Bool(true),
+            ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
+            ChoiceRequest::MayAttach                => ChoiceResult::Bool(true),
+        }
+    }
+
+    /// Surveil (CR 701.30): true = put in graveyard, false = keep on top.
+    /// Default: bin cards the evaluator scores below threshold (delegates to
+    /// `state.evaluate_card`, matching the old run_game install).
+    fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool {
+        let who = self.player_id();
+        let eval = std::sync::Arc::clone(&state.evaluate_card);
+        eval(who, id, state) < 0.3
+    }
+
+    /// Forced sacrifice (CR 701.16): pick which permanent to sacrifice. Default: first.
+    fn sacrifice_choice(&mut self, _who: PlayerId, candidates: &[ObjId], _state: &SimState) -> Option<ObjId> {
+        candidates.first().copied()
+    }
+
+    /// "Put them back in any order" (Ponder, scry-then-arrange, etc.): given the
+    /// looked-at library cards (current top-to-bottom), return them in the desired
+    /// top-to-bottom order — a genuine player decision, not an engine sort.
+    /// Default: highest-value first (via the evaluator), matching the old heuristic.
+    fn order_top_library(&mut self, cards: &[ObjId], state: &SimState) -> Vec<ObjId> {
+        let who = self.player_id();
+        let eval = std::sync::Arc::clone(&state.evaluate_card);
+        let mut scored: Vec<(ObjId, f64)> = cards.iter()
+            .map(|&id| (id, eval(who, id, state)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Drain accumulated decision-log entries. Called by the engine after each
+    /// strategy invocation; entries are appended to `SimState::decision_log`.
+    fn drain_decisions(&mut self) -> Vec<String> { Vec::new() }
+
+    /// London mulligan: pick N cards to put on bottom (lowest-value cards).
+    fn london_bottom(&self, state: &SimState, n: usize) -> Vec<ObjId> {
+        let gap = self.plan_gap(state);
+        let who = self.player_id();
+        let mut scored: Vec<(ObjId, f64)> = state.hand_of(who)
+            .map(|c| (c.id, self.card_fills(c.id, &gap, state)))
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(n).map(|(id, _)| id).collect()
+    }
+}
+
+/// A do-nothing strategy: no attacks/blocks, never mulligans, and the trait's
+/// default decisions everywhere else (e.g. `choose_mana_ability` = `auto_tap_plan`,
+/// `choose_targets` = `pick_targets`). Used as the `SimState::with_strategy`
+/// fallback when a player has no strategy installed (tests / uninitialized
+/// state), so resolution-time decisions always have *some* policy to consult.
+pub(crate) struct DefaultStrategy {
+    player_id: PlayerId,
+}
+
+impl DefaultStrategy {
+    pub(crate) fn new(player_id: PlayerId) -> Self {
+        DefaultStrategy { player_id }
+    }
+}
+
+impl Strategy for DefaultStrategy {
+    fn declare_attackers(&mut self, _state: &SimState) -> Vec<(ObjId, Option<ObjId>)> { Vec::new() }
+    fn declare_blockers(&mut self, _state: &SimState) -> Vec<(ObjId, ObjId)> { Vec::new() }
+    fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
+    fn player_id(&self) -> PlayerId { self.player_id }
+    fn plan_gap(&self, _state: &SimState) -> TargetGap { TargetGap::default() }
+    fn card_fills(&self, _card_id: ObjId, _gap: &TargetGap, _state: &SimState) -> f64 { 0.0 }
+}
+
+// ── TestStrategy (test-only) ───────────────────────────────────────────────────
+
+/// A configurable test-player strategy: a real `Strategy` impl whose
+/// resolution-time decisions (typed choices, surveil, may-do, sacrifice) are set
+/// by data via the builder, with every other decision falling back to the trait
+/// defaults (no attacks/blocks, never mulligans). Tests `set_strategy` one of
+/// these on the relevant player to force a specific choice — the same mechanism
+/// the engine uses, rather than mutating a global callback. Shared by both
+/// `tests.rs` and `ir/tests.rs`.
+#[cfg(test)]
+pub(crate) struct TestStrategy {
+    player_id: PlayerId,
+    color: Option<Color>,
+    card_name: Option<String>,
+    /// Forces `Mode(n)` for MayDo/Choose decisions; None → trait default (Mode 0).
+    mode: Option<usize>,
+    /// MayPutOnBattlefield: put the first candidate instead of declining.
+    put_first_candidate: bool,
+    /// Surveil: Some(true) = mill, Some(false) = keep, None = evaluator default.
+    surveil: Option<bool>,
+    /// Forced sacrifice: pick the smallest-`ObjId` candidate (deterministic
+    /// regardless of HashMap iteration order); false → trait default (first).
+    sacrifice_min_id: bool,
+    /// Library ordering: reverse the looked-at cards (proves OrderTop routes the
+    /// arrangement through the strategy, not an engine sort); false → trait default.
+    order_reverse: bool,
+}
+
+#[cfg(test)]
+impl TestStrategy {
+    pub(crate) fn new(player_id: PlayerId) -> Self {
+        TestStrategy {
+            player_id, color: None, card_name: None, mode: None,
+            put_first_candidate: false, surveil: None, sacrifice_min_id: false,
+            order_reverse: false,
+        }
+    }
+    pub(crate) fn color(mut self, c: Color) -> Self { self.color = Some(c); self }
+    pub(crate) fn card_name(mut self, n: impl Into<String>) -> Self { self.card_name = Some(n.into()); self }
+    pub(crate) fn mode(mut self, m: usize) -> Self { self.mode = Some(m); self }
+    pub(crate) fn put_first_candidate(mut self) -> Self { self.put_first_candidate = true; self }
+    pub(crate) fn surveil(mut self, mill: bool) -> Self { self.surveil = Some(mill); self }
+    pub(crate) fn sacrifice_min_id(mut self) -> Self { self.sacrifice_min_id = true; self }
+    pub(crate) fn order_reverse(mut self) -> Self { self.order_reverse = true; self }
+}
+
+#[cfg(test)]
+impl Strategy for TestStrategy {
+    fn declare_attackers(&mut self, _s: &SimState) -> Vec<(ObjId, Option<ObjId>)> { Vec::new() }
+    fn declare_blockers(&mut self, _s: &SimState) -> Vec<(ObjId, ObjId)> { Vec::new() }
+    fn take_mulligan(&mut self, _s: &SimState, _m: u32) -> bool { false }
+    fn player_id(&self) -> PlayerId { self.player_id }
+    fn plan_gap(&self, _s: &SimState) -> TargetGap { TargetGap::default() }
+    fn card_fills(&self, _i: ObjId, _g: &TargetGap, _s: &SimState) -> f64 { 0.0 }
+
+    fn resolve_choice(&mut self, source: ObjId, req: &ChoiceRequest, state: &SimState) -> ChoiceResult {
+        match req {
+            ChoiceRequest::Color if self.color.is_some() =>
+                ChoiceResult::Color(self.color.unwrap()),
+            ChoiceRequest::CardName if self.card_name.is_some() =>
+                ChoiceResult::CardName(self.card_name.clone().unwrap()),
+            ChoiceRequest::Mode(_) if self.mode.is_some() =>
+                ChoiceResult::Mode(self.mode.unwrap()),
+            ChoiceRequest::MayPutOnBattlefield { candidates } if self.put_first_candidate =>
+                ChoiceResult::OptionalObject(candidates.first().copied()),
+            // Anything unset falls back to the trait default policy.
+            _ => DefaultStrategy::new(self.player_id).resolve_choice(source, req, state),
+        }
+    }
+
+    fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool {
+        match self.surveil {
+            Some(mill) => mill,
+            None => DefaultStrategy::new(self.player_id).surveil_choice(id, state),
+        }
+    }
+
+    fn sacrifice_choice(&mut self, who: PlayerId, candidates: &[ObjId], state: &SimState) -> Option<ObjId> {
+        if self.sacrifice_min_id {
+            candidates.iter().min_by_key(|id| id.0).copied()
+        } else {
+            DefaultStrategy::new(self.player_id).sacrifice_choice(who, candidates, state)
+        }
+    }
+
+    fn order_top_library(&mut self, cards: &[ObjId], state: &SimState) -> Vec<ObjId> {
+        if self.order_reverse {
+            cards.iter().rev().copied().collect()
+        } else {
+            DefaultStrategy::new(self.player_id).order_top_library(cards, state)
+        }
+    }
+}
+
+// ── Decision logging helpers ─────────────────────────────────────────────────
+
+/// Summarize a hand's category composition for logging. Returns e.g. "(M=2 T=1 I=1 S=2 ?=1)".
+fn hand_category_summary(
+    state: &SimState,
+    who: PlayerId,
+    categorize: fn(&str, Option<&CardDef>) -> Option<CardCategory>,
+) -> String {
+    let (mut m, mut t, mut i, mut s, mut dead) = (0, 0, 0, 0, 0);
+    for c in state.hand_of(who) {
+        let def = state.def_of(c.id).or_else(|| state.catalog.get(c.catalog_key.as_str()));
+        match categorize(&c.catalog_key, def) {
+            Some(CardCategory::Mana)        => m += 1,
+            Some(CardCategory::Threat)      => t += 1,
+            Some(CardCategory::Interaction)  => i += 1,
+            Some(CardCategory::Selection)    => s += 1,
+            None                             => dead += 1,
+        }
+    }
+    format!("(M={} T={} I={} S={} ?={})", m, t, i, s, dead)
+}
+
+// ── DoomsdayStrategy ─────────────────────────────────────────────────────────
+
+pub(crate) struct DoomsdayStrategy {
+    player_id: PlayerId,
+    rng: SmallRng,
+    /// Set when a black-producing land must be played next main phase.
+    must_land_drop: bool,
+    matchup: MatchupInfo,
+    /// Accumulated decision-log entries, drained by the engine after each call.
+    decisions: Vec<String>,
+}
+
+impl DoomsdayStrategy {
+    pub(crate) fn new(matchup: MatchupInfo) -> Self {
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(),
+               must_land_drop: false, matchup, decisions: Vec::new() }
+    }
+    fn dlog(&mut self, msg: impl Into<String>) { self.decisions.push(msg.into()); }
+}
+
+/// Categorize a card for the Doomsday player's pre-DD evaluation.
+/// Returns `None` for cards that are dead weight pre-DD (Oracle, Unearth, LED).
+pub(crate) fn dd_categorize(name: &str, def: Option<&CardDef>) -> Option<CardCategory> {
+    match name {
+        // Mana: rituals and fast mana (not LED — discards hand pre-DD)
+        "Dark Ritual" | "Lotus Petal" => return Some(CardCategory::Mana),
+        // THE combo piece
+        "Doomsday" => return Some(CardCategory::Threat),
+        // Interaction: counterspells and discard
+        "Force of Will" | "Daze" | "Thoughtseize" => return Some(CardCategory::Interaction),
+        // Selection: cantrips and free cyclers
+        "Brainstorm" | "Ponder" | "Preordain" | "Consider"
+        | "Street Wraith" | "Edge of Autumn" => return Some(CardCategory::Selection),
+        // Dead pre-DD: only useful in the pile
+        "Thassa's Oracle" | "Unearth" | "Lion's Eye Diamond" => return None,
+        _ => {}
+    }
+    let def = def?;
+    if def.is_land() { return Some(CardCategory::Mana); }
+    if def.is_creature() || matches!(def.kind, CardKind::Planeswalker(_)) {
+        return Some(CardCategory::Threat);
+    }
+    if def.is_instant() { return Some(CardCategory::Interaction); }
+    if def.is_sorcery() { return Some(CardCategory::Interaction); }
+    None
+}
+
+/// Compute the DD player's plan gap from hand + board state.
+pub(crate) fn dd_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInfo) -> TargetGap {
+    // Helper: look up def with catalog fallback.
+    let def_or_catalog = |id: ObjId, key: &str| -> Option<&CardDef> {
+        state.def_of(id).or_else(|| state.catalog.get(key))
+    };
+
+    // ── Mana gap: path to BBB ────────────────────────────────────────────
+    let lands_in_play = state.permanents_of(who)
+        .filter(|c| def_or_catalog(c.id, &c.catalog_key).map_or(false, |d| d.is_land()))
+        .count();
+    let rituals_in_hand = state.hand_of(who)
+        .filter(|c| matches!(c.catalog_key.as_str(), "Dark Ritual" | "Lotus Petal"))
+        .count();
+    let mana_sources = lands_in_play + rituals_in_hand;
+    // Need ~3 mana sources for BBB (land + ritual, or 3 lands, etc.)
+    let mana_gap = ((3.0 - mana_sources as f64) / 3.0).clamp(0.0, 1.0);
+
+    // ── Threat gap: need Doomsday or a creature win-con ─────────────────
+    let dd_in_hand = state.hand_of(who).any(|c| c.catalog_key == "Doomsday");
+    let has_creature_threat = state.permanents_of(who)
+        .any(|c| def_or_catalog(c.id, &c.catalog_key).map_or(false, |d| d.is_creature()));
+    let threat_gap = if dd_in_hand {
+        0.0
+    } else if has_creature_threat {
+        0.3 // have a backup plan, but DD is the real goal
+    } else {
+        1.0
+    };
+
+    // ── Interaction gap: matchup-dependent ───────────────────────────────
+    let interaction_count = state.hand_of(who)
+        .filter(|c| {
+            let def = def_or_catalog(c.id, &c.catalog_key);
+            dd_categorize(&c.catalog_key, def) == Some(CardCategory::Interaction)
+        })
+        .count();
+    let interaction_gap = if matchup.opp_has_counters {
+        // Against blue: want 1-2 interaction pieces to protect DD
+        ((2.0 - interaction_count as f64) / 2.0).clamp(0.0, 1.0)
+    } else {
+        0.1 // non-blue matchup: interaction is low priority
+    };
+
+    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap }
+}
+
+/// Score how much `card_id` fills the DD player's current gap.
+pub(crate) fn dd_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, who: PlayerId) -> f64 {
+    let name = match state.objects.get(&card_id) {
+        Some(c) => c.catalog_key.as_str(),
+        None => return 0.0,
+    };
+    let def = state.def_of(card_id).or_else(|| state.catalog.get(name));
+    let cat = dd_categorize(name, def);
+
+    match cat {
+        Some(CardCategory::Mana) => {
+            if gap.mana > 0.0 { 0.4 + 0.5 * gap.mana } else { 0.05 }
+        }
+        Some(CardCategory::Threat) => {
+            if name == "Doomsday" {
+                // Second DD in hand is near-worthless
+                let other_dd = state.hand_of(who)
+                    .filter(|c| c.catalog_key == "Doomsday" && c.id != card_id)
+                    .count();
+                if other_dd > 0 { 0.1 } else if gap.threat > 0.0 { 0.9 } else { 0.1 }
+            } else {
+                // Creature threats: valuable but not as critical as DD
+                if gap.threat > 0.0 { 0.4 + 0.2 * gap.threat } else { 0.3 }
+            }
+        }
+        Some(CardCategory::Interaction) => {
+            if gap.interaction > 0.0 { 0.3 + 0.5 * gap.interaction } else { 0.1 }
+        }
+        Some(CardCategory::Selection) => {
+            // Cantrips: always medium — universal lubricant that digs toward anything
+            0.35
+        }
+        None => 0.05, // Uncategorized: dead pre-DD
+    }
+}
+
+/// Hand-aware mulligan for DD player. Uses actual mana color production.
+/// - Need ≥1 blue source (casts cantrips) OR ≥3 black sources (hardcasts DD).
+/// - Mull flood (≥5 lands) or hands with no path to DD (no threats/cantrips).
+/// - 4 or fewer cards: always keep.
+pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
+    if mulligans_taken >= 3 { return false; } // always keep at 4 cards
+
+    let hand: Vec<(ObjId, Option<CardCategory>)> = state.hand_of(who)
+        .map(|c| {
+            let def = state.def_of(c.id).or_else(|| state.catalog.get(c.catalog_key.as_str()));
+            (c.id, dd_categorize(&c.catalog_key, def))
+        })
+        .collect();
+
+    let hand_size = hand.len();
+    let mana = state.hand_land_mana(who, &[Color::Blue, Color::Black]);
+    let has_useful_mana = mana.u >= 1 || mana.b >= 3;
+    let threat_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Threat)).count();
+    let selection_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Selection)).count();
+    let interaction_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Interaction)).count();
+    let spells = threat_count + selection_count + interaction_count;
+
+    match mulligans_taken {
+        0 => {
+            // 7 cards: mull no useful mana, flood, or no path to DD
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
+            // Need at least a cantrip or combo piece to have a plan
+            if threat_count == 0 && selection_count == 0 { return true; }
+            false
+        }
+        1 => {
+            // 6 cards: need useful mana + ≥1 spell
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
+            if spells == 0 { return true; }
+            false
+        }
+        2 => {
+            // 5 cards: keep with any useful mana + ≥1 spell
+            if !has_useful_mana && spells == hand_size { return true; }
+            false
+        }
+        _ => false,
+    }
+}
+
+impl Strategy for DoomsdayStrategy {
+    fn drain_decisions(&mut self) -> Vec<String> { std::mem::take(&mut self.decisions) }
+
+    fn choose_action(&mut self, state: &SimState, ap: PlayerId,
+                     legal_actions: &[LegalAction]) -> LegalAction {
+        let who = self.player_id;
+        let t = state.current_turn;
+        if who != ap {
+            if state.stack.is_empty() { return LegalAction::Pass; }
+            return choose_nap_action(state, who, legal_actions, &mut self.rng, &mut self.decisions);
+        }
+        let in_ninjutsu_step = matches!(state.current_phase,
+            Some(TurnPosition::Step(StepKind::DeclareBlockers))
+            | Some(TurnPosition::Step(StepKind::FirstStrikeCombatDamage))
+            | Some(TurnPosition::Step(StepKind::CombatDamage))
+            | Some(TurnPosition::Step(StepKind::EndCombat)));
+        if in_ninjutsu_step {
+            if let Some(action) = choose_ninjutsu_action(state, who, legal_actions, &mut self.rng) {
+                return action;
+            }
+            return LegalAction::Pass;
+        }
+        let in_main_phase = matches!(state.current_phase,
+            Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
+            | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
+        if !in_main_phase { return LegalAction::Pass; }
+        if let Some(action) = choose_ap_react(state, who, legal_actions, &mut self.rng, &mut self.decisions) {
+            return action;
+        }
+        choose_ap_proactive(state, t, who, legal_actions,
+            &mut self.must_land_drop, &mut self.rng, &mut self.decisions, dd_plan_quality)
+    }
+
+    fn choose_mana_ability(&mut self, state: &SimState, who: PlayerId,
+                           available: &[ManaAbilityOption],
+                           mana_cost: &ManaCost) -> Option<ManaActivation> {
+        // Never auto-crack LED — discarding your hand is a pile-building decision.
+        let filtered: Vec<_> = available.iter()
+            .filter(|a| state.objects.get(&a.source_id)
+                .map_or(true, |c| c.catalog_key != "Lion's Eye Diamond"))
+            .cloned()
+            .collect();
+        let plan = auto_tap_plan(state, who, mana_cost);
+        plan.into_iter().find(|act| {
+            filtered.iter().any(|a| a.source_id == act.source_id && a.ability_index == act.ability_index)
+        })
+    }
+
+    fn announce(&mut self, state: &SimState, card_id: ObjId,
+                options: &AnnounceOptions) -> AnnounceChoice {
+        // For reactive casts (instants on non-empty stack), try alt costs deterministically.
+        announce_with_alt_costs(state, self.player_id, card_id, options, &mut self.rng, false)
+    }
+
+    fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)> {
+        pick_attackers(self.player_id, state, &mut self.rng)
+    }
+
+    fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)> {
+        pick_blockers(self.player_id, state)
+    }
+
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
+        let who = self.player_id;
+        let mull = dd_should_mulligan(state, who, mulligans_taken);
+        let hand: Vec<String> = state.hand_of(who).map(|c| c.catalog_key.clone()).collect();
+        let cats = hand_category_summary(state, who, dd_categorize);
+        self.dlog(format!("T0 {}: mulligan#{} hand=[{}] {} → {}",
+            who, mulligans_taken, hand.join(", "), cats,
+            if mull { "MULL" } else { "KEEP" }));
+        mull
+    }
+
+    fn player_id(&self) -> PlayerId { self.player_id }
+
+    fn plan_gap(&self, state: &SimState) -> TargetGap {
+        dd_plan_gap(state, self.player_id, &self.matchup)
+    }
+
+    fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64 {
+        dd_card_fills(card_id, gap, state, self.player_id)
+    }
+}
+
+// ── GenericOppStrategy ────────────────────────────────────────────────────────
+
+pub(crate) struct GenericOppStrategy {
+    player_id: PlayerId,
+    rng: SmallRng,
+    matchup: MatchupInfo,
+    /// Accumulated decision-log entries, drained by the engine after each call.
+    decisions: Vec<String>,
+}
+
+impl GenericOppStrategy {
+    pub(crate) fn new(matchup: MatchupInfo) -> Self {
+        Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy(), matchup, decisions: Vec::new() }
+    }
+    fn dlog(&mut self, msg: impl Into<String>) { self.decisions.push(msg.into()); }
+}
+
+/// Categorize a card for the tempo/fair opponent's evaluation.
+pub(crate) fn opp_categorize(name: &str, def: Option<&CardDef>) -> Option<CardCategory> {
+    match name {
+        // Interaction: counters, removal, discard
+        "Force of Will" | "Force of Negation" | "Daze" | "Thoughtseize"
+        | "Fatal Push" | "Snuff Out" | "Lightning Bolt" | "Unholy Heat"
+        | "Spell Pierce" | "Flusterstorm" | "Pyroblast" | "Hydroblast"
+        | "Surgical Extraction" | "Consign to Memory" => return Some(CardCategory::Interaction),
+        // Selection: cantrips and free info
+        "Brainstorm" | "Ponder" | "Preordain" | "Consider"
+        | "Mishra's Bauble" => return Some(CardCategory::Selection),
+        _ => {}
+    }
+    let def = def?;
+    if def.is_land() { return Some(CardCategory::Mana); }
+    if def.is_creature() || matches!(def.kind, CardKind::Planeswalker(_)) {
+        return Some(CardCategory::Threat);
+    }
+    if matches!(def.kind, CardKind::Artifact(_) | CardKind::Enchantment(_)) {
+        return Some(CardCategory::Threat); // equipment, baubles with board presence
+    }
+    if def.is_instant() || def.is_sorcery() { return Some(CardCategory::Interaction); }
+    None
+}
+
+/// Evaluate a plan state for a generic opponent (tempo/fair deck).
+/// Values threats on board, mana development, interaction held back, and cantrips.
+pub(crate) fn opp_plan_quality(
+    plan: &TurnPlanState,
+    state: &SimState,
+) -> f64 {
+    let mut score = 0.0;
+
+    for &id in &plan.spells_cast {
+        let name = state.objects.get(&id)
+            .map(|c| c.catalog_key.as_str()).unwrap_or("");
+        let def = state.def_of(id).or_else(|| {
+            state.objects.get(&id).and_then(|c| state.catalog.get(c.catalog_key.as_str()))
+        });
+        let cat = opp_categorize(name, def);
+        score += match cat {
+            Some(CardCategory::Threat) => 3.0,        // deploying threats is the main goal
+            Some(CardCategory::Selection) => 2.0,     // cantrips find threats/answers
+            Some(CardCategory::Interaction) => 1.0,   // proactive discard is fine, but hold counters
+            Some(CardCategory::Mana) => 0.5,          // mana rocks / rituals
+            None => 0.1,
+        };
+    }
+
+    // Land drops — always valuable.
+    score += plan.new_battlefield.len() as f64;
+
+    // Holding interaction is valuable (don't dump your hand recklessly).
+    for &id in &plan.hand {
+        let name = state.objects.get(&id)
+            .map(|c| c.catalog_key.as_str()).unwrap_or("");
+        let def = state.def_of(id).or_else(|| {
+            state.objects.get(&id).and_then(|c| state.catalog.get(c.catalog_key.as_str()))
+        });
+        if opp_categorize(name, def) == Some(CardCategory::Interaction) {
+            score += 0.3;
+        }
+    }
+
+    score
+}
+
+/// Compute the opponent's plan gap. Tempo decks want 2-3 lands, threats on board, interaction in hand.
+pub(crate) fn opp_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInfo) -> TargetGap {
+    let def_or_catalog = |id: ObjId, key: &str| -> Option<&CardDef> {
+        state.def_of(id).or_else(|| state.catalog.get(key))
+    };
+
+    // ── Mana gap: tempo wants 2-3 lands ─────────────────────────────────
+    let lands = state.permanents_of(who)
+        .filter(|c| def_or_catalog(c.id, &c.catalog_key).map_or(false, |d| d.is_land()))
+        .count();
+    let mana_gap = ((2.0 - lands as f64) / 2.0).clamp(0.0, 1.0);
+
+    // ── Threat gap: need creatures on board ──────────────────────────────
+    let threats = state.permanents_of(who)
+        .filter(|c| {
+            def_or_catalog(c.id, &c.catalog_key)
+                .map_or(false, |d| d.is_creature() || matches!(d.kind, CardKind::Planeswalker(_)))
+        })
+        .count();
+    let threat_gap = match threats {
+        0 => 1.0,
+        1 => 0.4,
+        _ => 0.1,
+    };
+
+    // ── Interaction gap: premium vs combo, medium vs fair ────────────────
+    let interaction_count = state.hand_of(who)
+        .filter(|c| {
+            let def = def_or_catalog(c.id, &c.catalog_key);
+            opp_categorize(&c.catalog_key, def) == Some(CardCategory::Interaction)
+        })
+        .count();
+    let interaction_gap = if !matchup.opp_fast_clock {
+        // Facing combo: interaction is critical to stop the kill
+        ((2.0 - interaction_count as f64) / 2.0).clamp(0.0, 1.0)
+    } else {
+        // Facing aggro/tempo: some interaction is nice but not critical
+        ((1.0 - interaction_count as f64).max(0.0) * 0.5).clamp(0.0, 0.5)
+    };
+
+    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap }
+}
+
+/// Score how much `card_id` fills the opponent's current gap.
+pub(crate) fn opp_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, who: PlayerId) -> f64 {
+    let name = match state.objects.get(&card_id) {
+        Some(c) => c.catalog_key.as_str(),
+        None => return 0.0,
+    };
+    let def = state.def_of(card_id).or_else(|| state.catalog.get(name));
+    let cat = opp_categorize(name, def);
+
+    match cat {
+        Some(CardCategory::Mana) => {
+            if gap.mana > 0.0 { 0.4 + 0.5 * gap.mana } else { 0.05 }
+        }
+        Some(CardCategory::Threat) => {
+            // Surplus copies of on-board threats are less urgent
+            let on_board = state.permanents_of(who)
+                .filter(|c| c.catalog_key == name)
+                .count();
+            if on_board > 0 && gap.threat < 0.5 {
+                0.2
+            } else if gap.threat > 0.0 {
+                0.5 + 0.4 * gap.threat
+            } else {
+                0.3
+            }
+        }
+        Some(CardCategory::Interaction) => {
+            if gap.interaction > 0.0 { 0.3 + 0.5 * gap.interaction } else { 0.15 }
+        }
+        Some(CardCategory::Selection) => 0.35, // cantrips: always medium
+        None => 0.05,
+    }
+}
+
+/// Hand-aware mulligan for opponent (tempo/fair deck). Uses actual mana colors.
+/// - Need ≥1 blue source (casts cantrips/interaction).
+/// - Mull flood (≥5 lands) or hands with no threats/cantrips.
+/// - 4 or fewer cards: always keep.
+pub(crate) fn opp_should_mulligan(
+    state: &SimState, who: PlayerId, mulligans_taken: u32, fetch_colors: &[Color],
+) -> bool {
+    if mulligans_taken >= 3 { return false; }
+
+    let hand: Vec<(ObjId, Option<CardCategory>)> = state.hand_of(who)
+        .map(|c| {
+            let def = state.def_of(c.id).or_else(|| state.catalog.get(c.catalog_key.as_str()));
+            (c.id, opp_categorize(&c.catalog_key, def))
+        })
+        .collect();
+
+    let hand_size = hand.len();
+    let mana = state.hand_land_mana(who, fetch_colors);
+    let has_useful_mana = mana.u >= 1;
+    let threat_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Threat)).count();
+    let selection_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Selection)).count();
+    let interaction_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Interaction)).count();
+    let spells = threat_count + selection_count + interaction_count;
+
+    match mulligans_taken {
+        0 => {
+            // 7 cards: mull no useful mana, flood, or no threats/cantrips
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
+            if threat_count == 0 && selection_count == 0 { return true; }
+            false
+        }
+        1 => {
+            // 6 cards: need useful mana + ≥1 spell
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
+            if spells == 0 { return true; }
+            false
+        }
+        2 => {
+            // 5 cards: keep with any useful mana + ≥1 spell
+            if !has_useful_mana && spells == hand_size { return true; }
+            false
+        }
+        _ => false,
+    }
+}
+
+impl Strategy for GenericOppStrategy {
+    fn drain_decisions(&mut self) -> Vec<String> { std::mem::take(&mut self.decisions) }
+
+    fn choose_action(&mut self, state: &SimState, ap: PlayerId,
+                     legal_actions: &[LegalAction]) -> LegalAction {
+        let who = self.player_id;
+        let t = state.current_turn;
+        if who != ap {
+            if state.stack.is_empty() { return LegalAction::Pass; }
+            return choose_nap_action(state, who, legal_actions, &mut self.rng, &mut self.decisions);
+        }
+        let in_ninjutsu_step = matches!(state.current_phase,
+            Some(TurnPosition::Step(StepKind::DeclareBlockers))
+            | Some(TurnPosition::Step(StepKind::FirstStrikeCombatDamage))
+            | Some(TurnPosition::Step(StepKind::CombatDamage))
+            | Some(TurnPosition::Step(StepKind::EndCombat)));
+        if in_ninjutsu_step {
+            if let Some(action) = choose_ninjutsu_action(state, who, legal_actions, &mut self.rng) {
+                return action;
+            }
+            return LegalAction::Pass;
+        }
+        let in_main_phase = matches!(state.current_phase,
+            Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
+            | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
+        if !in_main_phase { return LegalAction::Pass; }
+        let mut _md = false;
+        choose_ap_proactive(state, t, who, legal_actions, &mut _md, &mut self.rng, &mut self.decisions, opp_plan_quality)
+    }
+
+    fn announce(&mut self, state: &SimState, card_id: ObjId,
+                options: &AnnounceOptions) -> AnnounceChoice {
+        // Probabilistic alt cost selection for opponent counterspells.
+        announce_with_alt_costs(state, self.player_id, card_id, options, &mut self.rng, true)
+    }
+
+    fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)> {
+        pick_attackers(self.player_id, state, &mut self.rng)
+    }
+
+    fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)> {
+        pick_blockers(self.player_id, state)
+    }
+
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
+        let who = self.player_id;
+        let mull = opp_should_mulligan(state, who, mulligans_taken, &self.matchup.fetch_colors);
+        let cats = hand_category_summary(state, who, opp_categorize);
+        self.dlog(format!("T0 {}: mulligan#{} {} → {}",
+            who, mulligans_taken, cats,
+            if mull { "MULL" } else { "KEEP" }));
+        mull
+    }
+
+    fn player_id(&self) -> PlayerId { self.player_id }
+
+    fn plan_gap(&self, state: &SimState) -> TargetGap {
+        opp_plan_gap(state, self.player_id, &self.matchup)
+    }
+
+    fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64 {
+        opp_card_fills(card_id, gap, state, self.player_id)
+    }
+}
+
+// ── New-protocol helpers ──────────────────────────────────────────────────────
+
+/// Find a counterspell in `legal` targeting the top opposing spell on the stack.
+/// `probabilistic`: when true, rolls P(card in hand) and strategic probability.
+fn find_counter_in_legal(
+    state: &SimState,
+    who: PlayerId,
+    target_id: ObjId,
+    legal: &[LegalAction],
+    rng: &mut impl Rng,
+    probabilistic: bool,
+) -> Option<LegalAction> {
+    let target_owner_id = state.stack_item_owner(target_id);
+    let target_owner = if target_owner_id == state.us_id { PlayerId::Us } else { PlayerId::Opp };
+    let target_has_untapped_lands = state.permanents_of(target_owner).any(|c| {
+        c.bf().map_or(false, |bf| !bf.tapped)
+            && !state.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
+    });
+
+    let hand_size = state.hand_size(who);
+    let lib_size = state.library_size(who) + hand_size as usize;
+
+    let mut seen = std::collections::HashSet::new();
+    for action in legal {
+        let LegalAction::CastSpell { card_id, face: SpellFace::Main, .. } = action else { continue };
+        let Some(def) = state.def_of(*card_id) else { continue };
+        if !def.is_instant() { continue; }
+        let name = state.objects.get(card_id).map(|c| c.catalog_key.as_str()).unwrap_or("");
+        if !seen.insert(name.to_string()) { continue; }
+        let targets = legal_targets(def.target_spec(), who, *card_id, state);
+        if !targets.contains(&target_id) { continue; }
+        if name == "Daze" && target_has_untapped_lands { continue; }
+
+        if probabilistic {
+            let copies = state.hand_of(who).filter(|c| c.catalog_key == name).count();
+            let p_have = p_card_in_hand(lib_size, hand_size, copies);
+            if !rng.gen_bool(p_have.max(f64::MIN_POSITIVE)) { continue; }
+        }
+
+        return Some(action.clone());
+    }
+    None
+}
+
+/// NAP decision (new protocol): try to counter the top opposing spell.
+fn choose_nap_action(
+    state: &SimState,
+    who: PlayerId,
+    legal: &[LegalAction],
+    rng: &mut impl Rng,
+    dlog: &mut Vec<String>,
+) -> LegalAction {
+    let t = state.current_turn;
+    // Find topmost opposing counterable spell on stack.
+    for idx in (0..state.stack.len()).rev() {
+        let item_id = state.stack[idx];
+        let item_owner = state.stack_item_owner(item_id);
+        let item_is_counterable = state.stack_item_is_counterable(item_id);
+        let item_name = state.stack_item_display_name(item_id).to_string();
+        if item_owner != state.player_id(who) && item_is_counterable {
+            if !worth_countering(item_id, &item_name, state) {
+                break;
+            }
+            if let Some(action) = find_counter_in_legal(state, who, item_id, legal, rng, true) {
+                if let LegalAction::CastSpell { card_id, .. } = &action {
+                    let spell_name = state.objects.get(card_id).map_or("?", |c| c.catalog_key.as_str());
+                    dlog.push(format!("T{} {}: NAP counter {} targeting {}", t, who, spell_name, item_name));
+                }
+                return action;
+            }
+            dlog.push(format!("T{} {}: NAP passes (no counter available for {})", t, who, item_name));
+            break;
+        }
+    }
+    LegalAction::Pass
+}
+
+/// AP reactive (new protocol): protect our Doomsday from being countered.
+fn choose_ap_react(
+    state: &SimState,
+    who: PlayerId,
+    legal: &[LegalAction],
+    rng: &mut impl Rng,
+    dlog: &mut Vec<String>,
+) -> Option<LegalAction> {
+    if who != PlayerId::Us || state.stack.is_empty() { return None; }
+    let t = state.current_turn;
+    let top_id = *state.stack.last()?;
+    let top_is_counterable = state.stack_item_is_counterable(top_id);
+    let top_owner = state.stack_item_owner(top_id);
+    let top_chosen = state.objects.get(&top_id)
+        .and_then(|c| c.spell())
+        .map(|s| s.chosen_targets.clone())
+        .unwrap_or_default();
+    let us_id = state.us_id;
+    let dd_countered = top_is_counterable
+        && top_owner != us_id
+        && top_chosen.first().copied()
+            .and_then(|id| state.stack.iter().find(|&&s| s == id).map(|_| id))
+            .is_some_and(|id| {
+                state.objects.get(&id)
+                    .map(|c| c.catalog_key == "Doomsday" && state.player_id(c.owner) == us_id)
+                    .unwrap_or(false)
+            });
+    if !dd_countered { return None; }
+    if let Some(action) = find_counter_in_legal(state, who, top_id, legal, rng, false) {
+        let counter_name = if let LegalAction::CastSpell { card_id, .. } = &action {
+            state.objects.get(card_id).map_or("?", |c| c.catalog_key.as_str()).to_string()
+        } else { "?".to_string() };
+        dlog.push(format!("T{} {}: AP protect DD with {}", t, who, counter_name));
+        Some(action)
+    } else {
+        dlog.push(format!("T{} {}: DD countered — no protection available", t, who));
+        Some(LegalAction::Pass)
+    }
+}
+
+/// True if the ability at `ability_index` on `source_id` is a ninjutsu ability
+/// (source_zone: Hand, costs include ReturnFromBattlefield).
+fn is_ninjutsu_action(state: &SimState, source_id: ObjId, ability_index: usize) -> bool {
+    state.def_of(source_id)
+        .and_then(|d| d.abilities().get(ability_index))
+        .map_or(false, |ab| {
+            // Variant-agnostic: ninjutsu is "hand-source ability whose cost
+            // includes a ReturnFromBattlefield". For Legacy storage we
+            // scan components; for Ir storage we'd recognise the
+            // MoveByChoice(BF→Hand, verb=Return) shape — no card emits
+            // that yet, so this falls through to false for Ir.
+            matches!(ab.source_zone, SourceZone::Hand)
+                && {
+                    let crate::ir::ability::CostBody::Ir(a) = &ab.costs;
+                    action_includes_return_from_bf(a)
+                }
+        })
+}
+
+/// True iff `a` (a cost-tree action) is a hand→exile pitch of a card with
+/// the given color. Used by the strategy's probabilistic FoW/FoN gating to
+/// sample whether the player has a blue card to pitch.
+fn action_pitches_color(a: &crate::ir::action::Action, color: Color) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::action::MoveVerb;
+    use crate::ir::expr::ZoneKindSel;
+    let filter_pitches = |f: &crate::ir::expr::Filter| {
+        let crate::ir::expr::Filter(expr) = f;
+        action_filter_includes_color_lit(expr, color)
+    };
+    match a {
+        MoveByChoice {
+            from: ZoneKindSel::Hand,
+            to: ZoneKindSel::Exile,
+            verb: MoveVerb::Exile,
+            filter,
+            ..
+        } if filter_pitches(filter) => true,
+        Sequence(actions) => actions.iter().any(|a| action_pitches_color(a, color)),
+        IfThen { then, else_, .. } => {
+            action_pitches_color(then, color)
+                || else_.as_ref().map_or(false, |e| action_pitches_color(e, color))
+        }
+        MayDo { action, .. } => action_pitches_color(action, color),
+        ForEach { body, .. } => action_pitches_color(body, color),
+        Choose { options, .. } => options.iter().any(|o| action_pitches_color(&o.action, color)),
+        _ => false,
+    }
+}
+
+fn action_filter_includes_color_lit(e: &crate::ir::expr::Expr, color: Color) -> bool {
+    use crate::ir::expr::Expr;
+    match e {
+        Expr::ColorLit(c) if *c == color => true,
+        Expr::And(a, b) | Expr::Or(a, b) => {
+            action_filter_includes_color_lit(a, color) || action_filter_includes_color_lit(b, color)
+        }
+        Expr::Not(inner) => action_filter_includes_color_lit(inner, color),
+        Expr::Eq(a, b) | Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b)
+        | Expr::Contains(a, b) => {
+            action_filter_includes_color_lit(a, color) || action_filter_includes_color_lit(b, color)
+        }
+        _ => false,
+    }
+}
+
+/// True iff `a` (a cost-tree action) includes a `MoveByChoice` returning
+/// permanents from the battlefield to a hand — the canonical ninjutsu cost
+/// shape. Used by the strategy's ninjutsu-action detector.
+fn action_includes_return_from_bf(a: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::action::MoveVerb;
+    use crate::ir::expr::ZoneKindSel;
+    match a {
+        MoveByChoice {
+            from: ZoneKindSel::Battlefield,
+            to: ZoneKindSel::Hand,
+            verb: MoveVerb::Return,
+            ..
+        } => true,
+        Sequence(actions) => actions.iter().any(action_includes_return_from_bf),
+        IfThen { then, else_, .. } => {
+            action_includes_return_from_bf(then)
+                || else_.as_ref().map_or(false, |e| action_includes_return_from_bf(e))
+        }
+        MayDo { action, .. } => action_includes_return_from_bf(action),
+        ForEach { body, .. } => action_includes_return_from_bf(body),
+        Choose { options, .. } => options.iter().any(|o| action_includes_return_from_bf(&o.action)),
+        _ => false,
+    }
+}
+
+/// Ninjutsu action (new protocol): find a ninjutsu ability in legal actions.
+fn choose_ninjutsu_action(
+    state: &SimState,
+    who: PlayerId,
+    legal: &[LegalAction],
+    rng: &mut impl Rng,
+) -> Option<LegalAction> {
+    if state.hand_size(who) <= 0 { return None; }
+    let has_unblocked = state.permanents_of(who)
+        .any(|c| c.bf().map_or(false, |bf| bf.attacking && bf.unblocked));
+    if !has_unblocked { return None; }
+    let ninjutsu_actions: Vec<&LegalAction> = legal.iter().filter(|a| {
+        matches!(a, LegalAction::ActivateAbility { source_id, ability_index }
+            if is_ninjutsu_action(state, *source_id, *ability_index))
+    }).collect();
+    if ninjutsu_actions.is_empty() { return None; }
+    if !rng.gen_bool(0.35) { return None; }
+    Some(ninjutsu_actions[rng.gen_range(0..ninjutsu_actions.len())].clone())
+}
+
+/// AP proactive decision: use the turn planner with deck-specific evaluation.
+fn choose_ap_proactive(
+    state: &SimState,
+    t: u8,
+    who: PlayerId,
+    legal: &[LegalAction],
+    must_land_drop: &mut bool,
+    rng: &mut impl Rng,
+    dlog: &mut Vec<String>,
+    eval: PlanEvalFn,
+) -> LegalAction {
+    let plan = make_turn_plan(state, who, eval);
+
+    // Log the plan.
+    if !plan.is_empty() {
+        let plan_summary: Vec<String> = plan.iter().filter_map(|a| match a {
+            PlanAction::CastSpell(id) | PlanAction::LandDrop(id) =>
+                state.objects.get(id).map(|c| c.catalog_key.clone()),
+            PlanAction::TapForMana { source_id, color, .. } => {
+                let src = state.objects.get(source_id)
+                    .map(|c| c.catalog_key.as_str()).unwrap_or("?");
+                let col = color.map_or("C".to_string(), |c| format!("{:?}", c));
+                Some(format!("tap:{}:{}", src, col))
+            }
+            PlanAction::CrackFetch { source_id, target_id } => {
+                let src = state.objects.get(source_id)
+                    .map(|c| c.catalog_key.as_str()).unwrap_or("?");
+                let tgt = state.objects.get(target_id)
+                    .map(|c| c.catalog_key.as_str()).unwrap_or("?");
+                Some(format!("fetch:{}→{}", src, tgt))
+            }
+        }).collect();
+        dlog.push(format!("T{} {}: plan=[{}]", t, who, plan_summary.join(" → ")));
+    }
+
+    // Execute the first priority-round action from the plan.
+    for action in &plan {
+        match action {
+            PlanAction::CastSpell(id) => {
+                if let Some(la) = legal.iter().find(|la| {
+                    matches!(la, LegalAction::CastSpell { card_id, .. } if *card_id == *id)
+                }) {
+                    *must_land_drop = false;
+                    let name = state.objects.get(id)
+                        .map_or("?", |c| c.catalog_key.as_str());
+                    dlog.push(format!("T{} {}: planner → {}", t, who, name));
+                    return la.clone();
+                }
+            }
+            PlanAction::LandDrop(id) => {
+                if legal.iter().any(|la| matches!(la, LegalAction::LandDrop(lid) if *lid == *id)) {
+                    *must_land_drop = false;
+                    let name = state.objects.get(id)
+                        .map_or("?", |c| c.catalog_key.as_str());
+                    dlog.push(format!("T{} {}: planner → land {}", t, who, name));
+                    return LegalAction::LandDrop(*id);
+                }
+            }
+            PlanAction::TapForMana { .. } | PlanAction::CrackFetch { .. } => continue,
+        }
+    }
+
+    // Fallback: try on-board abilities (not yet modeled by planner).
+    if let Some(action) = choose_on_board_action(state, who, legal, false, must_land_drop, rng) {
+        return action;
+    }
+
+    LegalAction::Pass
+}
+
+/// Pick an on-board action (abilities) from legal actions.
+fn choose_on_board_action(
+    state: &SimState,
+    who: PlayerId,
+    legal: &[LegalAction],
+    dd_ready: bool,
+    must_land_drop: &mut bool,
+    rng: &mut impl Rng,
+) -> Option<LegalAction> {
+    let mut candidates: Vec<LegalAction> = Vec::new();
+
+    // Collect ability activations from legal actions, categorized.
+    for action in legal {
+        let LegalAction::ActivateAbility { source_id, ability_index } = action else { continue };
+        let Some(def) = state.def_of(*source_id) else { continue };
+        let Some(ab) = def.abilities().get(*ability_index) else { continue };
+        let tapped = state.objects.get(source_id)
+            .and_then(|c| c.bf())
+            .map_or(false, |bf| bf.tapped);
+
+        if def.is_land() {
+            // Land abilities: 75% roll.
+            if !tapped && rng.gen_bool(0.75) {
+                candidates.push(action.clone());
+            }
+        } else if ab.is_loyalty_ability() {
+            // Planeswalker loyalty abilities: only postcombat main, empty stack.
+            let is_postcombat = matches!(state.current_phase, Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
+            if is_postcombat && state.stack.is_empty() {
+                let pw_activated = state.objects.get(source_id)
+                    .and_then(|c| c.bf())
+                    .map_or(true, |bf| bf.pw_activated_this_turn);
+                if !pw_activated {
+                    candidates.push(action.clone());
+                }
+            }
+        } else {
+            // Non-land, non-loyalty abilities: 75% roll.
+            if rng.gen_bool(0.75) {
+                candidates.push(action.clone());
+            }
+        }
+    }
+
+    // If DD is nearly castable but we lack black mana, force-fetch for it.
+    if who == PlayerId::Us && !dd_ready && !state.has_black_mana(PlayerId::Us)
+        && state.hand_of(who).any(|c| c.catalog_key == "Doomsday")
+    {
+        let mut has_fetch = false;
+        for action in legal {
+            let LegalAction::ActivateAbility { source_id, ability_index } = action else { continue };
+            let Some(def) = state.def_of(*source_id) else { continue };
+            let Some(ab) = def.abilities().get(*ability_index) else { continue };
+            if ab.is_fetch_ability() {
+                has_fetch = true;
+                if !candidates.iter().any(|c| matches!(c, LegalAction::ActivateAbility { source_id: sid, .. } if sid == source_id)) {
+                    candidates.push(action.clone());
+                }
+            }
+        }
+        if !has_fetch {
+            *must_land_drop = true;
+        }
+    }
+
+    // Adventure creatures in exile (on_adventure): cast creature face.
+    let on_adventure: Vec<ObjId> = state.on_adventure_of(who).map(|c| c.id).collect();
+    for card_id in on_adventure {
+        if let Some(action) = legal.iter().find(|a| matches!(a, LegalAction::CastSpell { card_id: cid, face: SpellFace::Main, .. } if *cid == card_id)) {
+            if rng.gen_bool(0.75) {
+                candidates.push(action.clone());
+            }
+        }
+    }
+
+    if candidates.is_empty() { None } else { Some(candidates.remove(rng.gen_range(0..candidates.len()))) }
+}
+
+/// Alt cost selection for announce callback.
+/// `probabilistic`: true for opponent (roll strategic prob), false for us (deterministic).
+fn announce_with_alt_costs(
+    state: &SimState,
+    who: PlayerId,
+    card_id: ObjId,
+    options: &AnnounceOptions,
+    rng: &mut impl Rng,
+    probabilistic: bool,
+) -> AnnounceChoice {
+    let chosen_x = if options.has_x_cost { 3 } else { 0 };
+    for (i, alt) in options.available_alt_costs.iter().enumerate() {
+        let crate::ir::ability::CostBody::Ir(action) = &alt.costs;
+        let payable = state.hand_size(who) >= alt.hand_min
+            && crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some();
+        if payable {
+            if probabilistic {
+                // FoW/FoN pitch heuristic: if the alt cost exiles a blue
+                // card from hand, gate on probability that the player has
+                // a blue card to pitch (build_schema already verified one
+                // exists, but the heuristic is for *probabilistic* sampling
+                // across simulated runs).
+                let has_exile_blue = action_pitches_color(action, Color::Blue);
+                if has_exile_blue {
+                    let hand_size = state.hand_size(who);
+                    let lib_size = state.library_size(who) + hand_size as usize;
+                    let n_blue = state.hand_of(who)
+                        .filter(|c| c.id != card_id
+                            && state.def_of(c.id).map_or(false, |d| !d.is_land() && d.is_blue()))
+                        .count();
+                    let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
+                    if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
+                }
+                let strategic = alt.prob.unwrap_or(0.5);
+                if !rng.gen_bool(strategic) { continue; }
+            }
+            return AnnounceChoice { chosen_mode: 0, alt_cost_index: Some(i), chosen_x };
+        }
+    }
+    AnnounceChoice { chosen_mode: 0, alt_cost_index: None, chosen_x }
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// True if `name` is a spell the NAP considers worth spending a free counterspell (FoW / Daze) on.
+/// Cantrips and mana rituals are not worth pitching; permanents and combo pieces are.
+fn worth_countering(id: ObjId, name: &str, state: &SimState) -> bool {
+    if let Some(def) = state.def_of(id) {
+        match &def.kind {
+            CardKind::Creature(_) | CardKind::Planeswalker(_)
+            | CardKind::Artifact(_) | CardKind::Enchantment(_) => return true,
+            _ => {}
+        }
+    }
+    // High-value non-permanent spells: combo kill, mass discard
+    matches!(name, "Doomsday" | "Hymn to Tourach" | "Unearth")
+}
+
+// ── Combat strategy ───────────────────────────────────────────────────────────
+
+fn pick_attackers(
+    ap: PlayerId,
+    state: &SimState,
+    rng: &mut impl Rng,
+) -> Vec<(ObjId, Option<ObjId>)> {
+    let nap = ap.opp();
+    // Compute NAP blocker stats (ObjId, power) for flying/non-flying checks.
+    let nap_blockers: Vec<(ObjId, i32)> = state.permanents_of(nap)
+        .filter(|p| !p.bf().map_or(false, |bf| bf.tapped))
+        .filter_map(|p| {
+            let def = state.def_of(p.id)?;
+            if !def.is_creature() { return None; }
+            let pow = state.def_of(p.id)
+                .and_then(|d| d.as_creature())
+                .map(|c| c.power())
+                .unwrap_or(1);
+            Some((p.id, pow))
+        })
+        .collect();
+    let nap_pw_ids: Vec<ObjId> = state.permanents_of(nap)
+        .filter(|p| state.def_of(p.id)
+            .map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))))
+        .map(|p| p.id)
+        .collect();
+    state.permanents_of(ap)
+        .filter(|p| p.bf().map_or(false, |bf| !bf.tapped && (!bf.entered_this_turn || creature_has_keyword(p.id, Keyword::Haste, state))))
+        .filter_map(|p| {
+            let def = state.def_of(p.id)?;
+            if !def.is_creature() { return None; }
+            let atk_flies  = creature_has_keyword(p.id, Keyword::Flying, state);
+            let atk_shadow = creature_has_keyword(p.id, Keyword::Shadow, state);
+            // Sum power of NAP creatures that can block this attacker. CR 702.17b: a creature
+            // with reach can block fliers; CR 702.9b: flying can only be blocked by flying or reach.
+            let blocking_power: i32 = nap_blockers.iter()
+                .filter(|(blk_id, _)| {
+                    if atk_flies
+                        && !creature_has_keyword(*blk_id, Keyword::Flying, state)
+                        && !creature_has_keyword(*blk_id, Keyword::Reach, state)
+                    { return false; }
+                    let blk_shadow = creature_has_keyword(*blk_id, Keyword::Shadow, state);
+                    atk_shadow == blk_shadow
+                })
+                .map(|(_, pow)| *pow)
+                .sum();
+            let tgh = state.def_of(p.id)
+                .and_then(|d| d.as_creature())
+                .map(|c| c.toughness())
+                .unwrap_or(1);
+            if tgh <= blocking_power { return None; }
+            // Randomly attack a NAP planeswalker (50%) or the player.
+            let target = if !nap_pw_ids.is_empty() && rng.gen_bool(0.5) {
+                Some(nap_pw_ids[rng.gen_range(0..nap_pw_ids.len())])
+            } else {
+                None
+            };
+            Some((p.id, target))
+        })
+        .collect()
+}
+
+/// `blocker_player` is the player declaring blockers (the NAP / defending player).
+fn pick_blockers(
+    blocker_player: PlayerId,
+    state: &SimState,
+) -> Vec<(ObjId, ObjId)> {
+    let nap = blocker_player;
+    let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
+    let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
+    for &atk_id in &state.combat_attackers {
+        let (atk_pow, atk_tgh) = match state.objects.get(&atk_id)
+            .and_then(|p| p.bf().map(|_| ()))
+        {
+            Some(()) => {
+                let pow = state.def_of(atk_id)
+                    .and_then(|d| d.as_creature())
+                    .map(|c| c.power())
+                    .unwrap_or(1);
+                let tgh = state.def_of(atk_id)
+                    .and_then(|d| d.as_creature())
+                    .map(|c| c.toughness())
+                    .unwrap_or(1);
+                (pow, tgh)
+            }
+            None => continue,
+        };
+        let atk_flies  = creature_has_keyword(atk_id, Keyword::Flying, state);
+        let atk_shadow = creature_has_keyword(atk_id, Keyword::Shadow, state);
+        let blocker = state.permanents_of(nap)
+            .filter(|p| !p.bf().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
+            .find_map(|p| {
+                if !state.def_of(p.id).map(|d| d.is_creature()).unwrap_or(false) { return None; }
+                // Flying attackers can only be blocked by flying or reach (CR 702.9b, 702.17b).
+                if atk_flies
+                    && !creature_has_keyword(p.id, Keyword::Flying, state)
+                    && !creature_has_keyword(p.id, Keyword::Reach, state)
+                { return None; }
+                // Shadow: shadow creatures can only block/be blocked by other shadow creatures.
+                let blk_shadow = creature_has_keyword(p.id, Keyword::Shadow, state);
+                if atk_shadow != blk_shadow { return None; }
+                // CR 702.16c: a creature with protection from [quality] can't be blocked by
+                // creatures with that quality.
+                if is_protected_from(atk_id, p.id, state) { return None; }
+                let blk_pow = state.def_of(p.id)
+                    .and_then(|d| d.as_creature())
+                    .map(|c| c.power())
+                    .unwrap_or(1);
+                let blk_tgh = state.def_of(p.id)
+                    .and_then(|d| d.as_creature())
+                    .map(|c| c.toughness())
+                    .unwrap_or(1);
+                // Good block: kills attacker OR both survive. Not a chump.
+                if blk_pow >= atk_tgh || atk_pow < blk_tgh { Some(p.id) } else { None }
+            });
+        if let Some(blk_id) = blocker {
+            used_blockers.insert(blk_id);
+            blocks.push((atk_id, blk_id));
+        }
+    }
+    blocks
+}
+
+// ── Hand and board action enumeration ─────────────────────────────────────────
+
+/// Check whether an ability can be activated (cost payable + valid target exists).
+/// `source_untapped` must be true when the source is an untapped permanent.
+fn ability_available(
+    ability: &AbilityDef,
+    state: &SimState,
+    who: PlayerId,
+    source_id: ObjId,
+    source_untapped: bool,
+) -> bool {
+    // Per-ability suppression (Disruptor Flute, Karn, etc.): check activatable flag.
+    if !ability.activatable {
+        return false;
+    }
+    // Sorcery-speed abilities (loyalty, etc.) require empty stack.
+    if ability.timing == ActivationTiming::Sorcery && !state.stack.is_empty() {
+        return false;
+    }
+    let cost_payable = {
+        let crate::ir::ability::CostBody::Ir(action) = &ability.costs;
+        // build_schema only checks object/branch/number decisions; PayMana
+        // emits no decision, so it doesn't verify mana availability. Add
+        // an explicit potential-mana check via the helper on CostBody so
+        // strategy doesn't enumerate activations it can't afford (which
+        // would cause the activation pipeline to silently no-op the cost
+        // and infinite-loop on retry).
+        let schema_ok = crate::ir::cost_exec::build_schema(action, state, who, source_id).is_some();
+        let _ = source_untapped;
+        let mana_ok = match ability.costs.first_mana_cost() {
+            Some(mc) => state.potential_mana(who).can_pay(&mc),
+            None => true,
+        };
+        schema_ok && mana_ok
+    };
+    cost_payable
+        && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who, source_id))
+}
+
+/// True if the player can currently afford to cast `name` via any available cost.
+///
+/// Tries the standard mana cost first; falls back to alternate costs (e.g. delve, pitch).
+/// For XLife additional costs, uses strategy default X=3 (`choose_x_for_spell` default).
+fn spell_is_affordable(
+    card_id: ObjId,
+    def: &CardDef,
+    state: &SimState,
+    who: PlayerId,
+) -> bool {
+    let mut cost = parse_mana_cost(def.mana_cost());
+    // CE cost surcharge (e.g. Disruptor Flute).
+    cost.generic += state.def_of(card_id).map_or(0, |d| d.casting_cost_modifier);
+    if def.delve() && cost.generic > 0 {
+        let gy_len = state.graveyard_of(who).count() as i32;
+        cost.generic = (cost.generic - gy_len).max(0);
+    }
+    let mana_is_usable = !def.mana_cost().is_empty() && state.potential_mana(who).can_pay(&cost);
+    let base_payable = if mana_is_usable {
+        true
+    } else {
+        def.alternate_costs().iter().any(|c| {
+            if state.hand_size(who) < c.hand_min {
+                return false;
+            }
+            if c.condition.as_ref().map_or(false, |f| !f(who, state)) {
+                return false;
+            }
+            let crate::ir::ability::CostBody::Ir(action) = &c.costs;
+            crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
+        })
+    };
+    // Use strategy default X=3 for XLife cost affordability check.
+    let default_x = 3u32;
+    base_payable && can_pay_additional_ir_cost(state, who, card_id, &def.additional_costs, default_x)
+}
+
+
+/// Build the complete list of legal actions for a player (new-protocol).
+/// Used by the engine to present choices to `choose_action`.
+pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<LegalAction> {
+    let mut actions: Vec<LegalAction> = vec![LegalAction::Pass];
+
+    // ── Castable spells from hand ────────────────────────────────────────────
+    let hand_cards: Vec<(ObjId, String)> = state.hand_of(who)
+        .map(|c| (c.id, c.catalog_key.clone()))
+        .collect();
+    let mut seen_names: std::collections::HashSet<String> = Default::default();
+    for (card_id, name) in &hand_cards {
+        let Some(def) = state.def_of(*card_id) else { continue };
+        if def.is_land() { continue; }
+        if !def.castable { continue; }
+        if !card_has_implementation(def) { continue; }
+        if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
+        if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, *card_id) { continue; }
+        if !spell_is_affordable(*card_id, def, state, who) { continue; }
+        if seen_names.insert(name.clone()) {
+            actions.push(LegalAction::CastSpell { card_id: *card_id, face: SpellFace::Main });
+        }
+        // Adventure back-face.
+        if let Some(face) = def.adventure() {
+            if !face.mana_cost().is_empty() {
+                let cost = parse_mana_cost(face.mana_cost());
+                if !state.potential_mana(who).can_pay(&cost) { continue; }
+            }
+            if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who, *card_id) { continue; }
+            actions.push(LegalAction::CastSpell { card_id: *card_id, face: SpellFace::Back });
+        }
+    }
+
+    // ── In-hand abilities (cycling, channel, ninjutsu, etc.) ───────────────────
+    for (card_id, _name) in &hand_cards {
+        let Some(def) = state.def_of(*card_id) else { continue };
+        for (idx, ab) in def.abilities().iter().enumerate() {
+            if !matches!(ab.source_zone, SourceZone::Hand) { continue; }
+            if !ability_available(ab, state, who, *card_id, true) { continue; }
+            actions.push(LegalAction::ActivateAbility { source_id: *card_id, ability_index: idx });
+        }
+    }
+
+    // ── Battlefield abilities (non-mana) ─────────────────────────────────────
+    let perms: Vec<(ObjId, bool)> = state.permanents_of(who)
+        .map(|p| (p.id, !p.bf().map_or(false, |bf| bf.tapped)))
+        .collect();
+    for (perm_id, untapped) in &perms {
+        let Some(def) = state.def_of(*perm_id) else { continue };
+        for (idx, ab) in def.abilities().iter().enumerate() {
+            if !ability_available(ab, state, who, *perm_id, *untapped) { continue; }
+            actions.push(LegalAction::ActivateAbility { source_id: *perm_id, ability_index: idx });
+        }
+    }
+
+    // ── Mana abilities with non-default timing (LED: instant-only) ─────────
+    for (perm_id, untapped) in &perms {
+        let Some(def) = state.def_of(*perm_id) else { continue };
+        for (idx, ma) in def.mana_abilities().iter().enumerate() {
+            if !ma.activatable { continue; }
+            if ma.timing == ActivationTiming::Default { continue; } // handled in mana sub-loop
+            if ma.timing == ActivationTiming::Sorcery && !state.stack.is_empty() { continue; }
+            if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
+            if ma.costs.requires_tap_self() && !untapped { continue; }
+            if ma.condition.as_ref().map_or(false, |cond| !obj_matches(cond, *perm_id, state)) { continue; }
+            let crate::ir::ability::CostBody::Ir(action) = &ma.costs;
+            if crate::ir::cost_exec::build_schema(action, state, who, *perm_id).is_none() { continue; }
+            actions.push(LegalAction::ActivateManaAbility { source_id: *perm_id, ability_index: idx });
+        }
+    }
+
+    // ── Land drops ───────────────────────────────────────────────────────────
+    if state.player(who).lands_played_this_turn < 1 && state.stack.is_empty() {
+        for (card_id, _name) in &hand_cards {
+            let Some(def) = state.def_of(*card_id) else { continue };
+            if def.is_land() {
+                actions.push(LegalAction::LandDrop(*card_id));
+            }
+        }
+    }
+
+    // ── Adventure creatures in exile (cast creature face) ──────────────────────
+    for card in state.on_adventure_of(who) {
+        let card_id = card.id;
+        if let Some(def) = state.def_of(card_id) {
+            let cost = parse_mana_cost(def.mana_cost());
+            if state.potential_mana(who).can_pay(&cost) {
+                if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, card_id) { continue; }
+                actions.push(LegalAction::CastSpell { card_id, face: SpellFace::Main });
+            }
+        }
+    }
+
+    // ── Castable cards in exile (Dauthi Voidwalker CE grants castable + free alt cost) ──
+    for card in state.exile_of(who) {
+        let card_id = card.id;
+        let Some(def) = state.def_of(card_id) else { continue };
+        if def.is_land() { continue; }
+        if !def.castable { continue; }
+        if !card_has_implementation(def) { continue; }
+        if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, card_id) { continue; }
+        if !spell_is_affordable(card_id, def, state, who) { continue; }
+        actions.push(LegalAction::CastSpell { card_id, face: SpellFace::Main });
+    }
+
+    actions
+}
+
+// ── Counterspell decision ──────────────────────────────────────────────────────
+
+fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
+    let t = library_size;
+    let h = (hand_size.max(0) as usize).min(t);
+    let n = copies;
+    if n == 0 || h == 0 { return 0.0; }
+    if n >= t { return 1.0; }
+    // P(0 in hand) = ∏ᵢ₌₀ʰ⁻¹ (T-N-i)/(T-i)
+    let mut p_none: f64 = 1.0;
+    for i in 0..h {
+        let num = t.saturating_sub(n + i);
+        if num == 0 { return 1.0; }
+        p_none *= num as f64 / (t - i) as f64;
+    }
+    (1.0 - p_none).max(0.0)
+}
+
+// respond_with_counter — replaced by find_counter_in_legal + choose_action flow
+
+/// Phase 3 default `propose_announcement` body.
+///
+/// Walks the schema and answers each `Decision` with a sensible fallback:
+/// - `Objects { candidates, count }`: take the first `count` candidates. Phase
+///   4+ will sharpen this per-card via Strategy overrides; the floor is "any
+///   legal answer is better than none" so the game can keep moving.
+/// - `Branch { payable, .. }`: pick the first payable index.
+/// - `Number { kind, max }`: XLife/XMana clamp at `min(3, max)` (matches the
+///   legacy `announce` X=3 default); Replicate defaults to 0 (no copies).
+///
+/// Strategies override to plan across decisions; this default exists so every
+/// strategy keeps compiling without churn during Phase 3.
+pub(crate) fn default_announcement(
+    schema: &crate::ir::cost::CostSchema,
+) -> crate::ir::executor::BindEnv {
+    let mut env = crate::ir::executor::BindEnv::new();
+    fill_default_announcement(schema, &mut env);
+    env
+}
+
+/// Fill `env` with default answers for every decision in `schema`, recursing
+/// into the first-payable branch of any `Branch` decision so a chosen Choose
+/// option's nested decisions (e.g. a discard pick) are also answered.
+fn fill_default_announcement(
+    schema: &crate::ir::cost::CostSchema,
+    env: &mut crate::ir::executor::BindEnv,
+) {
+    use crate::ir::cost::{DecisionKind, NumberKind};
+    use crate::ir::expr::Value;
+    for d in &schema.decisions {
+        match &d.kind {
+            DecisionKind::Objects { candidates, count } => {
+                let n = *count as usize;
+                let picked: Vec<ObjId> = candidates.iter().take(n).copied().collect();
+                let value = if n == 1 && picked.len() == 1 {
+                    Value::Obj(picked[0])
+                } else {
+                    Value::ObjSet(picked)
+                };
+                env.bindings.insert(d.binding, value);
+            }
+            DecisionKind::Branch { payable, branches, .. } => {
+                let i = *payable.first().unwrap_or(&0);
+                env.bindings.insert(d.binding, Value::Num(i as i64));
+                if let Some(sub) = branches.get(i) {
+                    fill_default_announcement(sub, env);
+                }
+            }
+            DecisionKind::Number { kind, max } => {
+                let default = match kind {
+                    NumberKind::XLife | NumberKind::XMana => 3u32.min(*max),
+                    NumberKind::Replicate => 0,
+                };
+                env.bindings.insert(d.binding, Value::Num(default as i64));
+            }
+        }
+    }
+}
