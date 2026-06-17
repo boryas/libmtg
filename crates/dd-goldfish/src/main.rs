@@ -1,12 +1,20 @@
 //! `dd-goldfish` CLI: run the Doomsday goldfish simulator and render the result.
-//! Decklist/URL input lands later; for now it goldfishes a built-in sample deck.
+//! Goldfishes a deck loaded from a text file or a Moxfield/MTGGoldfish URL, or
+//! a built-in sample deck when `--deck` is omitted.
+
+use std::process::ExitCode;
 
 use clap::Parser;
 use dd_goldfish::{run_goldfish, sample_doomsday_deck, GoldfishStats, DEFAULT_PROTECTION};
+use mtg_engine::{build_catalog, warn_unimplemented_cards};
 
 #[derive(Parser)]
 #[command(about = "Goldfish Monte-Carlo simulator for Doomsday (race to cast DD)")]
 struct Args {
+    /// Deck to goldfish: a text decklist file, or a Moxfield/MTGGoldfish URL.
+    /// Omit to use the built-in sample Doomsday list.
+    #[arg(long)]
+    deck: Option<String>,
     /// Number of games to simulate.
     #[arg(long, default_value_t = 10_000)]
     games: u32,
@@ -15,19 +23,45 @@ struct Args {
     max_turns: u8,
 }
 
-fn main() {
+fn main() -> ExitCode {
     let args = Args::parse();
+
+    let deck = match &args.deck {
+        Some(spec) => match load_deck(spec) {
+            Ok(deck) => deck,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => sample_doomsday_deck(),
+    };
+
+    // Surface cards the engine can't simulate (dropped / inert) before running.
+    warn_unimplemented_cards(&deck, "deck", &build_catalog());
+
     eprintln!(
         "Goldfishing {} games (cap {} turns)…",
         args.games, args.max_turns
     );
-    let stats = run_goldfish(
-        &sample_doomsday_deck(),
-        args.games,
-        DEFAULT_PROTECTION,
-        args.max_turns,
-    );
+    let stats = run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.max_turns);
     print_report(&stats, args.max_turns);
+    ExitCode::SUCCESS
+}
+
+/// Resolve a `--deck` argument (URL or file path) to the engine deck format.
+fn load_deck(spec: &str) -> Result<Vec<(String, i32, String)>, String> {
+    let deck = if spec.starts_with("http://") || spec.starts_with("https://") {
+        decklist::from_url(spec).map_err(|e| e.to_string())?
+    } else {
+        let content = std::fs::read_to_string(spec)
+            .map_err(|e| format!("reading deck file {spec}: {e}"))?;
+        decklist::Decklist::parse_text(&content)
+    };
+    if deck.main.is_empty() {
+        return Err(format!("no mainboard cards parsed from {spec}"));
+    }
+    Ok(deck.to_engine_deck())
 }
 
 fn bar(c: u32, max: u32, width: usize) -> String {
