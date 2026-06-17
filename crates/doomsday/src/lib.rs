@@ -23,6 +23,23 @@ pub use strategy::{DoomsdayStrategy, GenericOppStrategy, MatchupInfo};
 #[cfg(test)]
 mod tests;
 
+/// The Doomsday player's card evaluator (`SimState::evaluate_card`): scores how
+/// well a card closes the current plan gap. Apps install this so the DD player's
+/// surveil / scry-ordering / London-bottom decisions reflect real card value.
+/// Only the `Us` (Doomsday) side is scored; other players get 0.0 (the goldfish
+/// opponent never evaluates).
+pub fn dd_card_evaluator(
+    matchup: MatchupInfo,
+) -> Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync> {
+    Arc::new(move |who, card_id, state| {
+        if who != PlayerId::Us {
+            return 0.0;
+        }
+        let gap = strategy::dd_plan_gap(state, who, &matchup);
+        strategy::dd_card_fills(card_id, &gap, state, who)
+    })
+}
+
 /// dd-pilegen driver: build the Doomsday `Scenario` (DD strategy + generic
 /// opponent, matchup-parameterized card evaluator, Doomsday-resolved objective)
 /// and run it on the generic engine loop.

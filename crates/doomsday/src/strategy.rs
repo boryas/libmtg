@@ -118,7 +118,7 @@ pub struct DoomsdayStrategy {
 }
 
 impl DoomsdayStrategy {
-    pub(crate) fn new(matchup: MatchupInfo) -> Self {
+    pub fn new(matchup: MatchupInfo) -> Self {
         Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(),
                must_land_drop: false, matchup, decisions: Vec::new() }
     }

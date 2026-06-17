@@ -1,0 +1,27 @@
+[package]
+name = "dd-goldfish"
+version = "0.1.0"
+edition = "2021"
+
+# Goldfish Monte-Carlo simulator for Doomsday: drop the opponent, race to cast
+# Doomsday, measure how fast (cast-turn distribution) and with how many layers of
+# protection in hand. Baseline reuses `DoomsdayStrategy`; the wasm cdylib + web
+# frontend + URL decklist input come in a later step.
+
+[lib]
+# cdylib added with the website step; rlib for now (CLI bin + tests).
+crate-type = ["rlib"]
+
+[[bin]]
+name = "dd-goldfish"
+path = "src/main.rs"
+
+[dependencies]
+mtg-engine = { path = "../mtg-engine" }
+doomsday = { path = "../doomsday" }
+rand = { version = "0.8", features = ["small_rng"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# CLI-only deps (will be feature-gated when the wasm cdylib lands).
+clap = { version = "4.5", features = ["derive"] }
+textplots = "0.8"
