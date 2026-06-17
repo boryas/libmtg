@@ -1,17 +1,16 @@
 [package]
-name = "pilegen"
+name = "doomsday"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 mtg-engine = { path = "../mtg-engine" }
-doomsday = { path = "../doomsday" }
+rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
-wasm-bindgen = "0.2"

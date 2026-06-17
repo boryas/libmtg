@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
-use super::*;
+use mtg_engine::*;
+use crate::strategy::*;
 
 // ── Turn plan state ─────────────────────────────────────────────────────────
 

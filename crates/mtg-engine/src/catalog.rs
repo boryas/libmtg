@@ -73,7 +73,7 @@ impl ManaCost {
 /// Leading digits → generic; W/U/B/R/G/C → specific color pips.
 /// Empty string = no castable mana cost (alt-cost-only or uncostable cards like Daze/FoW).
 /// "0" = genuinely free (Lotus Petal, LED).
-pub(crate) fn parse_mana_cost(cost: &str) -> ManaCost {
+pub fn parse_mana_cost(cost: &str) -> ManaCost {
     let mut mc = ManaCost::default();
     let mut chars = cost.trim().chars().peekable();
     let mut num = String::new();
@@ -166,9 +166,9 @@ pub type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Sen
 /// e.g. "If it's not your turn" on Force of Negation. `None` = always available.
 #[derive(Clone, Default)]
 pub struct AlternateCost {
-    pub(crate) costs: crate::ir::ability::CostBody,
-    pub(crate) hand_min: i32,
-    pub(crate) prob: Option<f64>,
+    pub costs: crate::ir::ability::CostBody,
+    pub hand_min: i32,
+    pub prob: Option<f64>,
     pub(crate) condition: Option<std::sync::Arc<dyn Fn(PlayerId, &SimState) -> bool + Send + Sync>>,
 }
 
@@ -216,10 +216,10 @@ pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: 
 pub struct AbilityDef {
     /// Where the source must be located for this ability to be activatable.
     /// Default: Battlefield. Set to Hand for cycling, channel, ninjutsu, etc.
-    pub(crate) source_zone: SourceZone,
+    pub source_zone: SourceZone,
     /// All costs to activate this ability, paid simultaneously. Single-
     /// variant `CostBody::Ir(Action)` after Phase 6 collapsed the dual world.
-    pub(crate) costs: crate::ir::ability::CostBody,
+    pub costs: crate::ir::ability::CostBody,
 
     // ── Target (optional) ─────────────────────────────────────────────────────
     /// If not `TargetSpec::None`, a valid target must exist for the ability to be available.
@@ -238,9 +238,9 @@ pub struct AbilityDef {
 
     /// False when a CE prevents activation (e.g. Disruptor Flute, Karn).
     /// Reset to true each recompute. Checked by ability_available / collect_legal_actions.
-    pub(crate) activatable: bool,
+    pub activatable: bool,
     /// Timing override. Default = instant speed. Sorcery = empty stack + main phase only.
-    pub(crate) timing: ActivationTiming,
+    pub timing: ActivationTiming,
 }
 
 impl Default for AbilityDef {
@@ -260,7 +260,7 @@ impl Default for AbilityDef {
 
 impl AbilityDef {
     /// True if this is a loyalty ability (costs contain a `LoyaltyAdjust`).
-    pub(crate) fn is_loyalty_ability(&self) -> bool {
+    pub fn is_loyalty_ability(&self) -> bool {
         self.loyalty_delta().is_some()
     }
 
@@ -272,7 +272,7 @@ impl AbilityDef {
     }
 
     /// True if this looks like a fetch land activation (SacSelf + Life cost > 0).
-    pub(crate) fn is_fetch_ability(&self) -> bool {
+    pub fn is_fetch_ability(&self) -> bool {
         if !self.costs.requires_sac_self() {
             return false;
         }
@@ -332,19 +332,19 @@ pub type ManaEffectFactory =
 ///                   returns true. Used for Metalcraft, etc.
 #[derive(Clone)]
 pub struct ManaAbility {
-    pub(crate) source_zone: SourceZone,
-    pub(crate) costs: crate::ir::ability::CostBody,
-    pub(crate) produces: Vec<Color>,
-    pub(crate) produces_count: usize,
+    pub source_zone: SourceZone,
+    pub costs: crate::ir::ability::CostBody,
+    pub produces: Vec<Color>,
+    pub produces_count: usize,
     pub(crate) make_effect: ManaEffectFactory,
-    pub(crate) condition: Option<crate::ir::expr::Filter>,
+    pub condition: Option<crate::ir::expr::Filter>,
     /// False when a CE prevents activation (e.g. Karn, Null Rod).
     /// Reset to true each recompute. Checked by collect_legal_actions and mana sub-loop.
-    pub(crate) activatable: bool,
+    pub activatable: bool,
     /// Timing override. Default = usable in mana sub-loop (CR 601.2g).
     /// Instant = excluded from sub-loop, available during priority (LED).
     /// Sorcery = priority only, empty stack + main phase.
-    pub(crate) timing: ActivationTiming,
+    pub timing: ActivationTiming,
 }
 
 impl Default for ManaAbility {
@@ -451,7 +451,7 @@ impl LandTypes {
 pub struct LandData {
     pub(crate) land_types: LandTypes,
     pub(crate) mana_abilities: Vec<ManaAbility>,
-    pub(crate) abilities: Vec<AbilityDef>,
+    pub abilities: Vec<AbilityDef>,
 }
 
 #[derive(Clone)]
@@ -551,10 +551,10 @@ pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
 impl CreatureData {
     /// Read effective power — call only on a value from `MaterializedState.defs`, never
     /// directly from `catalog_map`, so continuous effects are always reflected.
-    pub(crate) fn power(&self) -> i32 { self.power }
+    pub fn power(&self) -> i32 { self.power }
 
     /// Read effective toughness — same rule as `power()`.
-    pub(crate) fn toughness(&self) -> i32 { self.toughness }
+    pub fn toughness(&self) -> i32 { self.toughness }
 
     /// Apply a power/toughness delta. Used exclusively by `fold_game_state_into_def`
     /// (counters + temporary mods) and `ContinuousModFn` closures in CE machinery.
@@ -721,7 +721,7 @@ pub struct CardDef {
     /// Relative likelihood of appearing as a permanent in play (default 100).
     #[allow(dead_code)]
     pub(crate) play_weight: Option<u32>,
-    pub(crate) kind: CardKind,
+    pub kind: CardKind,
     /// Colors of this card, derived from mana cost and explicit color flags at load time.
     pub(crate) colors: Vec<Color>,
     /// Card types (Land, Creature, Instant, etc.) — mirrors the `kind` discriminant but
@@ -767,7 +767,7 @@ pub struct CardDef {
     /// Default true for cards in hand, false for other zones. CEs can override:
     /// Dauthi Voidwalker sets true on exiled cards, Lavinia sets false on opponent hand cards.
     /// Reset to zone-based default each recompute. Checked by collect_legal_actions.
-    pub(crate) castable: bool,
+    pub castable: bool,
     /// Alternate costs granted by continuous effects (e.g. Omniscience grants a zero-cost
     /// alternate). Works for ALL card types, unlike `SpellData.alternate_costs` which only
     /// covers Instant/Sorcery. Reset to empty on each `recompute`.
@@ -796,13 +796,23 @@ impl CardDef {
         self.back.as_ref().map(|b| b.name.as_str())
     }
 
-    pub(crate) fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
-    pub(crate) fn is_creature(&self) -> bool { matches!(self.kind, CardKind::Creature(_)) }
-    pub(crate) fn is_instant(&self) -> bool { matches!(self.kind, CardKind::Instant(_)) }
-    #[allow(dead_code)]
-    pub(crate) fn is_sorcery(&self) -> bool { matches!(self.kind, CardKind::Sorcery(_)) }
+    /// Convenience constructor for a vanilla creature with the given power,
+    /// toughness, and keywords. Public so content crates / their tests can build
+    /// simple bodies without the full `CardDef::new` AST.
+    pub fn vanilla_creature(name: &str, power: i32, toughness: i32, keywords: &[Keyword]) -> CardDef {
+        let mut data = CreatureData::new("", power, toughness);
+        data.keywords = Keywords::from_slice(keywords);
+        CardDef::new(name, CardKind::Creature(data), vec![], None, vec![],
+                     CardLayout::Normal, None, vec![], vec![], vec![], vec![])
+    }
 
-    pub(crate) fn mana_cost(&self) -> &str {
+    pub fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
+    pub fn is_creature(&self) -> bool { matches!(self.kind, CardKind::Creature(_)) }
+    pub fn is_instant(&self) -> bool { matches!(self.kind, CardKind::Instant(_)) }
+    #[allow(dead_code)]
+    pub fn is_sorcery(&self) -> bool { matches!(self.kind, CardKind::Sorcery(_)) }
+
+    pub fn mana_cost(&self) -> &str {
         match &self.kind {
             CardKind::Land(_) | CardKind::Enchantment(_) => "",
             CardKind::Creature(c) => &c.mana_cost,
@@ -812,7 +822,7 @@ impl CardDef {
         }
     }
 
-    pub(crate) fn abilities(&self) -> &[AbilityDef] {
+    pub fn abilities(&self) -> &[AbilityDef] {
         match &self.kind {
             CardKind::Land(l) => &l.abilities,
             CardKind::Creature(c) => &c.abilities,
@@ -828,7 +838,7 @@ impl CardDef {
     }
 
     /// Target spec for mode 0 (non-modal spells) or the given mode.
-    pub(crate) fn target_spec(&self) -> &TargetSpec {
+    pub fn target_spec(&self) -> &TargetSpec {
         self.target_spec_for_mode(0)
     }
 
@@ -887,12 +897,12 @@ impl CardDef {
         }
     }
 
-    pub(crate) fn is_blue(&self) -> bool { self.colors.contains(&Color::Blue) }
+    pub fn is_blue(&self) -> bool { self.colors.contains(&Color::Blue) }
 
     #[allow(dead_code)]
     pub(crate) fn is_black(&self) -> bool { self.colors.contains(&Color::Black) }
 
-    pub(crate) fn mana_abilities(&self) -> &[ManaAbility] {
+    pub fn mana_abilities(&self) -> &[ManaAbility] {
         match &self.kind {
             CardKind::Land(l) => &l.mana_abilities,
             CardKind::Creature(c) => &c.mana_abilities,
@@ -950,7 +960,7 @@ impl CardDef {
         match &self.kind { CardKind::Land(l) => Some(l), _ => None }
     }
 
-    pub(crate) fn as_creature(&self) -> Option<&CreatureData> {
+    pub fn as_creature(&self) -> Option<&CreatureData> {
         match &self.kind { CardKind::Creature(c) => Some(c), _ => None }
     }
 

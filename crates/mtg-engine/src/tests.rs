@@ -1,6 +1,6 @@
     use super::*;
     use super::strategy;
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::SeedableRng;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -11,8 +11,8 @@
         s.rng = Box::new(rand::rngs::StdRng::seed_from_u64(42));
         // Install the same strategies the engine functions used to receive via the
         // threaded map (now folded onto the players); tests reach them via with_strategy.
-        s.set_strategy(PlayerId::Us, Box::new(strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default())));
-        s.set_strategy(PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default())));
+        s.set_strategy(PlayerId::Us, Box::new(strategy::AlwaysPass::new(PlayerId::Us)));
+        s.set_strategy(PlayerId::Opp, Box::new(strategy::AlwaysPass::new(PlayerId::Opp)));
         s
     }
 
@@ -275,99 +275,10 @@
         assert_eq!(state.permanent_bf(rag_id).unwrap().damage, 0);
     }
 
-    #[test]
-    fn test_declare_attackers_safe_to_attack() {
-        let mut state = make_state();
-        let ragavan_def = creature("Ragavan", 2, 4);
-        let ragavan_id = add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
-            entered_this_turn: false,
-            ..BattlefieldState::new()
-        });
 
-        let catalog = vec![ragavan_def];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert!(state.combat_attackers.contains(&ragavan_id), "should attack");
-        assert!(state.permanent_bf(ragavan_id).unwrap().tapped, "attacker should be tapped");
-    }
 
-    #[test]
-    fn test_declare_attackers_too_risky() {
-        let mut state = make_state();
-        let attacker_def = creature("Ragavan", 2, 2);
-        let blocker_def = creature("Mosscoat Construct", 3, 3);
-        add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
-            entered_this_turn: false,
-            ..BattlefieldState::new()
-        });
-        add_default_perm(&mut state, PlayerId::Opp, "Mosscoat Construct");
 
-        let catalog = vec![attacker_def, blocker_def];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
-
-        assert!(state.combat_attackers.is_empty(), "should not attack into 3/3");
-    }
-
-    #[test]
-    fn test_declare_attackers_summoning_sickness() {
-        let mut state = make_state();
-        let def = creature("Ragavan", 2, 4);
-        // entered_this_turn = true (default from BattlefieldState::new)
-        add_default_perm(&mut state, PlayerId::Us, "Ragavan");
-
-        let catalog = vec![def];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
-
-        assert!(state.combat_attackers.is_empty(), "sickness prevents attack");
-    }
-
-    #[test]
-    fn test_declare_blockers_good_block() {
-        let mut state = make_state();
-        let atk_def = creature("Ragavan", 2, 2);
-        let blk_def = creature("Mosscoat Construct", 3, 3);
-        let ragavan_id = add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
-            entered_this_turn: false,
-            tapped: false,
-            ..BattlefieldState::new()
-        });
-        let mosscoat_id = add_default_perm(&mut state, PlayerId::Opp, "Mosscoat Construct");
-        state.combat_attackers = vec![ragavan_id];
-
-        let catalog = vec![atk_def, blk_def];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
-
-        assert_eq!(state.combat_blocks.len(), 1);
-        assert_eq!(state.combat_blocks[0], (ragavan_id, mosscoat_id));
-    }
-
-    #[test]
-    fn test_declare_blockers_no_chump() {
-        let mut state = make_state();
-        let atk_def = creature("Beast", 4, 4);
-        let blk_def = creature("Squirrel Token", 1, 1);
-        let beast_id = add_perm(&mut state, PlayerId::Us, "Beast", BattlefieldState {
-            entered_this_turn: false,
-            ..BattlefieldState::new()
-        });
-        add_default_perm(&mut state, PlayerId::Opp, "Squirrel Token");
-        state.combat_attackers = vec![beast_id];
-
-        let catalog = vec![atk_def, blk_def];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
-
-        assert!(state.combat_blocks.is_empty(), "should not chump block");
-    }
 
     #[test]
     fn test_combat_damage_unblocked_hits_player() {
@@ -575,23 +486,6 @@
 
     // ── Section 6: Spell Resolution ───────────────────────────────────────────
 
-    #[test]
-    fn test_doomsday_resolved_objective_ends_sim() {
-        use crate::objective::Objective;
-        let mut state = make_state();
-        let before = state.player(PlayerId::Us).life;
-        // A Doomsday object as if it just resolved.
-        let id = state.alloc_id();
-        state.objects.insert(id, GameObject::new(id, "Doomsday".to_string(), PlayerId::Us));
-        let mut obj = crate::objective::DoomsdayResolvedObjective::default();
-        let ended = obj.observe(
-            &crate::GameEvent::SpellResolved { controller: PlayerId::Us, card_id: id },
-            &mut state,
-        );
-        assert!(ended, "Doomsday resolving ends the simulation");
-        assert_eq!(state.life_before_dd, Some(before), "pre-DD life recorded");
-        assert_eq!(state.player(PlayerId::Us).life, before / 2, "Doomsday life accounting applied");
-    }
 
     #[test]
     fn test_effect_cantrip_increments_hand() {
@@ -984,6 +878,7 @@
 
         let catalog = vec![murktide_def, blocker_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        state.set_strategy(PlayerId::Us, Box::new(strategy::TestStrategy::new(PlayerId::Us).attacking(vec![(murktide_id, None)])));
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1046,6 +941,7 @@
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        state.set_strategy(PlayerId::Us, Box::new(strategy::TestStrategy::new(PlayerId::Us).attacking(vec![(atk_id, None)])));
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1082,11 +978,12 @@
             tapped: true,
             ..BattlefieldState::new()
         });
-        add_default_perm(&mut state, PlayerId::Opp, "Wall");
+        let wall_id = add_default_perm(&mut state, PlayerId::Opp, "Wall");
         state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        state.set_strategy(PlayerId::Opp, Box::new(strategy::TestStrategy::new(PlayerId::Opp).blocking(vec![(ragavan_id, wall_id)])));
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1185,35 +1082,31 @@
         }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let catalog = vec![borrower_def.clone(), catalog_card("Island"), island2_def.clone(), catalog_card("Swamp")];
 
-        let make_fresh_state = || {
-            let mut state = make_state();
-            for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-            state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
-            state.current_ap = state.us_id;
-            let borrower_id = state.alloc_id();
-            let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", PlayerId::Us);
-            borrower_obj.set_zone(Zone::Exile { on_adventure: true });
-            state.objects.insert(borrower_id, borrower_obj);
-            // 1UU mana: two Islands + one generic (Swamp)
-            island_land(&mut state, PlayerId::Us);
-            add_perm_with_def(&mut state, PlayerId::Us, &island2_def, BattlefieldState::new());
-            add_perm_with_def(&mut state, PlayerId::Us, &catalog_card("Swamp"), BattlefieldState::new());
-            state
-        };
+        // Engine-machinery test: when the strategy chooses to cast the adventure
+        // creature from exile, it enters play (the *decision* to do so is content
+        // strategy logic, tested in the doomsday crate). We script the cast via a
+        // generic TestStrategy so this stays a pure engine test.
+        let mut state = make_state();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        state.current_ap = state.us_id;
+        let borrower_id = state.alloc_id();
+        let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", PlayerId::Us);
+        borrower_obj.set_zone(Zone::Exile { on_adventure: true });
+        state.objects.insert(borrower_id, borrower_obj);
+        // 1UU mana: two Islands + one generic (Swamp)
+        island_land(&mut state, PlayerId::Us);
+        add_perm_with_def(&mut state, PlayerId::Us, &island2_def, BattlefieldState::new());
+        add_perm_with_def(&mut state, PlayerId::Us, &catalog_card("Swamp"), BattlefieldState::new());
 
-        // At 75% per attempt, try up to 20 seeds; at least one must result in Borrower entering play.
-        let mut entered = false;
-        for _seed in 0u64..20 {
-            let mut state = make_fresh_state();
-            handle_priority_round(&mut state, 1, PlayerId::Us);
-            if state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Brazen Borrower") {
-                assert!(!state.on_adventure_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "removed from on_adventure");
-                assert!(!state.exile_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "removed from exile");
-                entered = true;
-                break;
-            }
-        }
-        assert!(entered, "Brazen Borrower should have entered play in at least one of 20 seeded runs");
+        state.set_strategy(PlayerId::Us, Box::new(strategy::TestStrategy::new(PlayerId::Us)
+            .action(LegalAction::CastSpell { card_id: borrower_id, face: SpellFace::Main })));
+        handle_priority_round(&mut state, 1, PlayerId::Us);
+
+        assert!(state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Brazen Borrower"),
+            "scripted adventure cast should put Brazen Borrower onto the battlefield");
+        assert!(!state.on_adventure_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "removed from on_adventure");
+        assert!(!state.exile_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "removed from exile");
     }
 
     // ── Section 8: Keyword Tests ──────────────────────────────────────────────
@@ -1262,6 +1155,7 @@
 
         let catalog = vec![flyer_atk, flyer_blk];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        state.set_strategy(PlayerId::Opp, Box::new(strategy::TestStrategy::new(PlayerId::Opp).blocking(vec![(murktide_id, subtlety_id)])));
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1269,29 +1163,6 @@
         assert_eq!(state.combat_blocks[0], (murktide_id, subtlety_id));
     }
 
-    #[test]
-    fn test_flying_attack_safety_ignores_ground() {
-        // A flying 3/3 attacker should attack freely even if a 3/3 ground creature is in play,
-        // because that ground creature cannot block the flyer.
-        let mut state = make_state();
-        let flyer = flying_creature("Murktide Regent", 3, 3);
-        let ground = creature("Troll", 3, 3); // cannot block flyer
-
-        let murktide_id = add_perm(&mut state, PlayerId::Us, "Murktide Regent", BattlefieldState {
-            entered_this_turn: false,
-            ..BattlefieldState::new()
-        });
-        add_default_perm(&mut state, PlayerId::Opp, "Troll");
-
-        let catalog = vec![flyer, ground];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
-
-        // Murktide's toughness (3) > relevant blocking power (0 — Troll can't block flyer).
-        assert!(state.combat_attackers.contains(&murktide_id),
-            "flying creature should attack when only ground blockers exist");
-    }
 
     /// Helper: build a vanilla creature with one or more keywords for combat tests.
     fn keyword_creature(name: &str, power: i32, toughness: i32, kws: &[Keyword]) -> CardDef {
@@ -1314,6 +1185,7 @@
             ..BattlefieldState::new()
         });
 
+        state.set_strategy(PlayerId::Us, Box::new(strategy::TestStrategy::new(PlayerId::Us).attacking(vec![(id, None)])));
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1333,6 +1205,7 @@
             ..BattlefieldState::new()
         });
 
+        state.set_strategy(PlayerId::Us, Box::new(strategy::TestStrategy::new(PlayerId::Us).attacking(vec![(id, None)])));
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1573,6 +1446,7 @@
         let blk = add_default_perm(&mut state, PlayerId::Opp, "Giant Spider");
         state.combat_attackers = vec![atk];
 
+        state.set_strategy(PlayerId::Opp, Box::new(strategy::TestStrategy::new(PlayerId::Opp).blocking(vec![(atk, blk)])));
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -1581,27 +1455,6 @@
         assert_eq!(state.combat_blocks[0], (atk, blk));
     }
 
-    /// A flying attacker should NOT attack into a reach blocker that would kill it.
-    #[test]
-    fn test_flying_attacker_avoids_reach_blocker() {
-        let mut state = make_state();
-        let dragon = keyword_creature("Dragon", 3, 3, &[Keyword::Flying]);
-        let spider = keyword_creature("Giant Spider", 5, 5, &[Keyword::Reach]);
-        state.catalog.insert(dragon.name.clone(), dragon.clone());
-        state.catalog.insert(spider.name.clone(), spider.clone());
-
-        let atk = add_perm(&mut state, PlayerId::Us, "Dragon", BattlefieldState {
-            entered_this_turn: false,
-            ..BattlefieldState::new()
-        });
-        add_default_perm(&mut state, PlayerId::Opp, "Giant Spider");
-
-        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true);
-
-        assert!(!state.combat_attackers.contains(&atk),
-            "flying attacker should avoid attacking into a reach blocker that outclasses it");
-    }
 
     // ── Combat damage assignment (CR 510.1c) ─────────────────────────────────
 
@@ -1651,7 +1504,7 @@
     /// Test scaffolding: a Doomsday-strategy wrapper that lets a test override
     /// `order_blockers` and `assign_combat_damage`.
     struct ProgrammableStrat {
-        inner: strategy::DoomsdayStrategy,
+        inner: AlwaysPass,
         ordered: std::cell::RefCell<Option<Vec<ObjId>>>,
         assignment: std::cell::RefCell<Option<Vec<i32>>>,
     }
@@ -1702,7 +1555,7 @@
         state.combat_attackers = vec![atk];
 
         state.set_strategy(PlayerId::Us, Box::new(ProgrammableStrat {
-            inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
+            inner: AlwaysPass::new(PlayerId::Us),
             // Force order [b, a] so the engine should swap from the (a, b) declaration order.
             ordered: std::cell::RefCell::new(Some(vec![b, a])),
             assignment: std::cell::RefCell::new(None),
@@ -1759,7 +1612,7 @@
         // Strategy assigns lethal (2) to A then dumps the rest (3) on B — same total, legal under
         // CR 510.1c since A got lethal first.
         state.set_strategy(PlayerId::Us, Box::new(ProgrammableStrat {
-            inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
+            inner: AlwaysPass::new(PlayerId::Us),
             ordered: std::cell::RefCell::new(None),
             assignment: std::cell::RefCell::new(Some(vec![2, 3])),
         }));
@@ -2223,11 +2076,12 @@
         });
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
-        add_perm(&mut state, PlayerId::Opp, "Dragon", BattlefieldState { entered_this_turn: false, ..BattlefieldState::new() });
+        let dragon_atk_id = add_perm(&mut state, PlayerId::Opp, "Dragon", BattlefieldState { entered_this_turn: false, ..BattlefieldState::new() });
         add_default_perm(&mut state, PlayerId::Us, "Wall"); // blocker-sized (no block in this test)
 
         let catalog = vec![atk_def, creature("Wall", 0, 4)];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        state.set_strategy(PlayerId::Opp, Box::new(strategy::TestStrategy::new(PlayerId::Opp).attacking(vec![(dragon_atk_id, None)])));
         do_step(&mut state, 1, PlayerId::Opp, &Step { kind: StepKind::DeclareAttackers, prio: true },
             true);
 
@@ -8045,254 +7899,30 @@
 
     // ── Section 50: DD Strategy Evaluator ────────────────────────────────────────
 
-    #[test]
-    fn test_dd_plan_gap_no_hand_all_gaps_high() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let matchup = strategy::MatchupInfo::default();
-        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
-        assert!(gap.mana >= 0.9, "no mana sources → mana gap near 1.0, got {}", gap.mana);
-        assert!(gap.threat >= 0.9, "no threats → threat gap near 1.0, got {}", gap.threat);
-    }
 
-    #[test]
-    fn test_dd_plan_gap_dd_in_hand_zeroes_threat() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let _dd = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let matchup = strategy::MatchupInfo::default();
-        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
-        assert_eq!(gap.threat, 0.0, "DD in hand → threat gap 0.0");
-    }
 
-    #[test]
-    fn test_dd_plan_gap_lands_reduce_mana_gap() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        make_land(&mut state, PlayerId::Us, "Underground Sea", false);
-        make_land(&mut state, PlayerId::Us, "Polluted Delta", false);
-        let matchup = strategy::MatchupInfo::default();
-        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
-        // 2 lands → mana_gap = (3-2)/3 ≈ 0.33
-        assert!(gap.mana < 0.4, "2 lands → mana gap <0.4, got {}", gap.mana);
-        assert!(gap.mana > 0.2, "2 lands → mana gap >0.2, got {}", gap.mana);
-    }
 
-    #[test]
-    fn test_dd_plan_gap_interaction_high_vs_blue() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, ..Default::default() };
-        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
-        assert!(gap.interaction >= 0.9, "no interaction vs blue → high gap, got {}", gap.interaction);
-    }
 
-    #[test]
-    fn test_dd_plan_gap_interaction_low_vs_nonblue() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let matchup = strategy::MatchupInfo { opp_has_counters: false, ..Default::default() };
-        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
-        assert!(gap.interaction <= 0.2, "vs non-blue → interaction gap low, got {}", gap.interaction);
-    }
 
-    #[test]
-    fn test_dd_card_fills_land_high_when_needed() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5 };
-        let score = strategy::dd_card_fills(land_id, &gap, &state, PlayerId::Us);
-        assert!(score > 0.7, "land fills high mana gap → score >0.7, got {}", score);
-    }
 
-    #[test]
-    fn test_dd_card_fills_land_low_when_flooded() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5 };
-        let score = strategy::dd_card_fills(land_id, &gap, &state, PlayerId::Us);
-        assert!(score < 0.1, "land when mana gap=0 → score <0.1, got {}", score);
-    }
 
-    #[test]
-    fn test_dd_card_fills_doomsday_very_high() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let dd_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5 };
-        let score = strategy::dd_card_fills(dd_id, &gap, &state, PlayerId::Us);
-        assert!(score >= 0.9, "DD with high threat gap → score >=0.9, got {}", score);
-    }
 
-    #[test]
-    fn test_dd_card_fills_second_dd_low() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let _dd1 = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let dd2 = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5 };
-        let score = strategy::dd_card_fills(dd2, &gap, &state, PlayerId::Us);
-        assert!(score <= 0.15, "second DD → score low, got {}", score);
-    }
 
-    #[test]
-    fn test_dd_card_fills_oracle_near_zero() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let oracle_id = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5 };
-        let score = strategy::dd_card_fills(oracle_id, &gap, &state, PlayerId::Us);
-        assert!(score <= 0.1, "Oracle pre-DD → near-zero, got {}", score);
-    }
 
-    #[test]
-    fn test_dd_card_fills_cantrip_always_medium() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let bs_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        // Even with all gaps filled, cantrips retain medium value
-        let gap_low = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0 };
-        let gap_high = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 1.0 };
-        let score_low = strategy::dd_card_fills(bs_id, &gap_low, &state, PlayerId::Us);
-        let score_high = strategy::dd_card_fills(bs_id, &gap_high, &state, PlayerId::Us);
-        assert!(score_low > 0.2, "cantrip always valuable, got {}", score_low);
-        assert!(score_high > 0.2, "cantrip always valuable, got {}", score_high);
-        assert!((score_low - score_high).abs() < 0.2, "cantrip score stable across gap states");
-    }
 
-    #[test]
-    fn test_dd_card_fills_fow_high_when_interaction_needed() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 0.5, interaction: 1.0 };
-        let score = strategy::dd_card_fills(fow_id, &gap, &state, PlayerId::Us);
-        assert!(score > 0.7, "FoW with high interaction gap → score >0.7, got {}", score);
-    }
 
-    #[test]
-    fn test_dd_london_bottom_picks_worst_cards() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // Hand: Oracle (dead), DD (great), Underground Sea (good mana), Brainstorm (medium)
-        let oracle_id = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        let _dd_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let _land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        let _bs_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        let strat = strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default());
-        let bottom = strat.london_bottom(&state, 1);
-        assert_eq!(bottom.len(), 1);
-        assert_eq!(bottom[0], oracle_id, "Oracle should be bottomed as lowest-value card");
-    }
 
     // ── Section 51: Opponent Strategy Evaluator ──────────────────────────────────
 
-    #[test]
-    fn test_opp_plan_gap_no_board_all_gaps_high() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // Opp facing combo (DD): opp_fast_clock = false
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false, ..Default::default() };
-        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
-        assert!(gap.mana >= 0.9, "no lands → mana gap high, got {}", gap.mana);
-        assert!(gap.threat >= 0.9, "no threats → threat gap high, got {}", gap.threat);
-        assert!(gap.interaction >= 0.9, "no interaction vs combo → gap high, got {}", gap.interaction);
-    }
 
-    #[test]
-    fn test_opp_plan_gap_lands_reduce_mana() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        make_land(&mut state, PlayerId::Opp, "Volcanic Island", false);
-        make_land(&mut state, PlayerId::Opp, "Scalding Tarn", false);
-        let matchup = strategy::MatchupInfo::default();
-        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
-        assert!(gap.mana < 0.1, "2 lands → mana gap ~0, got {}", gap.mana);
-    }
 
-    #[test]
-    fn test_opp_plan_gap_creature_reduces_threat() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let _delver = add_default_perm(&mut state, PlayerId::Opp, "Delver of Secrets");
-        let matchup = strategy::MatchupInfo::default();
-        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
-        assert!(gap.threat < 0.5, "1 creature → threat gap reduced, got {}", gap.threat);
-    }
 
-    #[test]
-    fn test_opp_plan_gap_interaction_low_vs_aggro() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // Facing aggro: opp_fast_clock = true
-        let matchup = strategy::MatchupInfo { opp_has_counters: false, opp_fast_clock: true, ..Default::default() };
-        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
-        assert!(gap.interaction <= 0.5, "vs aggro → interaction gap capped, got {}", gap.interaction);
-    }
 
-    #[test]
-    fn test_opp_card_fills_land_high_when_needed() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let land_id = add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5 };
-        let score = strategy::opp_card_fills(land_id, &gap, &state, PlayerId::Opp);
-        assert!(score > 0.7, "land fills high mana gap → score >0.7, got {}", score);
-    }
 
-    #[test]
-    fn test_opp_card_fills_land_low_when_flooded() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let land_id = add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5 };
-        let score = strategy::opp_card_fills(land_id, &gap, &state, PlayerId::Opp);
-        assert!(score < 0.1, "land when mana gap=0 → near-zero, got {}", score);
-    }
 
-    #[test]
-    fn test_opp_card_fills_creature_high() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let delver_id = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5 };
-        let score = strategy::opp_card_fills(delver_id, &gap, &state, PlayerId::Opp);
-        assert!(score > 0.7, "creature with high threat gap → high score, got {}", score);
-    }
 
-    #[test]
-    fn test_opp_card_fills_surplus_creature_lower() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let _board_delver = add_default_perm(&mut state, PlayerId::Opp, "Delver of Secrets");
-        let hand_delver = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        // threat_gap low since we already have one on board
-        let gap = strategy::TargetGap { mana: 0.0, threat: 0.1, interaction: 0.5 };
-        let score = strategy::opp_card_fills(hand_delver, &gap, &state, PlayerId::Opp);
-        assert!(score < 0.3, "surplus Delver on board → lower, got {}", score);
-    }
 
-    #[test]
-    fn test_opp_card_fills_fow_high_vs_combo() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let fow_id = add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 0.5, interaction: 1.0 };
-        let score = strategy::opp_card_fills(fow_id, &gap, &state, PlayerId::Opp);
-        assert!(score > 0.7, "FoW with high interaction gap → score >0.7, got {}", score);
-    }
 
-    #[test]
-    fn test_opp_card_fills_cantrip_medium() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        let bs_id = add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0 };
-        let score = strategy::opp_card_fills(bs_id, &gap, &state, PlayerId::Opp);
-        assert!(score > 0.2 && score < 0.5, "cantrip always medium, got {}", score);
-    }
 
     // ── Section 52: Cantrip Effect Primitives ──────────────────────────────────
 
@@ -8712,281 +8342,27 @@
         assert_eq!(state.player(PlayerId::Us).library_order.len(), 1);
     }
 
-    #[test]
-    fn test_opp_london_bottom_picks_worst() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // Opp hand: FoW (needed vs combo), extra Wasteland (useless), Delver (threat), Brainstorm (medium)
-        let _fow = add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        let waste = add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
-        let _delver = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        let _bs = add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        // Already have 2 lands on board → mana gap is 0
-        make_land(&mut state, PlayerId::Opp, "Underground Sea", false);
-        make_land(&mut state, PlayerId::Opp, "Polluted Delta", false);
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false, ..Default::default() };
-        let strat = strategy::GenericOppStrategy::new(matchup);
-        let bottom = strat.london_bottom(&state, 1);
-        assert_eq!(bottom.len(), 1);
-        // With mana gap=0, the only land (Wasteland) should score lowest
-        assert_eq!(bottom[0], waste, "extra land should be bottomed when mana-flooded");
-    }
 
     // ── Section 53: Mulligan Decision Tests ──────────────────────────────────
 
-    #[test]
-    fn test_dd_mull_no_land_hand() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // All spells, no lands: should mull even with Dark Ritual (can't cast without B source).
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Us, "Ponder");
-        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
-        add_hand_card(&mut state, PlayerId::Us, "Consider");
-        assert!(dd_should_mulligan(&state, PlayerId::Us, 0),
-            "no lands (only Ritual) should mull — can't cast Ritual without B source");
-    }
 
-    #[test]
-    fn test_dd_mull_truly_no_mana() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // All non-mana cards
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Us, "Ponder");
-        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
-        add_hand_card(&mut state, PlayerId::Us, "Daze");
-        add_hand_card(&mut state, PlayerId::Us, "Consider");
-        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "0 mana sources should mull");
-    }
 
-    #[test]
-    fn test_dd_mull_land_flood() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // 5 mana-producing lands + 2 spells → flood
-        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
-        add_hand_card(&mut state, PlayerId::Us, "Island");
-        add_hand_card(&mut state, PlayerId::Us, "Swamp");
-        add_hand_card(&mut state, PlayerId::Us, "Misty Rainforest");
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "5+ mana lands should mull");
-    }
 
-    #[test]
-    fn test_dd_keep_good_hand() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // Classic keep: land, ritual, DD, cantrip, interaction
-        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Ponder");
-        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
-        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0), "good DD hand should keep");
-    }
 
-    #[test]
-    fn test_dd_mull_all_mana_no_action() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // All lands + rituals, no threats or cantrips
-        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
-        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        add_hand_card(&mut state, PlayerId::Us, "Lotus Petal");
-        add_hand_card(&mut state, PlayerId::Us, "Island");
-        add_hand_card(&mut state, PlayerId::Us, "Swamp");
-        add_hand_card(&mut state, PlayerId::Us, "Wasteland");
-        // 7 mana sources, 0 threats, 0 selection → 5+ mana → mull
-        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "all mana should mull");
-    }
 
-    #[test]
-    fn test_dd_mull_6_card_lenient() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // 6 cards: 1 land + 5 interaction (no threat/selection) — still has "spells"
-        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Daze");
-        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Daze");
-        assert!(!dd_should_mulligan(&state, PlayerId::Us, 1), "6-card with land + spells should keep");
-    }
 
-    #[test]
-    fn test_dd_always_keeps_at_4() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        // Terrible 4-card hand — should still keep
-        add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        add_hand_card(&mut state, PlayerId::Us, "Unearth");
-        add_hand_card(&mut state, PlayerId::Us, "Lion's Eye Diamond");
-        add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        assert!(!dd_should_mulligan(&state, PlayerId::Us, 3), "always keep at 4 cards");
-    }
 
-    #[test]
-    fn test_opp_mull_no_land() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
-        add_hand_card(&mut state, PlayerId::Opp, "Daze");
-        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
-        add_hand_card(&mut state, PlayerId::Opp, "Dragon's Rage Channeler");
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]), "0-land opp hand should mull");
-    }
 
-    #[test]
-    fn test_opp_mull_land_flood() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        add_hand_card(&mut state, PlayerId::Opp, "Scalding Tarn");
-        add_hand_card(&mut state, PlayerId::Opp, "Flooded Strand");
-        add_hand_card(&mut state, PlayerId::Opp, "Polluted Delta");
-        add_hand_card(&mut state, PlayerId::Opp, "Misty Rainforest");
-        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]), "5+ mana lands opp hand should mull");
-    }
 
-    #[test]
-    fn test_opp_keep_good_hand() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
-        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Opp, "Daze");
-        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
-        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]), "good tempo hand should keep");
-    }
 
-    #[test]
-    fn test_opp_mull_all_interaction_no_threats() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
-        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Opp, "Daze");
-        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
-        add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
-        add_hand_card(&mut state, PlayerId::Opp, "Thoughtseize");
-        // 2 mana + 5 interaction, 0 threats, 0 selection → mull
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]),
-            "all interaction no threats/cantrips should mull");
-    }
 
-    #[test]
-    fn test_opp_always_keeps_at_4() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Opp, "Daze");
-        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
-        add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
-        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 3, &[Color::Blue, Color::Red]), "always keep at 4 cards");
-    }
 
     // ── Section 54b: Color-Aware Mulligan Tests ──────────────────────────────
 
-    #[test]
-    fn test_dd_mull_wasteland_only() {
-        // Wasteland produces no colored mana — should mull.
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Us, "Wasteland");
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Us, "Ponder");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
-        add_hand_card(&mut state, PlayerId::Us, "Consider");
-        assert!(dd_should_mulligan(&state, PlayerId::Us, 0),
-            "Wasteland-only hand should mull — no U or BBB");
-    }
 
-    #[test]
-    fn test_dd_keep_fetch_hand() {
-        // 3 fetches + Ritual + DD: fetches provide U/B, should keep.
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
-        add_hand_card(&mut state, PlayerId::Us, "Misty Rainforest");
-        add_hand_card(&mut state, PlayerId::Us, "Flooded Strand");
-        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Us, "Ponder");
-        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0),
-            "fetch lands provide U/B — should keep");
-    }
 
-    #[test]
-    fn test_dd_keep_usea_cantrips() {
-        // 1 Underground Sea + cantrips: has U, should keep.
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Us, "Ponder");
-        add_hand_card(&mut state, PlayerId::Us, "Consider");
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
-        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0),
-            "USea + cantrips should keep");
-    }
 
-    #[test]
-    fn test_opp_mull_wasteland_only() {
-        // Opponent with only Wasteland — no U, should mull.
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
-        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Opp, "Daze");
-        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
-        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]),
-            "Wasteland-only opp hand should mull — no U");
-    }
 
-    #[test]
-    fn test_opp_keep_fetch_hand() {
-        // Fetch land provides U via deck knowledge — should keep.
-        let mut state = make_state();
-        state.catalog = test_catalog();
-        add_hand_card(&mut state, PlayerId::Opp, "Scalding Tarn");
-        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        add_hand_card(&mut state, PlayerId::Opp, "Daze");
-        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
-        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
-        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]),
-            "fetch land provides U — should keep");
-    }
 
     // ── Section 55: Mana Ability Fixes ──────────────────────────────────────
 
@@ -9126,60 +8502,11 @@
             "Cavern colored mana should be available when casting a creature spell");
     }
 
-    #[test]
-    fn test_mana_log_and_cast_both_present() {
-        // Casting via run_cast_submachine should log both mana production and the cast.
-        let mut state = make_state();
-        state.catalog = test_catalog();
-
-        let sea_def = catalog_card("Underground Sea");
-        add_perm_with_def(&mut state, PlayerId::Us, &sea_def, BattlefieldState::new());
-        let dr_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        recompute(&mut state);
-
-        let mut strat = strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default());
-        run_cast_submachine(&mut state, 1, PlayerId::Us, dr_id, SpellFace::Main, &mut strat);
-
-        let has_cast = state.log.iter().any(|l| l.contains("Cast Dark Ritual"));
-        let has_mana = state.log.iter().any(|l| l.contains("add B to pool"));
-        assert!(has_cast, "should have a Cast log line, got: {:?}", state.log);
-        assert!(has_mana, "should have a mana production log line, got: {:?}", state.log);
-    }
 
     // ── Section 54: Validation (Phase 8) ─────────────────────────────────────
 
-    fn cards(list: &[(&str, i32)]) -> Vec<(String, i32, String)> {
-        list.iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
-    }
 
-    fn val_dd_deck() -> Vec<(String, i32, String)> {
-        cards(&[
-            ("Underground Sea", 3), ("Polluted Delta", 4), ("Flooded Strand", 1),
-            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Marsh Flats", 1),
-            ("Island", 1), ("Swamp", 1), ("Undercity Sewers", 2), ("Wasteland", 3),
-            ("Cavern of Souls", 1),
-            ("Lotus Petal", 2), ("Lion's Eye Diamond", 1),
-            ("Dark Ritual", 4), ("Doomsday", 4), ("Brainstorm", 4),
-            ("Ponder", 4), ("Consider", 1), ("Edge of Autumn", 1),
-            ("Force of Will", 4), ("Daze", 3), ("Thoughtseize", 2),
-            ("Street Wraith", 1), ("Thassa's Oracle", 1), ("Unearth", 1),
-            ("Tamiyo, Inquisitive Student", 4), ("Orcish Bowmasters", 2),
-            ("Murktide Regent", 2),
-        ])
-    }
 
-    fn val_ub_tempo_deck() -> Vec<(String, i32, String)> {
-        cards(&[
-            ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 2),
-            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Bloodstained Mire", 1),
-            ("Island", 1), ("Swamp", 1), ("Wasteland", 4), ("Undercity Sewers", 1),
-            ("Tamiyo, Inquisitive Student", 4), ("Orcish Bowmasters", 4),
-            ("Murktide Regent", 3), ("Barrowgoyf", 2), ("Brazen Borrower", 1),
-            ("Kaito, Bane of Nightmares", 2),
-            ("Brainstorm", 4), ("Ponder", 4), ("Force of Will", 4), ("Daze", 3),
-            ("Fatal Push", 4), ("Snuff Out", 1), ("Thoughtseize", 4),
-        ])
-    }
 
     /// Parse "us: N cards (-M mulligans)" from opening log line.
     fn parse_log_hand_info(log: &str) -> Option<(u32, u32, u32, u32)> {
@@ -9212,134 +8539,7 @@
         assert_eq!(result2, Some((6, 1, 5, 2)), "failed to parse: {}", log2);
     }
 
-    /// Run N=10000 simulations and report key metrics.
-    /// This test always passes — it prints stats for manual inspection.
-    /// Run with: cargo test validation_stats -- --nocapture --ignored
-    #[test]
-    #[ignore] // slow: ~10s for 10000 sims
-    fn validation_stats() {
-        use rand::Rng;
-        let catalog = test_catalog();
-        let dd_cards = val_dd_deck();
-        let opp_cards = val_ub_tempo_deck();
-        let n = 1_000; // ~2min in debug mode; use --release for 10000
-        let mut rng = StdRng::seed_from_u64(12345);
 
-        let mut dd_success = 0u32;
-        let mut dd_fail = 0u32;
-        let mut us_mull_total = 0u32;
-        let mut opp_mull_total = 0u32;
-        let mut us_mulled_games = 0u32;
-        let mut opp_mulled_games = 0u32;
-        let mut success_turns = Vec::new();
-        let mut us_hand_sizes = Vec::new();
-        let mut opp_hand_sizes = Vec::new();
-
-        let mut panics = 0u32;
-        for _i in 0..n {
-            // Use a per-sim RNG seeded from the master, so panics don't lose rng state.
-            let sim_seed = rng.gen::<u64>();
-            let mut sim_rng = StdRng::seed_from_u64(sim_seed);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                simulate_game(
-                    "doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut sim_rng,
-                )
-            }));
-            let result = match result {
-                Ok(r) => r,
-                Err(_) => { panics += 1; continue; }
-            };
-            let state = result;
-            if state.terminal {
-                dd_success += 1;
-                success_turns.push(state.current_turn);
-                // Find the opening hand summary line (contains "mulligans").
-                if let Some(info_log) = state.log.iter().find(|l| l.contains("mulligans")) {
-                    if let Some((uh, um, oh, om)) = parse_log_hand_info(info_log) {
-                        us_hand_sizes.push(uh);
-                        opp_hand_sizes.push(oh);
-                        if um > 0 { us_mulled_games += 1; }
-                        us_mull_total += um;
-                        if om > 0 { opp_mulled_games += 1; }
-                        opp_mull_total += om;
-                    }
-                }
-            } else {
-                dd_fail += 1;
-            }
-        }
-
-        let total = dd_success + dd_fail;
-        let success_rate = dd_success as f64 / total as f64 * 100.0;
-        let avg_us_hand = if us_hand_sizes.is_empty() { 0.0 }
-            else { us_hand_sizes.iter().sum::<u32>() as f64 / us_hand_sizes.len() as f64 };
-        let avg_opp_hand = if opp_hand_sizes.is_empty() { 0.0 }
-            else { opp_hand_sizes.iter().sum::<u32>() as f64 / opp_hand_sizes.len() as f64 };
-
-        // Turn distribution for successful games
-        let mut turn_counts = [0u32; 8]; // index 2..7
-        for &t in &success_turns {
-            if (t as usize) < turn_counts.len() { turn_counts[t as usize] += 1; }
-        }
-
-        eprintln!("\n══════════════════════════════════════════════════════");
-        eprintln!("  VALIDATION: {} sims vs UB Tempo", n);
-        eprintln!("══════════════════════════════════════════════════════");
-        eprintln!("  DD success rate: {}/{} ({:.1}%)", dd_success, total, success_rate);
-        eprintln!("  DD fail (no cast): {}/{} ({:.1}%)", dd_fail, total, 100.0 - success_rate);
-        if panics > 0 {
-            eprintln!("  ⚠ Panicked sims: {} (pre-existing engine bugs)", panics);
-        }
-        eprintln!();
-        eprintln!("  DD success by turn:");
-        for t in 2..=7 {
-            let c = turn_counts[t];
-            let pct = if dd_success > 0 { c as f64 / dd_success as f64 * 100.0 } else { 0.0 };
-            eprintln!("    T{}: {:>5} ({:.1}%)", t, c, pct);
-        }
-        eprintln!();
-        eprintln!("  Mulligan rates:");
-        eprintln!("    Us:  {:.1}% of games mulled, avg {:.2} mulls/game",
-            us_mulled_games as f64 / total as f64 * 100.0,
-            us_mull_total as f64 / total as f64);
-        eprintln!("    Opp: {:.1}% of games mulled, avg {:.2} mulls/game",
-            opp_mulled_games as f64 / total as f64 * 100.0,
-            opp_mull_total as f64 / total as f64);
-        eprintln!();
-        eprintln!("  Avg hand size (after mulls+london bottom):");
-        eprintln!("    Us:  {:.2}", avg_us_hand);
-        eprintln!("    Opp: {:.2}", avg_opp_hand);
-        eprintln!("══════════════════════════════════════════════════════\n");
-
-        // Sanity assertions — these should be very loose, just catching broken sims.
-        assert!(success_rate > 10.0, "DD success rate suspiciously low: {:.1}%", success_rate);
-        assert!(success_rate < 95.0, "DD success rate suspiciously high: {:.1}%", success_rate);
-        assert!(avg_us_hand >= 5.0, "avg US hand size too low: {:.2}", avg_us_hand);
-        assert!(avg_opp_hand >= 5.0, "avg OPP hand size too low: {:.2}", avg_opp_hand);
-    }
-
-    #[test]
-    fn test_decision_log_populated() {
-        let catalog = test_catalog();
-        let dd_cards = val_dd_deck();
-        let opp_cards = val_ub_tempo_deck();
-        let mut rng = StdRng::seed_from_u64(42);
-        // Run sims until one succeeds (DD resolves).
-        let state = loop {
-            let s = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng);
-            if s.terminal { break s; }
-        };
-        assert!(!state.decision_log.is_empty(), "decision_log should have entries");
-        // Should contain at least a mulligan decision and a planner decision.
-        let has_mulligan = state.decision_log.iter().any(|l| l.contains("mulligan"));
-        let has_plan = state.decision_log.iter().any(|l| l.contains("plan"));
-        assert!(has_mulligan, "decision_log should contain mulligan entries");
-        assert!(has_plan, "decision_log should contain planner entries");
-        eprintln!("\n── decision_log ({} entries) ──", state.decision_log.len());
-        for entry in &state.decision_log {
-            eprintln!("  {}", entry);
-        }
-    }
 
     // ── Targeted-spell legality ──────────────────────────────────────────────
 
@@ -9602,180 +8802,24 @@
         }
     }
 
-    /// Stress-test: run many scenarios with random seeds to reproduce rare
-    /// invariant violations (graveyard_order desync, etc.).
-    // ── Turn planner tests ────────────────────────────────────────────────────
-
-    /// Extract the priority-round action names from a plan (spells + land drops, skip taps).
-    fn plan_spell_names(plan: &[planner::PlanAction], state: &SimState) -> Vec<String> {
-        plan.iter().filter_map(|a| match a {
-            planner::PlanAction::CastSpell(id) | planner::PlanAction::LandDrop(id) =>
-                state.objects.get(id).map(|c| c.catalog_key.clone()),
-            planner::PlanAction::TapForMana { .. } | planner::PlanAction::CrackFetch { .. } => None,
-        }).collect()
-    }
-
-    /// Build a state with specific lands on board and cards in hand.
-    /// Loads full catalog defs so mana abilities work.
-    fn plan_test_state(
-        lands: &[&str],
-        hand: &[&str],
-    ) -> SimState {
+    /// Casting via run_cast_submachine logs both mana production and the cast.
+    /// Engine machinery test — uses the reusable AlwaysPass stub (its trait-default
+    /// `choose_mana_ability` = `auto_tap_plan`), not any content strategy.
+    #[test]
+    fn test_mana_log_and_cast_both_present() {
         let mut state = make_state();
-        let catalog = test_catalog();
-        for &name in lands {
-            let def = catalog.get(name).expect(&format!("land not in catalog: {name}"));
-            add_perm_with_def(&mut state, PlayerId::Us, def, BattlefieldState::new());
-        }
-        for &name in hand {
-            add_hand_card(&mut state, PlayerId::Us, name);
-        }
-        // Merge full catalog so plan_def_of fallback works.
-        for (k, v) in catalog {
-            state.catalog.entry(k).or_insert(v);
-        }
-        state
-    }
+        state.catalog = test_catalog();
 
-    #[test]
-    fn plan_direct_dd_cast() {
-        // 3 black-producing lands + DD in hand → cast DD directly.
-        let state = plan_test_state(
-            &["Underground Sea", "Badlands", "Scrubland"],
-            &["Doomsday"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert!(names.contains(&"Doomsday".to_string()),
-            "plan should cast Doomsday, got: {:?}", names);
-        assert!(!names.contains(&"Dark Ritual".to_string()),
-            "direct path should not need Ritual");
-    }
+        let sea_def = catalog_card("Underground Sea");
+        add_perm_with_def(&mut state, PlayerId::Us, &sea_def, BattlefieldState::new());
+        let dr_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        recompute(&mut state);
 
-    #[test]
-    fn plan_ritual_path() {
-        // 1 black land + Ritual + DD in hand → Ritual then DD.
-        let state = plan_test_state(
-            &["Underground Sea"],
-            &["Dark Ritual", "Doomsday"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert_eq!(names, vec!["Dark Ritual", "Doomsday"],
-            "should cast Ritual then DD, got: {:?}", names);
-    }
+        let mut strat = strategy::AlwaysPass::new(PlayerId::Us);
+        run_cast_submachine(&mut state, 1, PlayerId::Us, dr_id, SpellFace::Main, &mut strat);
 
-    #[test]
-    fn plan_land_drop_enables_dd() {
-        // No lands on board, 1 land + Ritual + DD in hand → land drop, then Ritual → DD.
-        let state = plan_test_state(
-            &[],
-            &["Underground Sea", "Dark Ritual", "Doomsday"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert_eq!(names, vec!["Underground Sea", "Dark Ritual", "Doomsday"],
-            "should land drop then Ritual then DD, got: {:?}", names);
-    }
-
-    #[test]
-    fn plan_petal_on_board_ritual_dd() {
-        // Lotus Petal on board (untapped) + Ritual + DD in hand, no lands.
-        let catalog = test_catalog();
-        let petal_def = catalog.get("Lotus Petal").expect("Lotus Petal not in catalog");
-        let mut state = make_state();
-        add_perm_with_def(&mut state, PlayerId::Us, petal_def, BattlefieldState::new());
-        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        for (k, v) in catalog {
-            state.catalog.entry(k).or_insert(v);
-        }
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert_eq!(names, vec!["Dark Ritual", "Doomsday"],
-            "Petal sac → Ritual → DD, got: {:?}", names);
-    }
-
-    #[test]
-    fn plan_no_dd_casts_cantrip() {
-        // Land on board + cantrip in hand, no DD → should cast cantrip.
-        let state = plan_test_state(
-            &["Underground Sea"],
-            &["Brainstorm"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert_eq!(names, vec!["Brainstorm"],
-            "without DD, should cast cantrip, got: {:?}", names);
-    }
-
-    #[test]
-    fn plan_land_drop_plus_cantrip() {
-        // Land in hand + cantrip in hand + land on board → land drop + cantrip.
-        let state = plan_test_state(
-            &["Underground Sea"],
-            &["Badlands", "Ponder"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert!(names.contains(&"Badlands".to_string()), "should land drop, got: {:?}", names);
-        assert!(names.contains(&"Ponder".to_string()), "should cast Ponder, got: {:?}", names);
-    }
-
-    #[test]
-    fn plan_empty_hand_passes() {
-        // Land on board but empty hand → empty plan.
-        let state = plan_test_state(&["Underground Sea"], &[]);
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        assert!(plan.is_empty(), "empty hand should produce empty plan, got: {:?}", plan);
-    }
-
-    #[test]
-    fn plan_no_mana_for_spell() {
-        // DD in hand but no mana sources → can't cast, no spells in plan.
-        let state = plan_test_state(&[], &["Doomsday"]);
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert!(!names.contains(&"Doomsday".to_string()),
-            "shouldn't cast DD without mana, got: {:?}", names);
-    }
-
-    #[test]
-    fn plan_ritual_without_dd_not_cast() {
-        // Ritual in hand, no DD → should NOT cast Ritual (wasted BBB).
-        let state = plan_test_state(
-            &["Underground Sea"],
-            &["Dark Ritual", "Brainstorm"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert!(!names.contains(&"Dark Ritual".to_string()),
-            "shouldn't cast Ritual without DD, got: {:?}", names);
-        assert!(names.contains(&"Brainstorm".to_string()),
-            "should cast Brainstorm instead, got: {:?}", names);
-    }
-
-    #[test]
-    fn plan_prefers_dd_over_cantrip() {
-        // Can cast either cantrip or Ritual→DD. Should pick DD.
-        let state = plan_test_state(
-            &["Underground Sea"],
-            &["Dark Ritual", "Doomsday", "Brainstorm"],
-        );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
-        let names = plan_spell_names(&plan, &state);
-        assert!(names.contains(&"Doomsday".to_string()),
-            "should prefer DD over cantrip, got: {:?}", names);
-    }
-
-    #[test]
-    #[ignore] // 500 full simulations — run with `cargo test -- --ignored`
-    fn stress_invariant_check() {
-        let catalog = test_catalog();
-        let dd_cards = val_dd_deck();
-        let opp_cards = val_ub_tempo_deck();
-        for seed in 0..500 {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let _ = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng);
-        }
+        let has_cast = state.log.iter().any(|l| l.contains("Cast Dark Ritual"));
+        let has_mana = state.log.iter().any(|l| l.contains("add B to pool"));
+        assert!(has_cast, "should have a Cast log line, got: {:?}", state.log);
+        assert!(has_mana, "should have a mana production log line, got: {:?}", state.log);
     }

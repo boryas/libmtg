@@ -14,15 +14,15 @@
 //! - `event_log` — append-only record of game events (Layer B)
 //! - `executor` — interprets actions, evaluates expressions, matches filters
 
-pub(crate) mod expr;
-pub(crate) mod action;
-pub(crate) mod ability;
+pub mod expr;
+pub mod action;
+pub mod ability;
 pub(crate) mod ce;
 pub(crate) mod context;
 pub(crate) mod event_log;
-pub(crate) mod executor;
-pub(crate) mod cost;
-pub(crate) mod cost_exec;
+pub mod executor;
+pub mod cost;
+pub mod cost_exec;
 
 #[cfg(test)]
 mod tests;

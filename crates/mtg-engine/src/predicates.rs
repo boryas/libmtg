@@ -46,7 +46,7 @@ pub(crate) fn ir_obj(id: ObjId) -> Filter {
 /// Evaluate a `Filter` against object `id` with `It`/`Source` = `id` and the
 /// controller bound to `id`'s controller. The standard way to check a filter
 /// that gates on a specific object (ability conditions, protection sources).
-pub(crate) fn obj_matches(filter: &Filter, id: ObjId, state: &SimState) -> bool {
+pub fn obj_matches(filter: &Filter, id: ObjId, state: &SimState) -> bool {
     let controller = state.objects.get(&id).map(|o| o.controller).unwrap_or(PlayerId::Us);
     let env = crate::ir::executor::BindEnv::new().with_source(id).with_controller(controller);
     crate::ir::executor::matches(filter, id, state, &env)
@@ -143,7 +143,7 @@ pub(crate) fn ir_not(a: Filter) -> Filter {
 
 /// True if `target_id` has protection from `source_id` (CR 702.16).
 /// Checks each predicate in the target's `protection_from` against the source.
-pub(crate) fn is_protected_from(target_id: ObjId, source_id: ObjId, state: &SimState) -> bool {
+pub fn is_protected_from(target_id: ObjId, source_id: ObjId, state: &SimState) -> bool {
     let target_def = state.def_of(target_id)
         .or_else(|| state.objects.get(&target_id)
             .and_then(|o| state.catalog.get(o.catalog_key.as_str())));
@@ -187,7 +187,7 @@ impl TargetSpec {
 /// Pick targets from a list of legal targets.
 /// Single-target heuristic: prefer killable creature, then planeswalker/player
 /// over non-killable creatures, then first available.
-pub(crate) fn pick_targets(_spec: &TargetSpec, targets: &[ObjId], state: &SimState) -> Vec<ObjId> {
+pub fn pick_targets(_spec: &TargetSpec, targets: &[ObjId], state: &SimState) -> Vec<ObjId> {
     if targets.is_empty() { return vec![]; }
     // Single-target heuristic
     // Prefer a killable creature
@@ -243,7 +243,7 @@ pub(crate) fn exclude_from_target_spec(spec: &TargetSpec, exclude_id: ObjId) -> 
 
 /// Enumerate all legal targets for `spec` given the current game state.
 /// No heuristic — returns every valid option. Caller picks.
-pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: ObjId, state: &SimState) -> Vec<ObjId> {
+pub fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: ObjId, state: &SimState) -> Vec<ObjId> {
     match spec {
         TargetSpec::None => vec![],
         TargetSpec::Player(who) => vec![state.player_id(who.resolve(controller))],
@@ -289,7 +289,7 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
 /// Returns false for `TargetSpec::None` (no target required = always valid; caller should check `is_none()` first).
 /// Delegate to `legal_targets` so that the legality check used when presenting
 /// actions is identical to the one used during casting/resolution (CR 601.2c).
-pub(crate) fn has_valid_target(
+pub fn has_valid_target(
     spec: &TargetSpec,
     state: &SimState,
     actor: PlayerId,

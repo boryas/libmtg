@@ -10,9 +10,11 @@
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use mtg_engine::{
-    build_catalog, generate_scenario, BoardSnapshot, CardRegistry, ScenarioResult,
+    build_catalog, BoardSnapshot, CardRegistry, ScenarioResult,
     PlayerId, to_url_token, from_url_token,
 };
+#[cfg(target_arch = "wasm32")]
+use doomsday::generate_scenario;
 
 #[cfg(target_arch = "wasm32")]
 fn cards(list: &[(&str, i32)]) -> Vec<(String, i32, String)> {

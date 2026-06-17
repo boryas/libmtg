@@ -14,9 +14,6 @@ pub(crate) use effects::*;
 mod predicates;
 pub(crate) use predicates::*;
 
-mod planner;
-pub(crate) use planner::*;
-
 mod snapshot;
 mod objective;
 pub use objective::Objective;
@@ -27,14 +24,20 @@ pub use snapshot::{
     to_url_token, from_url_token,
 };
 
+// ── Public engine API for content crates (doomsday, ...) ────────────────────────
+// Primitive state/decision vocabulary the concrete strategies read. These are
+// projections of materialized state, not heuristics (those live in content).
+pub use catalog::{
+    CardDef, CardKind, ManaCost, Keyword, SourceZone, ActivationTiming, AbilityDef,
+    ManaAbility, parse_mana_cost,
+};
+pub use predicates::{obj_matches, has_valid_target, pick_targets, legal_targets, is_protected_from};
+pub use strategy::TargetGap;
+
 mod strategy;
 // Public decision API: the trait every player decision flows through, and the
 // reusable do-nothing strategy (goldfish opponent / test stub).
 pub use strategy::{Strategy, AlwaysPass};
-use strategy::{DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
-               CardCategory, dd_categorize,
-               dd_plan_gap, dd_card_fills, opp_plan_gap, opp_card_fills};
-#[cfg(test)] use strategy::{dd_should_mulligan, opp_should_mulligan};
 
 pub mod ir;
 
@@ -76,7 +79,7 @@ impl ObjId {
 pub enum PlayerId { Us, Opp }
 
 impl PlayerId {
-    pub(crate) fn opp(self) -> PlayerId {
+    pub fn opp(self) -> PlayerId {
         match self { PlayerId::Us => PlayerId::Opp, PlayerId::Opp => PlayerId::Us }
     }
 }
@@ -125,7 +128,7 @@ pub struct CostsPaidCtx {
 #[derive(Clone)]
 pub struct SpellState {
     effect: Option<Effect>,
-    chosen_targets: Vec<ObjId>,
+    pub chosen_targets: Vec<ObjId>,
     /// True when the back face of a split card was cast (e.g. an adventure instant).
     is_back_face: bool,
     /// Objects moved during cost payment (for effects that depend on what was paid).
@@ -137,17 +140,17 @@ pub struct SpellState {
 /// by looking up its CardDef from the catalog.
 #[derive(Clone)]
 pub struct BattlefieldState {
-    tapped: bool,
+    pub tapped: bool,
     damage: i32,
-    entered_this_turn: bool,
+    pub entered_this_turn: bool,
     counters: i32,              // +1/+1 counters
     power_mod: i32,
     toughness_mod: i32,
     loyalty: i32,               // planeswalker loyalty (0 for non-PWs)
-    pw_activated_this_turn: bool,
-    attacking: bool,
-    unblocked: bool,
-    attack_target: Option<ObjId>,  // None = attacking player, Some = attacking planeswalker
+    pub pw_activated_this_turn: bool,
+    pub attacking: bool,
+    pub unblocked: bool,
+    pub attack_target: Option<ObjId>,  // None = attacking player, Some = attacking planeswalker
     /// Active face index for double-faced cards (0 = front, 1 = back). Flip sets this to 1.
     active_face: u8,
     /// Choice made as this permanent entered the battlefield (e.g. color for Painter's Servant,
@@ -201,12 +204,12 @@ pub enum ObjectRole {
 /// A card as a game object — follows the card through all zone changes.
 /// Carries only game-accumulated state. The card's characteristics are derived
 /// by looking up `catalog_key` in the catalog and applying continuous effects.
-struct GameObject {
-    id: ObjId,
-    catalog_key: String,  // foreign key into the CardDef catalog
-    owner: PlayerId,
-    controller: PlayerId,
-    is_token: bool,
+pub struct GameObject {
+    pub id: ObjId,
+    pub catalog_key: String,  // foreign key into the CardDef catalog
+    pub owner: PlayerId,
+    pub controller: PlayerId,
+    pub is_token: bool,
     /// What kind of object this is + (for zone-resident kinds) which zone, with
     /// the per-kind state (battlefield / spell / ability) inline. See `ObjectRole`.
     role: ObjectRole,
@@ -268,7 +271,7 @@ impl GameObject {
     }
 
     /// Battlefield state — `Some` only for a permanent.
-    fn bf(&self) -> Option<&BattlefieldState> {
+    pub fn bf(&self) -> Option<&BattlefieldState> {
         if let ObjectRole::Battlefield(bf) = &self.role { Some(bf) } else { None }
     }
     fn bf_mut(&mut self) -> Option<&mut BattlefieldState> {
@@ -276,7 +279,7 @@ impl GameObject {
     }
 
     /// Spell-on-stack state — `Some` only for a spell on the stack.
-    fn spell(&self) -> Option<&SpellState> {
+    pub fn spell(&self) -> Option<&SpellState> {
         if let ObjectRole::StackSpell(s) = &self.role { Some(s) } else { None }
     }
     fn spell_mut(&mut self) -> Option<&mut SpellState> {
@@ -941,7 +944,7 @@ pub enum PhaseKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum TurnPosition {
+pub enum TurnPosition {
     Step(StepKind),
     Phase(PhaseKind),
 }
@@ -986,7 +989,7 @@ pub enum SpellFace { Main, Back }
 // ── Priority action types (CR 601.2 state machine) ──────────────────────────
 
 /// Engine-provided legal action. Strategy picks one via `choose_action`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum LegalAction {
     Pass,
     LandDrop(ObjId),
@@ -1002,24 +1005,24 @@ pub enum LegalAction {
 /// Options presented to strategy at the Announce step (CR 601.2b).
 pub struct AnnounceOptions {
     available_modes: Vec<usize>,
-    available_alt_costs: Vec<AlternateCost>,
-    has_x_cost: bool,
+    pub available_alt_costs: Vec<AlternateCost>,
+    pub has_x_cost: bool,
 }
 
 /// Strategy's choices at the Announce step.
 pub struct AnnounceChoice {
-    chosen_mode: usize,
+    pub chosen_mode: usize,
     /// Index into `AnnounceOptions.available_alt_costs` (= `def.alternate_costs()`).
     /// `None` = pay mana cost normally.
-    alt_cost_index: Option<usize>,
-    chosen_x: u32,
+    pub alt_cost_index: Option<usize>,
+    pub chosen_x: u32,
 }
 
 /// A mana ability the strategy can activate during ActivateMana.
 #[derive(Clone)]
 pub struct ManaAbilityOption {
-    source_id: ObjId,
-    ability_index: usize,
+    pub source_id: ObjId,
+    pub ability_index: usize,
     produces: Vec<Color>,
     produces_count: usize,
 }
@@ -1027,8 +1030,8 @@ pub struct ManaAbilityOption {
 /// Strategy's decision to activate a mana ability.
 #[derive(Clone)]
 pub struct ManaActivation {
-    source_id: ObjId,
-    ability_index: usize,
+    pub source_id: ObjId,
+    pub ability_index: usize,
     /// Which color to produce (None = colorless/any, for generic mana needs).
     color_choice: Option<Color>,
 }
@@ -1082,24 +1085,24 @@ fn end_phase() -> Phase {
 
 /// Mana tracking: all 5 colors + colorless tracked separately; total covers all available mana.
 #[derive(Clone, Default)]
-struct ManaPool {
-    w: i32,
-    u: i32,
-    b: i32,
-    r: i32,
-    g: i32,
-    c: i32,
-    total: i32,
+pub struct ManaPool {
+    pub w: i32,
+    pub u: i32,
+    pub b: i32,
+    pub r: i32,
+    pub g: i32,
+    pub c: i32,
+    pub total: i32,
 }
 
 impl ManaPool {
-    fn can_pay(&self, cost: &ManaCost) -> bool {
+    pub fn can_pay(&self, cost: &ManaCost) -> bool {
         self.w >= cost.w && self.u >= cost.u && self.b >= cost.b &&
         self.r >= cost.r && self.g >= cost.g && self.c >= cost.c &&
         self.total >= cost.total_specific() + cost.generic
     }
 
-    fn spend(&mut self, cost: &ManaCost) {
+    pub fn spend(&mut self, cost: &ManaCost) {
         self.w -= cost.w;
         self.u -= cost.u;
         self.b -= cost.b;
@@ -1123,7 +1126,7 @@ impl ManaPool {
         }
     }
 
-    fn add(&mut self, other: &ManaPool) {
+    pub fn add(&mut self, other: &ManaPool) {
         self.w += other.w;
         self.u += other.u;
         self.b += other.b;
@@ -1181,7 +1184,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
 
 /// Compute a tap plan for paying `cost` without mutating state.
 /// Returns ManaActivations in order: specific colors first (B, U, W, R, G), then generic.
-pub(crate) fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<ManaActivation> {
+pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<ManaActivation> {
     // Subtract mana already in pool from the cost — only plan for what's still needed.
     let pool = &state.player(who).pool;
     let remaining = ManaCost {
@@ -1447,16 +1450,6 @@ fn pay_additional_ir_cost(
 
 // ── Fetch land detection ─────────────────────────────────────────────────────
 
-/// Hardcoded list of fetch land names. These sacrifice for life to search
-/// a land — they produce no mana themselves but find duals that do.
-pub(crate) fn is_fetch(name: &str) -> bool {
-    matches!(name,
-        "Polluted Delta" | "Flooded Strand" | "Misty Rainforest" | "Scalding Tarn"
-        | "Marsh Flats" | "Bloodstained Mire" | "Windswept Heath" | "Wooded Foothills"
-        | "Verdant Catacombs" | "Arid Mesa"
-    )
-}
-
 // ── Mana potential accumulation ───────────────────────────────────────────────
 
 /// Accumulate one source's potential contribution into the pool.
@@ -1467,7 +1460,7 @@ fn ma_requires_tap(ma: &ManaAbility) -> bool {
     ma.costs.requires_tap_self()
 }
 
-fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
+pub fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
     let avail: Vec<_> = abilities.iter()
         .filter(|ma| !ma_requires_tap(ma) || !tapped)
         .collect();
@@ -1505,13 +1498,13 @@ fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut 
 pub struct PlayerState {
     id: ObjId,
     deck_name: String,
-    life: i32,
+    pub life: i32,
     /// Number of lands played this turn; reset to 0 each Untap step. Engine enforces the one-per-turn rule.
-    lands_played_this_turn: u8,
+    pub lands_played_this_turn: u8,
     /// Number of non-land spells cast this turn; reset each Untap. Used for multi-spell probability.
     spells_cast_this_turn: u8,
     /// Mana produced but not yet spent; drains at end of each step/phase.
-    pool: ManaPool,
+    pub pool: ManaPool,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
     draws_this_turn: u8,
     /// Total life lost this turn; reset each Untap. Used for Kaito 0 ability.
@@ -1519,7 +1512,7 @@ pub struct PlayerState {
     /// Tamiyo −7 emblem: "You have no maximum hand size." (CR 114)
     no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
-    library_order: std::collections::VecDeque<ObjId>,
+    pub library_order: std::collections::VecDeque<ObjId>,
     /// This player's decision policy (composed `Player { state, strategy }`). `None`
     /// until installed at sim init. The engine reaches it only via
     /// `SimState::with_strategy` (which falls back to `AlwaysPass`), so a
@@ -1528,7 +1521,7 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    fn new(deck: &str) -> Self {
+    pub fn new(deck: &str) -> Self {
         PlayerState {
             id: ObjId::UNSET,
             life: 20,
@@ -1548,35 +1541,35 @@ impl PlayerState {
 
 pub struct SimState {
     /// The turn number currently being simulated. Set at the start of each do_turn call.
-    pub(crate) current_turn: u8,
+    pub current_turn: u8,
     on_play: bool,
     /// The two players are `GameObject`s in `objects` with `ObjectRole::Player`;
     /// these are their stable ids. Reach their state via `player(who)`/`player_mut(who)`.
-    us_id: ObjId,
+    pub us_id: ObjId,
     opp_id: ObjId,
-    log: Vec<String>,
+    pub log: Vec<String>,
     /// Strategy decision log — records *why* the strategy made each choice.
     /// Populated by draining strategy structs' internal buffers after each call.
-    pub(crate) decision_log: Vec<String>,
+    pub decision_log: Vec<String>,
     /// Set when the game ends by normal rules (a player's life reaches 0, etc.). Holds the winner.
-    winner: Option<PlayerId>,
+    pub winner: Option<PlayerId>,
     /// Set when the active `Objective` decides the run has ended (e.g. Doomsday
     /// resolved). Replaces the former `success` flag / `Action::EndSimulation` sentinel.
-    pub(crate) terminal: bool,
+    pub terminal: bool,
     /// App-supplied objective: observes the event stream and decides termination.
     /// `None` for bare test states with no objective installed.
     pub(crate) objective: Option<Box<dyn crate::objective::Objective>>,
     /// Life total before Doomsday halved it (for display as "X → Y").
-    pub(crate) life_before_dd: Option<i32>,
+    pub life_before_dd: Option<i32>,
     /// Card being cast during the mana sub-loop (CR 601.2g). Set before mana loop,
     /// cleared after cast_spell. Used by Cavern of Souls to restrict colored mana.
     pub(crate) casting_spell: Option<ObjId>,
     /// Active player this phase/step (for log context).
     current_ap: ObjId,
     /// Current phase/step label (for log context).
-    current_phase: Option<TurnPosition>,
+    pub current_phase: Option<TurnPosition>,
     /// Attackers declared this combat (stable ObjIds); cleared at EndCombat.
-    combat_attackers: Vec<ObjId>,
+    pub combat_attackers: Vec<ObjId>,
     /// Blocker assignments this combat: (attacker_id, blocker_id); cleared at EndCombat.
     combat_blocks: Vec<(ObjId, ObjId)>,
     /// Triggered abilities waiting to be pushed onto the stack at the next priority window.
@@ -1586,10 +1579,10 @@ pub struct SimState {
     pub(crate) resolving_costs_ctx: CostsPaidCtx,
     /// Spell/ability stack. Items are resolved last-in-first-out. Populated by
     /// handle_priority_round; empty between priority rounds.
-    pub(crate) stack: Vec<ObjId>,
+    pub stack: Vec<ObjId>,
     /// All objects in all zones, keyed by stable ObjId — cards (in any zone) AND
     /// card-less stack objects (abilities; see `GameObject.ability`).
-    objects: HashMap<ObjId, GameObject>,
+    pub objects: HashMap<ObjId, GameObject>,
     /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
     next_id: u64,
     /// Order in which cards entered each player's graveyard (oldest first). Used for display.
@@ -1620,7 +1613,7 @@ pub struct SimState {
     /// Owned card catalog — populated once at sim init, never mutated.
     /// All runtime card-definition reads go through `state.def_of(id)` (live objects)
     /// or `state.catalog` (bootstrap / non-battlefield lookups).
-    pub(crate) catalog: HashMap<String, CardDef>,
+    pub catalog: HashMap<String, CardDef>,
     /// RNG source for all in-simulation randomness (random discard, fetch, etc.).
     /// Effects access this directly via `state.rng`. Strategy functions receive their
     /// own rng parameter so their randomness remains independently injectable for tests.
@@ -1637,7 +1630,7 @@ pub struct SimState {
 impl SimState {
     /// Return the post-CE materialized `CardDef` for the object with the given id, if any.
     /// Returns `None` for naked stack abilities (no catalog entry) or unknown ids.
-    pub(crate) fn def_of(&self, id: ObjId) -> Option<&CardDef> {
+    pub fn def_of(&self, id: ObjId) -> Option<&CardDef> {
         let obj = self.objects.get(&id)?;
         // An ability on the stack is a card-less object — it has no CardDef.
         if obj.ability().is_some() { return None; }
@@ -1646,7 +1639,7 @@ impl SimState {
 }
 
 impl SimState {
-    fn new(us: PlayerState, opp: PlayerState) -> Self {
+    pub fn new(us: PlayerState, opp: PlayerState) -> Self {
         let mut s = SimState {
             current_turn: 0,
             on_play: true,
@@ -1703,6 +1696,31 @@ impl SimState {
         s
     }
 
+    /// Public scenario-construction helper: create a card object named `name`
+    /// for `who` placed in `zone`, materializing its definition from `self.catalog`
+    /// (which must already contain `name`). Returns the new object's id. This is
+    /// the public way for apps/tests to build an arbitrary game state without
+    /// reaching into `GameObject` internals. The stack is not supported here —
+    /// use the cast/ability pipeline for that.
+    pub fn place_card(&mut self, who: PlayerId, name: &str, zone: Zone) -> ObjId {
+        assert!(!matches!(zone, Zone::Stack), "place_card: use the cast pipeline for the stack");
+        let id = self.alloc_id();
+        let mut obj = GameObject::new(id, name, who);
+        obj.set_zone(zone);
+        // Engine convention: only battlefield permanents carry a materialized def;
+        // cards in other zones resolve their def from `catalog` (see `def_of`).
+        if matches!(zone, Zone::Battlefield) {
+            obj.materialized = self.catalog.get(name).cloned();
+        }
+        let ts = self.next_ci_timestamp();
+        obj.ci_timestamp = ts;
+        self.objects.insert(id, obj);
+        if matches!(zone, Zone::Library) {
+            self.player_mut(who).library_order.push_back(id);
+        }
+        id
+    }
+
     pub(crate) fn next_ci_timestamp(&mut self) -> u32 {
         let t = self.ci_timestamp_counter;
         self.ci_timestamp_counter += 1;
@@ -1714,50 +1732,50 @@ impl SimState {
         ObjId(self.next_id)
     }
 
-    fn permanents_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
+    pub fn permanents_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.controller == who && c.in_zone(Zone::Battlefield))
     }
 
-    fn permanent_bf(&self, id: ObjId) -> Option<&BattlefieldState> {
+    pub fn permanent_bf(&self, id: ObjId) -> Option<&BattlefieldState> {
         self.objects.get(&id)
             .filter(|c| c.in_zone(Zone::Battlefield))
             .and_then(|c| c.bf())
     }
 
-    fn permanent_bf_mut(&mut self, id: ObjId) -> Option<&mut BattlefieldState> {
+    pub fn permanent_bf_mut(&mut self, id: ObjId) -> Option<&mut BattlefieldState> {
         self.objects.get_mut(&id)
             .filter(|c| c.in_zone(Zone::Battlefield))
             .and_then(|c| c.bf_mut())
     }
 
-    fn hand_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
+    pub fn hand_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.in_zone(Zone::Hand { known: false }))
     }
 
-    fn graveyard_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
+    pub fn graveyard_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.in_zone(Zone::Graveyard))
     }
 
-    fn exile_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
+    pub fn exile_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.in_zone(Zone::Exile { on_adventure: false }))
     }
 
     /// Cards owned by `who` that are currently in exile with adventure status.
-    fn on_adventure_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
+    pub fn on_adventure_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.zone() == Some(Zone::Exile { on_adventure: true }))
     }
 
     /// Iterate library in deck order (front = top). Yields `&GameObject` for each ObjId.
-    fn library_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
+    pub fn library_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         let order = &self.player(who).library_order;
         order.iter().filter_map(move |id| self.objects.get(id))
     }
 
-    fn hand_size(&self, who: PlayerId) -> i32 {
+    pub fn hand_size(&self, who: PlayerId) -> i32 {
         self.hand_of(who).count() as i32
     }
 
-    fn library_size(&self, who: PlayerId) -> usize {
+    pub fn library_size(&self, who: PlayerId) -> usize {
         self.player(who).library_order.len()
     }
 
@@ -1803,13 +1821,13 @@ impl SimState {
         self.winner.is_some() || self.terminal
     }
 
-    fn player(&self, who: PlayerId) -> &PlayerState {
+    pub fn player(&self, who: PlayerId) -> &PlayerState {
         let id = self.player_id(who);
         self.objects.get(&id).and_then(|o| o.player_state())
             .expect("player object present with Player role")
     }
 
-    fn player_mut(&mut self, who: PlayerId) -> &mut PlayerState {
+    pub fn player_mut(&mut self, who: PlayerId) -> &mut PlayerState {
         let id = self.player_id(who);
         self.objects.get_mut(&id).and_then(|o| o.player_state_mut())
             .expect("player object present with Player role")
@@ -1856,7 +1874,7 @@ impl SimState {
     }
 
     /// Resolve a PlayerId to its stable ObjId.
-    fn player_id(&self, who: PlayerId) -> ObjId {
+    pub fn player_id(&self, who: PlayerId) -> ObjId {
         match who { PlayerId::Us => self.us_id, PlayerId::Opp => self.opp_id }
     }
 
@@ -1896,7 +1914,7 @@ impl SimState {
     }
 
     /// Mana accessible right now for `who`: pool + what untapped permanents can still produce.
-    fn potential_mana(&self, who: PlayerId) -> ManaPool {
+    pub fn potential_mana(&self, who: PlayerId) -> ManaPool {
         let mut p = self.player(who).pool.clone();
         for card in self.permanents_of(who) {
             if let Some(bf) = card.bf() {
@@ -1920,42 +1938,6 @@ impl SimState {
             accumulate_source_potential(&hand_mas, false, &mut p);
         }
         p
-    }
-
-    /// Mana potential from lands in hand only.  Used for mulligan decisions.
-    /// Regular lands contribute their mana abilities.  Fetch lands contribute
-    /// `fetch_colors` (deck-level knowledge of what duals they can find).
-    pub(crate) fn hand_land_mana(&self, who: PlayerId, fetch_colors: &[Color]) -> ManaPool {
-        let mut p = ManaPool::default();
-        for card in self.hand_of(who) {
-            let def = self.catalog.get(&card.catalog_key);
-            let Some(def) = def else { continue };
-            if !def.is_land() { continue; }
-            let mas = def.mana_abilities();
-            if !mas.is_empty() {
-                // Regular mana-producing land.
-                accumulate_source_potential(mas, false, &mut p);
-            } else if is_fetch(&card.catalog_key) {
-                // Fetch land — contributes the deck's fetch colors.
-                p.total += 1;
-                for &c in fetch_colors {
-                    match c {
-                        Color::White => p.w += 1,
-                        Color::Blue  => p.u += 1,
-                        Color::Black => p.b += 1,
-                        Color::Red   => p.r += 1,
-                        Color::Green => p.g += 1,
-                    }
-                }
-            }
-            // Lands with no mana abilities and not a fetch (e.g. Wasteland) contribute nothing.
-        }
-        p
-    }
-
-    /// True if `who` can currently produce at least one black mana.
-    fn has_black_mana(&self, who: PlayerId) -> bool {
-        self.potential_mana(who).b > 0
     }
 
     fn life_of(&self, who: PlayerId) -> i32 {
@@ -1986,14 +1968,14 @@ impl SimState {
     }
 
 
-    pub(crate) fn stack_item_owner(&self, id: ObjId) -> ObjId {
+    pub fn stack_item_owner(&self, id: ObjId) -> ObjId {
         if let Some(card) = self.objects.get(&id) {
             return self.player_id(card.owner);
         }
         ObjId::UNSET
     }
 
-    pub(crate) fn stack_item_display_name(&self, id: ObjId) -> &str {
+    pub fn stack_item_display_name(&self, id: ObjId) -> &str {
         if let Some(card) = self.objects.get(&id) {
             return card.catalog_key.as_str();
         }
@@ -2003,7 +1985,7 @@ impl SimState {
     /// True iff `id` is a stack item (spell or ability) that a counter could target.
     /// Every object with zone==Stack — spell or ability — is a legal target;
     /// "can't be countered" is enforced at resolution, not targeting (CR 608.2b).
-    pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
+    pub fn stack_item_is_counterable(&self, id: ObjId) -> bool {
         self.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Stack))
     }
 
@@ -3065,7 +3047,7 @@ fn cast_spell(
 
 /// Return true if the permanent with `id` has the given keyword in the materialized (CE-applied) view.
 /// Always reads from materialized state so CEs that grant or remove keywords are respected.
-pub(crate) fn creature_has_keyword(id: ObjId, kw: Keyword, state: &SimState) -> bool {
+pub fn creature_has_keyword(id: ObjId, kw: Keyword, state: &SimState) -> bool {
     state.def_of(id)
         .map(|d| d.has_keyword(kw))
         .unwrap_or(false)
@@ -4301,96 +4283,6 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
     }
 
     state
-}
-
-/// dd-pilegen driver: build the Doomsday `Scenario` (DD strategy + generic
-/// opponent, matchup-parameterized card evaluator, Doomsday-resolved objective)
-/// and run it on the generic engine loop.
-pub fn simulate_game(
-    deck_name: &str,
-    opponent: &str,
-    catalog: &HashMap<String, CardDef>,
-    all_cards: &[(String, i32, String)],
-    opp_cards: &[(String, i32, String)],
-    rng: &mut impl Rng,
-) -> SimState {
-    // Derive matchup info from opponent identity.
-    let opp_is_blue = matches!(opponent, "Izzet Delver" | "UB Tempo" | "UR Delver");
-    let dd_matchup = MatchupInfo {
-        opp_has_counters: opp_is_blue,
-        opp_fast_clock: opp_is_blue,
-        fetch_colors: vec![Color::Blue, Color::Black],
-    };
-    let opp_matchup = MatchupInfo {
-        opp_has_counters: true,  // DD plays FoW/Daze
-        opp_fast_clock: false,   // DD is combo, not aggro
-        fetch_colors: vec![Color::Blue, Color::Black], // TODO: derive from opponent deck
-    };
-
-    // Universal card evaluator callback (captures matchup info).
-    let eval_dd_matchup = dd_matchup.clone();
-    let eval_opp_matchup = opp_matchup.clone();
-    let evaluate_card: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync> =
-        Arc::new(move |who, card_id, state| match who {
-            PlayerId::Us => {
-                let gap = dd_plan_gap(state, who, &eval_dd_matchup);
-                dd_card_fills(card_id, &gap, state, who)
-            }
-            PlayerId::Opp => {
-                let gap = opp_plan_gap(state, who, &eval_opp_matchup);
-                opp_card_fills(card_id, &gap, state, who)
-            }
-        });
-
-    run_game(
-        Scenario {
-            us_label: deck_name.to_string(),
-            opp_label: opponent.to_string(),
-            catalog: catalog.clone(),
-            us_deck: all_cards.to_vec(),
-            opp_deck: opp_cards.to_vec(),
-            us_strategy: Box::new(DoomsdayStrategy::new(dd_matchup)),
-            opp_strategy: Box::new(GenericOppStrategy::new(opp_matchup)),
-            evaluate_card,
-            objective: Box::new(crate::objective::DoomsdayResolvedObjective::default()),
-            max_turns: 10,
-            on_play: None,
-        },
-        rng,
-    )
-}
-
-
-// ── Scenario generation ───────────────────────────────────────────────────────
-
-pub fn generate_scenario(
-    deck_name: &str,
-    opp_display: &str,
-    catalog: &HashMap<String, CardDef>,
-    all_cards: &[(String, i32, String)],
-    opp_cards: &[(String, i32, String)],
-) -> SimState {
-    let mut rng = rand::thread_rng();
-    let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        let state =
-            simulate_game(deck_name, opp_display, catalog, all_cards, opp_cards, &mut rng);
-        if state.terminal {
-            if attempts > 1 {
-                eprintln!("  (generated after {} attempts)", attempts);
-            }
-            // All cards are already in their correct zones in state.objects.
-            // Hand cards were moved to Hand zone by sim_draw during opening hand deal.
-            return state;
-        }
-        let reason = if state.winner == Some(PlayerId::Opp) {
-            format!("died on turn {}", state.current_turn)
-        } else {
-            format!("did not cast DD by turn {}", state.current_turn)
-        };
-        eprintln!("  attempt {} — retry ({})", attempts, reason);
-    }
 }
 
 // ── Implementation checking ───────────────────────────────────────────────────

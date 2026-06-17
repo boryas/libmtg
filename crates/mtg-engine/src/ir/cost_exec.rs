@@ -26,7 +26,7 @@ use crate::{ObjId, PlayerId, SimState};
 /// Mana shortage is NOT a build_schema concern — `Action::PayMana` reads the
 /// pool at execution time. `build_schema` only fails for object-shortage and
 /// Choose-with-no-payable-branches.
-pub(crate) fn build_schema(
+pub fn build_schema(
     cost: &Action,
     state: &SimState,
     who: PlayerId,

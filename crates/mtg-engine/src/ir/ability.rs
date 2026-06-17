@@ -229,7 +229,7 @@ impl CostBody {
     /// True iff this cost requires tapping the source — used by the mana
     /// affordability predictor (`accumulate_source_potential`) to skip
     /// already-tapped sources.
-    pub(crate) fn requires_tap_self(&self) -> bool {
+    pub fn requires_tap_self(&self) -> bool {
         let CostBody::Ir(a) = self;
         action_includes_tap_source(a)
     }
@@ -237,7 +237,7 @@ impl CostBody {
     /// True iff this cost requires sacrificing the source — used by the
     /// affordability predictor to mark a source as no longer available
     /// after activation.
-    pub(crate) fn requires_sac_self(&self) -> bool {
+    pub fn requires_sac_self(&self) -> bool {
         let CostBody::Ir(a) = self;
         action_includes_sac_source(a)
     }
