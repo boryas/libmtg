@@ -8,23 +8,37 @@ edition = "2021"
 # protection in hand. Baseline reuses `DoomsdayStrategy`; the wasm cdylib + web
 # frontend + URL decklist input come in a later step.
 
+# cdylib → the wasm frontend (built with `--no-default-features`); rlib → CLI bin + tests.
 [lib]
-# cdylib added with the website step; rlib for now (CLI bin + tests).
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "dd-goldfish"
 path = "src/main.rs"
+# The binary is the native CLI; never built for wasm.
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Native CLI: arg parsing, terminal plots, and URL decklist resolvers. `ureq`
+# (via `decklist/fetch`) and `textplots` don't build for wasm, so the wasm
+# frontend builds with `--no-default-features` to drop this whole set.
+cli = ["dep:clap", "dep:textplots", "decklist/fetch"]
 
 [dependencies]
 mtg-engine = { path = "../mtg-engine" }
 doomsday = { path = "../doomsday" }
-# Deck input: text files + Moxfield/MTGGoldfish URLs. The CLI is native, so the
-# `fetch` feature (URL resolvers) is always on here.
-decklist = { path = "../decklist", features = ["fetch"] }
+# Base `decklist` (text parsing) is wasm-safe; the native-only `fetch` resolvers
+# come in via the `cli` feature.
+decklist = { path = "../decklist" }
 rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# CLI-only deps (will be feature-gated when the wasm cdylib lands).
-clap = { version = "4.5", features = ["derive"] }
-textplots = "0.8"
+# CLI-only.
+clap = { version = "4.5", features = ["derive"], optional = true }
+textplots = { version = "0.8", optional = true }
+
+# wasm randomness (rand → getrandom) needs the JS backend in the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"

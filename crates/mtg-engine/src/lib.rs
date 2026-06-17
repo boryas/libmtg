@@ -4283,7 +4283,47 @@ fn card_has_implementation(def: &CardDef) -> bool {
     }
 }
 
-/// Print a warning for mainboard cards that lack a simulation implementation.
+/// Why a deck card can't be faithfully simulated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum UnimplementedKind {
+    /// ✗ name not in the catalog at all — excluded from simulation entirely.
+    Missing,
+    /// ~ in the catalog but no actionable effects — drawn but never played/cast.
+    Inert,
+}
+
+/// One deck card the engine can't simulate, and why. Serializable so the web
+/// frontend can render it and build a pre-filled `missing-card` issue.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnimplementedCard {
+    pub name: String,
+    pub qty: i32,
+    /// `"main"` or `"side"`.
+    pub board: String,
+    pub kind: UnimplementedKind,
+}
+
+/// Classify a deck's cards against the catalog, returning every card the engine
+/// can't simulate (missing or inert), in input order. The shared data behind both
+/// [`warn_unimplemented_cards`] (CLI) and the web "file a missing-card issue" flow.
+pub fn classify_unimplemented_cards(
+    cards: &[(String, i32, String)],
+    catalog: &HashMap<String, CardDef>,
+) -> Vec<UnimplementedCard> {
+    cards
+        .iter()
+        .filter_map(|(name, qty, board)| {
+            let kind = match catalog.get(name.as_str()) {
+                None => UnimplementedKind::Missing,
+                Some(def) if !card_has_implementation(def) => UnimplementedKind::Inert,
+                _ => return None,
+            };
+            Some(UnimplementedCard { name: name.clone(), qty: *qty, board: board.clone(), kind })
+        })
+        .collect()
+}
+
+/// Print a warning for deck cards that lack a simulation implementation.
 ///
 /// Two categories:
 ///   ✗ not in catalog — excluded from simulation entirely (silently dropped)
@@ -4293,41 +4333,24 @@ pub fn warn_unimplemented_cards(
     deck_label: &str,
     catalog: &HashMap<String, CardDef>,
 ) {
-    let mut missing_main:  Vec<(&str, i32)> = Vec::new();
-    let mut no_effects_main: Vec<(&str, i32)> = Vec::new();
-    let mut missing_side:  Vec<(&str, i32)> = Vec::new();
-    let mut no_effects_side: Vec<(&str, i32)> = Vec::new();
+    let report = classify_unimplemented_cards(cards, catalog);
+    if report.is_empty() { return; }
 
-    for (name, qty, board) in cards {
-        let (missing, no_effects) = if board == "main" {
-            (&mut missing_main, &mut no_effects_main)
-        } else {
-            (&mut missing_side, &mut no_effects_side)
-        };
-        match catalog.get(name.as_str()) {
-            None => missing.push((name, *qty)),
-            Some(def) if !card_has_implementation(def) => no_effects.push((name, *qty)),
-            _ => {}
-        }
-    }
-
-    if missing_main.is_empty() && no_effects_main.is_empty()
-        && missing_side.is_empty() && no_effects_side.is_empty() { return; }
+    let emit = |c: &UnimplementedCard| match c.kind {
+        UnimplementedKind::Missing =>
+            println!("   ✗ {}×{} — not in catalog (excluded from simulation)", c.qty, c.name),
+        UnimplementedKind::Inert =>
+            println!("   ~ {}×{} — no simulation effects (drawn but never cast)", c.qty, c.name),
+    };
+    let on = |c: &&UnimplementedCard, board: &str, kind: UnimplementedKind|
+        c.board == board && c.kind == kind;
 
     println!("\n⚠  {} — unimplemented cards:", deck_label);
-    for (name, qty) in &missing_main {
-        println!("   ✗ {}×{} — not in catalog (excluded from simulation)", qty, name);
-    }
-    for (name, qty) in &no_effects_main {
-        println!("   ~ {}×{} — no simulation effects (drawn but never cast)", qty, name);
-    }
-    if !missing_side.is_empty() || !no_effects_side.is_empty() {
+    report.iter().filter(|c| on(c, "main", UnimplementedKind::Missing)).for_each(emit);
+    report.iter().filter(|c| on(c, "main", UnimplementedKind::Inert)).for_each(emit);
+    if report.iter().any(|c| c.board != "main") {
         println!("   sideboard:");
-        for (name, qty) in &missing_side {
-            println!("   ✗ {}×{} — not in catalog", qty, name);
-        }
-        for (name, qty) in &no_effects_side {
-            println!("   ~ {}×{} — no simulation effects", qty, name);
-        }
+        report.iter().filter(|c| c.board != "main" && c.kind == UnimplementedKind::Missing).for_each(emit);
+        report.iter().filter(|c| c.board != "main" && c.kind == UnimplementedKind::Inert).for_each(emit);
     }
 }

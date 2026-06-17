@@ -188,6 +188,35 @@ pub fn sample_doomsday_deck() -> Vec<(String, i32, String)> {
     .collect()
 }
 
+/// wasm-bindgen frontend. Everything here is gated to `target_arch = "wasm32"`
+/// (built by `wasm-pack build crates/dd-goldfish --target web --no-default-features`);
+/// on native targets this module is absent and the CLI bin is the entry point.
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use super::{run_goldfish, DEFAULT_PROTECTION};
+    use decklist::Decklist;
+    use mtg_engine::{build_catalog, classify_unimplemented_cards};
+    use wasm_bindgen::prelude::*;
+
+    /// Goldfish a pasted text decklist. Returns `GoldfishStats` as JSON.
+    #[wasm_bindgen]
+    pub fn run_goldfish_web(deck_text: &str, games: u32, max_turns: u8) -> String {
+        let deck = Decklist::parse_text(deck_text).to_engine_deck();
+        let stats = run_goldfish(&deck, games, DEFAULT_PROTECTION, max_turns);
+        serde_json::to_string(&stats).unwrap()
+    }
+
+    /// Classify the deck's cards the engine can't simulate (✗ missing / ~ inert).
+    /// Returns a JSON array of `UnimplementedCard`, for rendering + pre-filled
+    /// `missing-card` issue links.
+    #[wasm_bindgen]
+    pub fn missing_cards_web(deck_text: &str) -> String {
+        let deck = Decklist::parse_text(deck_text).to_engine_deck();
+        let report = classify_unimplemented_cards(&deck, &build_catalog());
+        serde_json::to_string(&report).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
