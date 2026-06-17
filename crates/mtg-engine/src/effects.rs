@@ -610,8 +610,7 @@ pub(crate) fn ward_pay_or_counter(
         matches!(decision, ChoiceResult::Bool(true))
     };
     if will_pay {
-        let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
-        let _ = crate::pay_ir_cost(state, t, targeting_caster, ward_source, cost, &mut no_strat);
+        let _ = crate::pay_ir_cost(state, t, targeting_caster, ward_source, cost, false);
         state.log(t, targeting_caster, "→ pays ward cost".to_string());
     } else {
         state.log(t, ward_holder, "→ ward: countering spell (cost not paid)".to_string());

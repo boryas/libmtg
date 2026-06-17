@@ -1294,8 +1294,7 @@ fn execute_mana_activation(
 
     // Pay costs via pay_ir_cost.
     let crate::ir::ability::CostBody::Ir(action) = &ma.costs;
-    let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
-    let _ctx = pay_ir_cost(state, t, who, act.source_id, action, &mut no_strategy)
+    let _ctx = pay_ir_cost(state, t, who, act.source_id, action, false)
         .unwrap_or_else(crate::CostsPaidCtx::default);
 
     // Resolve effect immediately — mana production, logging via ManaProduced event.
@@ -1312,13 +1311,12 @@ fn run_mana_loop(
     t: u8,
     who: PlayerId,
     mana_cost: &ManaCost,
-    strategy: &mut dyn Strategy,
 ) {
     loop {
         let available = enumerate_mana_abilities(state, who);
         if available.is_empty() { break; }
 
-        let activation = strategy.choose_mana_ability(state, who, &available, mana_cost);
+        let activation = state.with_strategy(who, |s, st| s.choose_mana_ability(st, who, &available, mana_cost));
         let Some(act) = activation else { break; };
 
         execute_mana_activation(state, t, who, &act);
@@ -1345,28 +1343,24 @@ pub(crate) fn pay_ir_cost(
     who: PlayerId,
     source: ObjId,
     action: &crate::ir::action::Action,
-    strategy: &mut Option<&mut dyn Strategy>,
+    consult_strategy: bool,
 ) -> Option<CostsPaidCtx> {
     let schema = crate::ir::cost_exec::build_schema(action, state, who, source)?;
-    let env = match strategy.as_deref_mut() {
-        Some(s) => s.propose_announcement(state, source, &schema),
-        None => crate::strategy::default_announcement(&schema),
+    // Acquire the payer's strategy per-decision (never held across execution) so
+    // nested cost decisions in cost_exec/execute_mut can re-acquire it too.
+    let env = if consult_strategy {
+        state.with_strategy(who, |s, st| s.propose_announcement(st, source, &schema))
+    } else {
+        crate::strategy::default_announcement(&schema)
     };
     for _attempt in 0..8 {
         match crate::ir::cost_exec::pay(action, &schema, &env, state, t, who, source) {
             Ok(ctx) => return Some(ctx),
             Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
-                match strategy.as_deref_mut() {
-                    Some(s) => run_mana_loop(state, t, who, &rem, s),
-                    // No strategy threaded — this is a resolution-time payment
-                    // (e.g. "counter unless its controller pays", or an
-                    // `Action::Choose` cost option resolving on the stack). The
-                    // payer may still activate mana abilities (CR 605.3b /
-                    // 602.2g): route the *which-sources* choice through the
-                    // payer's own strategy (default: auto_tap_plan), never the
-                    // engine deciding inline.
-                    None => state.with_strategy(who, |s, st| run_mana_loop(st, t, who, &rem, s)),
-                }
+                // The payer may still activate mana abilities (CR 605.3b / 602.2g);
+                // run_mana_loop routes the which-sources choice through the payer's
+                // own strategy, acquired per-decision (never held across execution).
+                run_mana_loop(state, t, who, &rem);
             }
             Err(_) => return None,
         }
@@ -1414,13 +1408,14 @@ fn pay_additional_ir_cost(
     source: ObjId,
     cost: &crate::ir::ability::CostBody,
     chosen_x: u32,
-    strategy: &mut Option<&mut dyn Strategy>,
+    consult_strategy: bool,
 ) -> Option<CostsPaidCtx> {
     let crate::ir::ability::CostBody::Ir(action) = cost;
     let schema = crate::ir::cost_exec::build_schema(action, state, who, source)?;
-    let mut env = match strategy.as_deref_mut() {
-        Some(s) => s.propose_announcement(state, source, &schema),
-        None => crate::strategy::default_announcement(&schema),
+    let mut env = if consult_strategy {
+        state.with_strategy(who, |s, st| s.propose_announcement(st, source, &schema))
+    } else {
+        crate::strategy::default_announcement(&schema)
     };
     bind_announced_x(&mut env, chosen_x);
     for _attempt in 0..8 {
@@ -1430,17 +1425,10 @@ fn pay_additional_ir_cost(
                 return Some(ctx);
             }
             Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
-                match strategy.as_deref_mut() {
-                    Some(s) => run_mana_loop(state, t, who, &rem, s),
-                    // No strategy threaded — this is a resolution-time payment
-                    // (e.g. "counter unless its controller pays", or an
-                    // `Action::Choose` cost option resolving on the stack). The
-                    // payer may still activate mana abilities (CR 605.3b /
-                    // 602.2g): route the *which-sources* choice through the
-                    // payer's own strategy (default: auto_tap_plan), never the
-                    // engine deciding inline.
-                    None => state.with_strategy(who, |s, st| run_mana_loop(st, t, who, &rem, s)),
-                }
+                // The payer may still activate mana abilities (CR 605.3b / 602.2g);
+                // run_mana_loop routes the which-sources choice through the payer's
+                // own strategy, acquired per-decision (never held across execution).
+                run_mana_loop(state, t, who, &rem);
             }
             Err(_) => return None,
         }
@@ -2749,8 +2737,7 @@ fn pay_ability_cost(
     // SacSelf with a single candidate). Mana availability is pre-checked
     // by `ability_available` and pre-filled by run_mana_loop above.
     let crate::ir::ability::CostBody::Ir(action) = &ability.costs;
-    let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
-    let ctx = pay_ir_cost(state, t, who, source_id, action, &mut no_strategy)
+    let ctx = pay_ir_cost(state, t, who, source_id, action, false)
         .unwrap_or_else(crate::CostsPaidCtx::default);
 
     // Log loyalty adjustment.
@@ -2805,7 +2792,6 @@ fn cast_spell(
     chosen_targets: &[ObjId],
     chosen_x: u32,
     chosen_mode: usize,
-    mut strategy: Option<&mut dyn Strategy>,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
     // Prefer the post-CE materialized def (current in normal game flow where recompute
@@ -2927,7 +2913,7 @@ fn cast_spell(
     // Pay cost and build a log label.
     let (cast_label, mut costs_ctx) = if let Some(ref cost) = alt_cost {
         let crate::ir::ability::CostBody::Ir(action) = &cost.costs;
-        let ctx = pay_ir_cost(state, t, who, card_id, action, &mut strategy)?;
+        let ctx = pay_ir_cost(state, t, who, card_id, action, true)?;
         ("ir alt cost".to_string(), ctx)
     } else {
         state.player_mut(who).pool.spend(&cost);
@@ -2938,7 +2924,7 @@ fn cast_spell(
     // `chosen_x` is passed so XLife additional costs pay the strategy-chosen amount.
     if !def.additional_costs.is_empty() {
         if let Some(add_ctx) =
-            pay_additional_ir_cost(state, t, who, card_id, &def.additional_costs, chosen_x, &mut strategy)
+            pay_additional_ir_cost(state, t, who, card_id, &def.additional_costs, chosen_x, true)
         {
             costs_ctx.objects_moved.extend(add_ctx.objects_moved);
             costs_ctx.returned_attack_targets.extend(add_ctx.returned_attack_targets);
@@ -2997,9 +2983,7 @@ fn cast_spell(
         let mut rep_count = 0u32;
         for &tgt in &extra_targets {
             if !state.potential_mana(who).can_pay(&rep_mc) { break; }
-            if let Some(ref mut strat) = strategy {
-                run_mana_loop(state, t, who, &rep_mc, &mut **strat);
-            }
+            run_mana_loop(state, t, who, &rep_mc);
             state.player_mut(who).pool.spend(&rep_mc);
             let (_, copy_eff) = build_spell_effect(&def, who, card_id, chosen_x, chosen_mode);
             let copy_id = state.alloc_id();
@@ -3455,7 +3439,6 @@ fn run_cast_submachine(
     who: PlayerId,
     card_id: ObjId,
     face: SpellFace,
-    strategy: &mut dyn Strategy,
 ) -> Option<ObjId> {
     // ── Announce (CR 601.2b) ────────────────────────────────────────────
     let def = state.def_of(card_id)
@@ -3473,7 +3456,7 @@ fn run_cast_submachine(
         available_alt_costs: def.alternate_costs().to_vec(),
         has_x_cost: def.additional_costs.has_x_cost(),
     };
-    let ann = strategy.announce(state, card_id, &options);
+    let ann = state.with_strategy(who, |s, st| s.announce(st, card_id, &options));
     let chosen_mode = ann.chosen_mode;
     let announced_alt_index = ann.alt_cost_index;
     let chosen_x = ann.chosen_x;
@@ -3494,7 +3477,7 @@ fn run_cast_submachine(
     let chosen_targets = if legal.is_empty() {
         vec![]
     } else {
-        strategy.choose_targets(state, card_id, &legal, &target_spec)
+        state.with_strategy(who, |s, st| s.choose_targets(st, card_id, &legal, &target_spec))
     };
 
     // ── LegalCheck (CR 601.2e) ──────────────────────────────────────────
@@ -3527,14 +3510,13 @@ fn run_cast_submachine(
         mc
     };
     state.casting_spell = Some(card_id);
-    run_mana_loop(state, t, who, &mana_cost, &mut *strategy);
+    run_mana_loop(state, t, who, &mana_cost);
 
     // ── PayCosts + Complete (CR 601.2h-i) ───────────────────────────────
     // cast_spell handles remaining payment (pool already filled by mana loop),
     // zone move, effect building, and event firing.
     let result = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(),
-               announced_alt_index, &chosen_targets, chosen_x, chosen_mode,
-               Some(strategy));
+               announced_alt_index, &chosen_targets, chosen_x, chosen_mode);
     state.casting_spell = None;
     result
 }
@@ -3549,7 +3531,6 @@ fn run_activate_submachine(
     who: PlayerId,
     source_id: ObjId,
     ability: &AbilityDef,
-    strategy: &mut dyn Strategy,
 ) -> ObjId {
     // ── Targets ─────────────────────────────────────────────────────────
     let chosen_targets = {
@@ -3565,7 +3546,7 @@ fn run_activate_submachine(
         if legal.is_empty() {
             vec![]
         } else {
-            strategy.choose_targets(state, source_id, &legal, &ability.target_spec)
+            state.with_strategy(who, |s, st| s.choose_targets(st, source_id, &legal, &ability.target_spec))
         }
     };
 
@@ -3579,7 +3560,7 @@ fn run_activate_submachine(
     // Works across both `CostBody` variants: Legacy scans for
     // `CostComponent::Mana`, Ir walks for `Action::PayMana`.
     if let Some(mc) = ability.costs.first_mana_cost() {
-        run_mana_loop(state, t, who, &mc, &mut *strategy);
+        run_mana_loop(state, t, who, &mc);
     }
 
     // ── Pay costs ───────────────────────────────────────────────────────
@@ -3664,8 +3645,7 @@ fn handle_priority_round(
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
                 } else {
-                    let result = state.with_strategy(who, |s, st|
-                        run_cast_submachine(st, t, who, card_id, face, s));
+                    let result = run_cast_submachine(state, t, who, card_id, face);
                     if let Some(cid) = result {
                         state.player_mut(who).spells_cast_this_turn += 1;
                         state.stack.push(cid);
@@ -3685,8 +3665,7 @@ fn handle_priority_round(
                 let ab = state.def_of(source_id)
                     .and_then(|d| d.abilities().get(ability_index).cloned())
                     .unwrap_or_default();
-                state.with_strategy(who, |s, st|
-                    run_activate_submachine(st, t, who, source_id, &ab, s));
+                run_activate_submachine(state, t, who, source_id, &ab);
                 priority_holder = if who == ap { nap } else { ap };
                 last_passer = None;
             }

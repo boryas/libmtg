@@ -1922,7 +1922,7 @@ mod cost_phase3 {
         s.player_mut(PlayerId::Us).life = 20;
 
         let action = Action::PayLife { who: Who::You, amount: Expr::Num(2) };
-        let ctx = crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, &mut None)
+        let ctx = crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, false)
             .expect("constant PayLife is payable with no strategy");
 
         assert_eq!(s.player(PlayerId::Us).life, 18, "2 life paid");
@@ -1939,7 +1939,7 @@ mod cost_phase3 {
         s.player_mut(PlayerId::Us).life = 20;
 
         let action = Action::PayLife { who: Who::You, amount: Expr::Ctx(Ctx::Var("$x")) };
-        crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, &mut None)
+        crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, false)
             .expect("XLife with default strategy resolves to 3");
 
         assert_eq!(s.player(PlayerId::Us).life, 17, "3 life paid (default min(3,max))");
@@ -1953,7 +1953,7 @@ mod cost_phase3 {
         s.player_mut(PlayerId::Us).life = 1;
 
         let action = Action::PayLife { who: Who::You, amount: Expr::Num(5) };
-        let res = crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, &mut None);
+        let res = crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, false);
         assert!(res.is_none(), "unpayable cost yields None");
         assert_eq!(s.player(PlayerId::Us).life, 1, "life unchanged on failure");
     }
@@ -2250,8 +2250,7 @@ mod cost_phase4 {
             .expect("battlefield ability");
         let CostBody::Ir(action) = &ab.costs else { panic!("expected Ir cost") };
 
-        let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
-        let ctx = crate::pay_ir_cost(&mut state, 1, PlayerId::Us, ee_id, action, &mut no_strategy)
+        let ctx = crate::pay_ir_cost(&mut state, 1, PlayerId::Us, ee_id, action, false)
             .expect("pay_ir_cost succeeds for EE");
 
         assert_eq!(state.player(PlayerId::Us).pool.total, 0, "pool drained by 2");

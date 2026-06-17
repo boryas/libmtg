@@ -749,40 +749,6 @@ fn plan_spell_names(plan: &[PlanAction], state: &SimState) -> Vec<String> {
     }
 
 
-    // NOTE: ignored pending an engine fix. End-to-end `simulate_game` runs hit a
-    // *pre-existing* engine re-entrancy: `handle_priority_round` holds a player's
-    // strategy taken-out (via `with_strategy`) while running the cast/activate
-    // submachine, whose IR cost-payment path (`cost_exec::pay` → `execute_mut`)
-    // re-acquires the *same* player's strategy via `with_strategy` (e.g. choosing
-    // Force of Will's pitch during the opponent's priority). Under the engine's own
-    // `cfg(test)` this is masked by the AlwaysPass fallback; as a real library
-    // dependency it panics. Fix = thread the strategy through cost execution
-    // instead of re-acquiring it. The DD decision logic itself is covered by the
-    // unit tests above. The other end-to-end sims (`validation_stats`,
-    // `stress_invariant_check`) are likewise `#[ignore]`d.
-    #[test]
-    #[ignore = "pre-existing engine re-entrancy in with_strategy during cost payment; see note"]
-    fn test_decision_log_populated() {
-        let catalog = mtg_engine::build_catalog();
-        let dd_cards = val_dd_deck();
-        let opp_cards = val_ub_tempo_deck();
-        let mut rng = StdRng::seed_from_u64(42);
-        // Run sims until one succeeds (DD resolves).
-        let state = loop {
-            let s = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng);
-            if s.terminal { break s; }
-        };
-        assert!(!state.decision_log.is_empty(), "decision_log should have entries");
-        // Should contain at least a mulligan decision and a planner decision.
-        let has_mulligan = state.decision_log.iter().any(|l| l.contains("mulligan"));
-        let has_plan = state.decision_log.iter().any(|l| l.contains("plan"));
-        assert!(has_mulligan, "decision_log should contain mulligan entries");
-        assert!(has_plan, "decision_log should contain planner entries");
-        eprintln!("\n── decision_log ({} entries) ──", state.decision_log.len());
-        for entry in &state.decision_log {
-            eprintln!("  {}", entry);
-        }
-    }
 
 
     #[test]

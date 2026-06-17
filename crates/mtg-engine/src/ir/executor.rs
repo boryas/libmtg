@@ -605,8 +605,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 if let Some(crate::ir::expr::Value::Num(i)) = env.get(name).cloned() {
                     if let Some(opt) = options.get(i as usize) {
                         if let Some(c) = &opt.cost {
-                            let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
-                            let _ = crate::pay_ir_cost(state, t, who, src, c, &mut no_strat);
+                            let _ = crate::pay_ir_cost(state, t, who, src, c, false);
                         }
                         return execute_mut(&opt.action, state, env);
                     }
@@ -641,8 +640,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             };
             // Pay the option's cost (if any) before running its action.
             if let Some(c) = &options[picked].cost {
-                let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
-                let _ = crate::pay_ir_cost(state, t, who, src, c, &mut no_strat);
+                let _ = crate::pay_ir_cost(state, t, who, src, c, false);
             }
             let sub_env = env.clone().with_controller(who);
             execute(&options[picked].action, state, &sub_env);
