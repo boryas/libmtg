@@ -153,17 +153,18 @@ fn parse_entry(line: &str) -> Option<DeckEntry> {
 }
 
 /// Normalize a decklist line's name to its catalog key. Strips:
-/// - a DFC / split back face: `Tamiyo, Inquisitive Student // Tamiyo, Seasoned
-///   Scholar` -> `Tamiyo, Inquisitive Student` (decklists and the catalog key by
-///   the front face), and
+/// - a DFC / split back face, keeping the front face (which is written first):
+///   Moxfield uses a single slash — `Tamiyo, Inquisitive Student / Tamiyo,
+///   Seasoned Scholar` — while Scryfall/Arena/MTGO use `//`. Splitting on a single
+///   `/` handles both. Result: `Tamiyo, Inquisitive Student`.
 /// - a trailing set/collector annotation: `Brainstorm (MH2) 217` -> `Brainstorm`.
 ///
 /// Commas and other in-name punctuation are preserved (`Jace, Wielder of
-/// Mysteries` stays intact) — only the two suffixes above are removed.
+/// Mysteries` stays intact) — only the two suffixes above are removed. No MTG card
+/// name contains a `/` outside the DFC/split separator, so this is safe.
 fn clean_card_name(name: &str) -> String {
-    // DFC/split: keep the front face (before "//"). Scryfall/Moxfield/Arena/MTGO
-    // all write double-faced names front-first.
-    let name = name.split("//").next().unwrap_or(name).trim();
+    // Front face is first; split on a single '/' (covers both " / " and " // ").
+    let name = name.split('/').next().unwrap_or(name).trim();
     match name.find(" (") {
         Some(pos) => name[..pos].trim().to_string(),
         None => name.to_string(),
@@ -191,13 +192,16 @@ mod tests {
     #[test]
     fn dfc_reduces_to_front_face_and_keeps_commas() {
         let dl = Decklist::parse_text(
-            "4 Tamiyo, Inquisitive Student // Tamiyo, Seasoned Scholar\n\
+            // The exact Moxfield export line (single slash + set/collector suffix).
+            "4 Tamiyo, Inquisitive Student / Tamiyo, Seasoned Scholar (MH3) 242\n\
+             4 Tamiyo, Inquisitive Student // Tamiyo, Seasoned Scholar\n\
              1 Jace, Wielder of Mysteries\n\
              1 Fire // Ice (APC) 128\n",
         );
-        assert_eq!(dl.main[0].name, "Tamiyo, Inquisitive Student"); // back face stripped
-        assert_eq!(dl.main[1].name, "Jace, Wielder of Mysteries");  // comma preserved
-        assert_eq!(dl.main[2].name, "Fire");                        // split front + set suffix
+        assert_eq!(dl.main[0].name, "Tamiyo, Inquisitive Student"); // Moxfield single slash + set
+        assert_eq!(dl.main[1].name, "Tamiyo, Inquisitive Student"); // double slash
+        assert_eq!(dl.main[2].name, "Jace, Wielder of Mysteries");  // comma preserved
+        assert_eq!(dl.main[3].name, "Fire");                        // split front + set suffix
     }
 
     #[test]
