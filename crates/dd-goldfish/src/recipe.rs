@@ -611,6 +611,182 @@ pub fn e_ttd(state: &SimState, who: PlayerId, max_turn: u32) -> f64 {
     mana_turn.max(payoff_turn)
 }
 
+// ── known top-of-library: the unifying cantrip/tutor primitive ────────────────
+//
+// Personal Tutor (put on top), Ponder (no-shuffle reorder), and Brainstorm (put
+// back) are ALL the same effect: arrange KNOWN cards on top of the library. In the
+// resources → costs → effects → resources cycle that effect PRODUCES the resource
+// "known top-of-library = [chosen card sequence]", and the draw step CONSUMES it
+// deterministically (honest — you arranged it, you know it). So the deterministic
+// layer walks `known_top` as guaranteed upcoming draws, and the cantrip STRATEGY
+// falls out of choosing the arrangement (or shuffling) that minimises E[TTD].
+
+/// Fold a single known incoming card into a `(Caps, has_dd)` accumulator, by the
+/// same cost-level classification `project` uses. A fetch in the prefix is treated
+/// as an untapped black land (it cracks into one); a known tutor is not modelled
+/// (v1: miss-OK).
+fn fold_known_card(c: &mut Caps, has_dd: &mut bool, def: &CardDef, key: &str) {
+    if key == DOOMSDAY {
+        *has_dd = true;
+    } else if !def.is_land() && def.mana_cost().trim() == "0" {
+        if oneshot_produces_color(def, Color::Black) {
+            c.pool += 1;
+        } else if renewable_produces_color(def, Color::Black) {
+            c.renew_inplay += 1;
+        }
+    } else if def.is_land() {
+        if is_fetch(def) || (produces_black(def) && !def.enters_tapped()) {
+            c.untapped_lands += 1;
+        } else if produces_black(def) {
+            c.tapped_lands += 1;
+        }
+    } else if is_black_ritual(def) {
+        c.rituals += 1;
+    }
+}
+
+/// Earliest deterministic cast turn given a KNOWN top-of-library prefix — the
+/// prefix accelerates the position (a known ritual/payoff/land arrives on
+/// schedule). `immediate` is the draw timing, the one real difference between a
+/// tutor and a cantrip: a TUTOR (Personal Tutor) only stages the top, so the cards
+/// arrive on the natural draws (card `i` on turn `i + 2`, no turn-1 draw); a
+/// CANTRIP (Ponder/Brainstorm) DRAWS after arranging, so the first card arrives
+/// THIS turn (card `i` on turn `i + 1`). Takes the min of the no-prefix lines
+/// (`deterministic_cast_turn`, already covering direct + tutor) and the
+/// prefix-accelerated direct line.
+fn deterministic_cast_turn_with_known(
+    state: &SimState,
+    who: PlayerId,
+    known_top: &[&str],
+    immediate: bool,
+    max_turn: u32,
+) -> Option<u32> {
+    let base = project(state, who);
+    let base_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    let mut prefix_line = None;
+    for t in 1..=max_turn {
+        let seen = if immediate { t as usize } else { t.saturating_sub(1) as usize };
+        let drawn = seen.min(known_top.len());
+        let mut c = base;
+        let mut has_dd = base_dd;
+        for &key in &known_top[..drawn] {
+            if let Some(def) = state.catalog.get(key) {
+                fold_known_card(&mut c, &mut has_dd, def, key);
+            }
+        }
+        if has_dd && bbb_on_turn(&c, t, c.pool) {
+            prefix_line = Some(t);
+            break;
+        }
+    }
+    match (deterministic_cast_turn(state, who, max_turn), prefix_line) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// How many prefix cards actually advance the plan (a black mana source or the
+/// payoff/a tutor) — the rest are "bricks" locked onto the top of the library.
+fn prefix_useful_count(state: &SimState, who: PlayerId, known_top: &[&str]) -> u32 {
+    let _ = who;
+    known_top
+        .iter()
+        .filter(|&&key| {
+            key == DOOMSDAY
+                || state.catalog.get(key).is_some_and(|d| {
+                    (d.is_land() && produces_black(d))
+                        || is_fetch(d)
+                        || is_free_black_artifact(d)
+                        || is_black_ritual(d)
+                        || d.library_top_tutor().is_some()
+                })
+        })
+        .count() as u32
+}
+
+/// E[TTD] given a KNOWN top-of-library prefix. The strong model the cantrip
+/// strategy minimises over: the prefix accelerates the deterministic line if it
+/// completes it; otherwise it's a LIABILITY — its brick cards are dead draws
+/// locked on top, so they push the stochastic estimate back by their count (the
+/// "stuck" penalty that makes shuffling correct). `immediate` = the cantrip/tutor
+/// draw-timing (see `deterministic_cast_turn_with_known`). v1 crude: a non-brick
+/// prefix card is treated as ≈ a random draw (neutral); the stochastic library
+/// size isn't reduced by the prefix.
+pub fn e_ttd_with_known_top(
+    state: &SimState,
+    who: PlayerId,
+    known_top: &[&str],
+    immediate: bool,
+    max_turn: u32,
+) -> f64 {
+    if let Some(t) = deterministic_cast_turn_with_known(state, who, known_top, immediate, max_turn) {
+        return t as f64;
+    }
+    let base = e_ttd(state, who, max_turn);
+    if !base.is_finite() {
+        return base;
+    }
+    let bricks = known_top.len() as f64 - prefix_useful_count(state, who, known_top) as f64;
+    base + bricks.max(0.0)
+}
+
+/// All orderings of `items` (factorial — intended for small slices, e.g. Ponder's
+/// top 3).
+fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+        let mut rest = items.to_vec();
+        let head = rest.remove(i);
+        for mut p in permutations(&rest) {
+            p.insert(0, head.clone());
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// A library-ordering decision: keep a chosen ordered prefix on top, or shuffle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopChoice {
+    /// Keep these cards on top, in this order (drawn first-to-last).
+    Keep(Vec<String>),
+    /// Shuffle the library — discard the known top, reset to deck-average.
+    Shuffle,
+}
+
+/// The Ponder-style decision, FALLING OUT of E[TTD]: given the revealed top cards
+/// you arrange (then draw) or shuffle away, return the choice that minimises
+/// E[TTD]. "Getting closer" (keep an arrangement that lowers E[TTD]) and "getting
+/// stuck" (shuffle a brick top) are not hand-coded — they're just which branch
+/// wins the comparison. Ponder/Brainstorm DRAW after arranging, so the kept
+/// arrangement is scored with `immediate = true` (the first card is in hand this
+/// turn); the shuffle branch resets to the deck-average `e_ttd`. `can_shuffle`
+/// reflects whether the card offers it (Ponder does; a no-shuffle look does not).
+pub fn best_top_choice(
+    state: &SimState,
+    who: PlayerId,
+    revealed: &[String],
+    can_shuffle: bool,
+    max_turn: u32,
+) -> (TopChoice, f64) {
+    let mut best = if can_shuffle {
+        (TopChoice::Shuffle, e_ttd(state, who, max_turn))
+    } else {
+        (TopChoice::Shuffle, f64::INFINITY)
+    };
+    for perm in permutations(revealed) {
+        let keys: Vec<&str> = perm.iter().map(String::as_str).collect();
+        let score = e_ttd_with_known_top(state, who, &keys, true, max_turn);
+        if score < best.1 {
+            best = (TopChoice::Keep(perm), score);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1432,48 @@ mod tests {
         );
         // The faster, tutor-rich list resolves Doomsday sooner in expectation.
         assert!(fast_mean < waste_mean, "the 4-PT list should have lower mean E[TTD]");
+    }
+
+    // ── known top-of-library (cantrip/tutor unification) ──────────────────────
+
+    #[test]
+    fn known_card_on_top_accelerates_by_draw_timing() {
+        // 3 lands + DD is a deterministic turn-3 cast. A known Dark Ritual coming
+        // off the top finishes it sooner — and HOW soon is the tutor/cantrip draw
+        // difference: a TUTOR only stages the top (drawn turn 2) → cast turn 2; a
+        // CANTRIP draws after arranging (drawn now) → cast turn 1.
+        let s = setup(&[], &["Underground Sea", "Underground Sea", "Underground Sea", "Doomsday"], &[]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(3));
+        assert_eq!(e_ttd_with_known_top(&s, PlayerId::Us, &["Dark Ritual"], false, 3), 2.0); // tutor
+        assert_eq!(e_ttd_with_known_top(&s, PlayerId::Us, &["Dark Ritual"], true, 3), 1.0); // cantrip
+    }
+
+    #[test]
+    fn known_doomsday_on_top_makes_a_no_dd_hand_castable() {
+        // 3 lands, no Doomsday in hand: a Doomsday tutored to the top is drawn turn
+        // 2, BBB comes fully online turn 3 → cast turn 3.
+        let s = setup(&[], &["Underground Sea", "Underground Sea", "Underground Sea"], &[]);
+        assert_eq!(e_ttd_with_known_top(&s, PlayerId::Us, &["Doomsday"], false, 3), 3.0);
+    }
+
+    #[test]
+    fn ponder_keeps_a_useful_top_and_shuffles_a_brick() {
+        // A draw-reliant hand: 2 lands + DD can't make BBB alone, so it leans on
+        // what comes off the top.
+        let s = setup(
+            &[],
+            &["Underground Sea", "Underground Sea", "Doomsday"],
+            &["Dark Ritual", "Dark Ritual", "Underground Sea", "Lotus Petal", "Brainstorm"],
+        );
+        // Ponder draws after arranging: a top led by a ritual casts THIS turn (1.0) → keep.
+        let good = vec!["Dark Ritual".to_string(), "Brainstorm".to_string(), "Brainstorm".to_string()];
+        let (choice, score) = best_top_choice(&s, PlayerId::Us, &good, true, 3);
+        assert!(matches!(&choice, TopChoice::Keep(v) if v[0] == "Dark Ritual"));
+        assert_eq!(score, 1.0);
+        // An all-brick top-3 just locks dead draws onto the library → shuffle.
+        let brick = vec!["Brainstorm".to_string(), "Brainstorm".to_string(), "Brainstorm".to_string()];
+        let (choice, _) = best_top_choice(&s, PlayerId::Us, &brick, true, 3);
+        assert_eq!(choice, TopChoice::Shuffle);
     }
 
     // ── sufficient? over real states ─────────────────────────────────────────
