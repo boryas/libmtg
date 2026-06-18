@@ -645,24 +645,30 @@ fn fold_known_card(c: &mut Caps, has_dd: &mut bool, def: &CardDef, key: &str) {
     }
 }
 
-/// Earliest deterministic cast turn given a KNOWN top-of-library prefix — the
-/// prefix accelerates the position (a known ritual/payoff/land arrives on
-/// schedule). `immediate` is the draw timing, the one real difference between a
-/// tutor and a cantrip: a TUTOR (Personal Tutor) only stages the top, so the cards
-/// arrive on the natural draws (card `i` on turn `i + 2`, no turn-1 draw); a
-/// CANTRIP (Ponder/Brainstorm) DRAWS after arranging, so the first card arrives
-/// THIS turn (card `i` on turn `i + 1`). Takes the min of the no-prefix lines
-/// (`deterministic_cast_turn`, already covering direct + tutor) and the
-/// prefix-accelerated direct line.
-fn deterministic_cast_turn_with_known(
+/// Earliest deterministic cast turn given `extra_hand` cards that are already in
+/// hand THIS turn (Brainstorm's burst — you keep them now) plus a KNOWN
+/// top-of-library prefix that arrives over the coming turns. `immediate` is the
+/// prefix draw timing, the one real difference between a tutor and a cantrip: a
+/// TUTOR (Personal Tutor) only stages the top, so the cards arrive on the natural
+/// draws (card `i` on turn `i + 2`, no turn-1 draw); a CANTRIP (Ponder) DRAWS after
+/// arranging, so the first card arrives THIS turn (card `i` on turn `i + 1`). Takes
+/// the min of the no-prefix lines (`deterministic_cast_turn`, already covering
+/// direct + tutor) and the extra-hand/prefix-accelerated line.
+fn deterministic_cast_turn_full(
     state: &SimState,
     who: PlayerId,
+    extra_hand: &[&str],
     known_top: &[&str],
     immediate: bool,
     max_turn: u32,
 ) -> Option<u32> {
-    let base = project(state, who);
-    let base_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    let mut base = project(state, who);
+    let mut base_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    for &key in extra_hand {
+        if let Some(def) = state.catalog.get(key) {
+            fold_known_card(&mut base, &mut base_dd, def, key);
+        }
+    }
     let mut prefix_line = None;
     for t in 1..=max_turn {
         let seen = if immediate { t as usize } else { t.saturating_sub(1) as usize };
@@ -683,6 +689,18 @@ fn deterministic_cast_turn_with_known(
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
+}
+
+/// `deterministic_cast_turn_full` with no extra in-hand cards — the plain
+/// known-top (tutor / Ponder) case.
+fn deterministic_cast_turn_with_known(
+    state: &SimState,
+    who: PlayerId,
+    known_top: &[&str],
+    immediate: bool,
+    max_turn: u32,
+) -> Option<u32> {
+    deterministic_cast_turn_full(state, who, &[], known_top, immediate, max_turn)
 }
 
 /// How many prefix cards actually advance the plan (a black mana source or the
@@ -730,6 +748,96 @@ pub fn e_ttd_with_known_top(
     base + bricks.max(0.0)
 }
 
+// ── P(cast by cutoff turn): the cut-off objective ────────────────────────────
+//
+// A combo deck doesn't want the lowest EXPECTED cast turn — it wants to cast BY a
+// CUTOFF turn `T`, past which P(win) → 0 (you've been Wastelanded / disrupted /
+// raced). So the objective is `P(TTD ≤ T)`, NOT `E[TTD]`. Two payoffs: (1) "stuck
+// past the cutoff" becomes an automatic `P = 0` rejection (no fuzzy penalty), which
+// makes cantrip decisions sharp; (2) `P(combo by T)` is the headline the goldfish
+// actually reports.
+
+/// P(at least one of `outs` successes among `draws` cards drawn without
+/// replacement from a `library`-card library) — the hypergeometric tail, product
+/// form (no factorials).
+fn p_at_least_one(library: u32, outs: u32, draws: u32) -> f64 {
+    if outs == 0 || draws == 0 {
+        return 0.0;
+    }
+    let (n, k, d) = (library as i64, outs as i64, draws as i64);
+    let mut p_none = 1.0f64;
+    for i in 0..d {
+        let non_out = n - k - i;
+        if non_out <= 0 {
+            return 1.0; // every remaining card is an out
+        }
+        p_none *= non_out as f64 / (n - i) as f64;
+    }
+    1.0 - p_none
+}
+
+/// The stochastic side of `P(cast by cutoff)` given a draw budget `draws`: the mana
+/// side (deterministic by `cutoff`, else draw a `mana_gap` out) times the payoff
+/// side (in hand, else draw it). Crude independence; v1.
+fn p_cast_stochastic(state: &SimState, who: PlayerId, cutoff: u32, draws: u32) -> f64 {
+    let c = project(state, who);
+    let (mana_outs, payoff_outs, library) = gap_outs(state, who);
+    let p_mana = if bbb_turn(&c, cutoff, c.pool).is_some() {
+        1.0
+    } else {
+        p_at_least_one(library, mana_outs, draws)
+    };
+    let p_payoff = if payoff_in_hand(state, who) {
+        1.0
+    } else {
+        p_at_least_one(library, payoff_outs, draws)
+    };
+    p_mana * p_payoff
+}
+
+/// `P(cast Doomsday by turn cutoff)` — THE objective. `1.0` if a deterministic line
+/// lands by `cutoff`; else the chance the `cutoff - 1` natural draws close the gap.
+pub fn p_cast_by(state: &SimState, who: PlayerId, cutoff: u32) -> f64 {
+    p_cast_by_full(state, who, &[], &[], false, cutoff)
+}
+
+/// `P(cast by cutoff)` with `extra_hand` cards already in hand this turn
+/// (Brainstorm's burst) and a known top-of-library prefix. A deterministic line
+/// (with the extras / prefix folded in) → `1.0`; otherwise the prefix's BRICK
+/// cards are wasted draws locked on top, shrinking the stochastic budget — so a
+/// brick prefix that eats every pre-cutoff draw drives `P → 0` (the "stuck past the
+/// cutoff is unacceptable" rejection, automatic). v1 crude: `extra_hand` helps only
+/// the deterministic check, not the stochastic gap; the library size isn't reduced.
+pub fn p_cast_by_full(
+    state: &SimState,
+    who: PlayerId,
+    extra_hand: &[&str],
+    known_top: &[&str],
+    immediate: bool,
+    cutoff: u32,
+) -> f64 {
+    if deterministic_cast_turn_full(state, who, extra_hand, known_top, immediate, cutoff).is_some() {
+        return 1.0;
+    }
+    let draws = cutoff.saturating_sub(1);
+    let seen = if immediate { cutoff } else { cutoff.saturating_sub(1) };
+    let prefix_drawn = seen.min(known_top.len() as u32) as usize;
+    let useful = prefix_useful_count(state, who, &known_top[..prefix_drawn]);
+    let wasted = prefix_drawn as u32 - useful;
+    p_cast_stochastic(state, who, cutoff, draws.saturating_sub(wasted))
+}
+
+/// `P(cast by cutoff)` given just a known top-of-library prefix (tutor / Ponder).
+pub fn p_cast_by_with_known_top(
+    state: &SimState,
+    who: PlayerId,
+    known_top: &[&str],
+    immediate: bool,
+    cutoff: u32,
+) -> f64 {
+    p_cast_by_full(state, who, &[], known_top, immediate, cutoff)
+}
+
 /// All orderings of `items` (factorial — intended for small slices, e.g. Ponder's
 /// top 3).
 fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
@@ -757,34 +865,70 @@ pub enum TopChoice {
     Shuffle,
 }
 
-/// The Ponder-style decision, FALLING OUT of E[TTD]: given the revealed top cards
-/// you arrange (then draw) or shuffle away, return the choice that minimises
-/// E[TTD]. "Getting closer" (keep an arrangement that lowers E[TTD]) and "getting
-/// stuck" (shuffle a brick top) are not hand-coded — they're just which branch
-/// wins the comparison. Ponder/Brainstorm DRAW after arranging, so the kept
-/// arrangement is scored with `immediate = true` (the first card is in hand this
-/// turn); the shuffle branch resets to the deck-average `e_ttd`. `can_shuffle`
-/// reflects whether the card offers it (Ponder does; a no-shuffle look does not).
+/// The Ponder decision, FALLING OUT of `P(cast by cutoff)`: given the revealed top
+/// cards you arrange (then draw) or shuffle away, return the choice that MAXIMISES
+/// P(cast by `cutoff`). "Getting closer" (keep an arrangement that raises P) and
+/// "getting stuck" (shuffle a brick top, whose keep-P is ≈ 0 past the cutoff) are
+/// not hand-coded — they're just which branch wins. Ponder DRAWS after arranging,
+/// so the kept arrangement is scored `immediate = true`; the shuffle branch resets
+/// to the deck-average `p_cast_by`. `can_shuffle` reflects whether the card offers
+/// it (Ponder does; a no-shuffle look does not — `Shuffle` then scores 0).
 pub fn best_top_choice(
     state: &SimState,
     who: PlayerId,
     revealed: &[String],
     can_shuffle: bool,
-    max_turn: u32,
+    cutoff: u32,
 ) -> (TopChoice, f64) {
-    let mut best = if can_shuffle {
-        (TopChoice::Shuffle, e_ttd(state, who, max_turn))
-    } else {
-        (TopChoice::Shuffle, f64::INFINITY)
-    };
+    let mut best = (
+        TopChoice::Shuffle,
+        if can_shuffle { p_cast_by(state, who, cutoff) } else { 0.0 },
+    );
     for perm in permutations(revealed) {
         let keys: Vec<&str> = perm.iter().map(String::as_str).collect();
-        let score = e_ttd_with_known_top(state, who, &keys, true, max_turn);
-        if score < best.1 {
-            best = (TopChoice::Keep(perm), score);
+        let p = p_cast_by_with_known_top(state, who, &keys, true, cutoff);
+        if p > best.1 {
+            best = (TopChoice::Keep(perm), p);
         }
     }
     best
+}
+
+/// The 2 least-useful card keys to put back (Brainstorm/Ponder buries): a card is
+/// "useful" if it advances the plan (a black mana source, the payoff, or a tutor).
+/// Prefers burying real bricks from `pool` (hand ∪ drawn); pads with whatever's
+/// left if fewer than 2 bricks exist.
+fn worst_two_to_bury<'a>(state: &SimState, who: PlayerId, pool: &[&'a str]) -> Vec<&'a str> {
+    let useful = |key: &str| prefix_useful_count(state, who, &[key]) > 0;
+    let mut bricks: Vec<&str> = pool.iter().copied().filter(|k| !useful(k)).collect();
+    let mut rest: Vec<&str> = pool.iter().copied().filter(|k| useful(k)).collect();
+    bricks.append(&mut rest);
+    bricks.into_iter().take(2).collect()
+}
+
+/// The Brainstorm decision, also falling out of `P(cast by cutoff)`. Brainstorm is
+/// `+3 / -2`: draw 3 into hand NOW (the burst — `extra_hand`), then put 2 back on
+/// top (`known_top`, drawn on the coming natural turns). v1 keeps all 3 in hand and
+/// buries the 2 least-useful cards from hand ∪ drawn (`worst_two_to_bury`); without
+/// a shuffle those 2 are dead draws you'll re-draw, so they shrink the stochastic
+/// budget. Returns `(buried-in-order, P)`.
+pub fn best_brainstorm(
+    state: &SimState,
+    who: PlayerId,
+    drawn: &[String],
+    cutoff: u32,
+) -> (Vec<String>, f64) {
+    let keep: Vec<&str> = drawn.iter().map(String::as_str).collect();
+    // The buriable pool is the 3 drawn plus the current hand's cards.
+    let hand: Vec<String> = state
+        .hand_of(who)
+        .map(|c| c.catalog_key.clone())
+        .collect();
+    let mut pool: Vec<&str> = keep.clone();
+    pool.extend(hand.iter().map(String::as_str));
+    let buried = worst_two_to_bury(state, who, &pool);
+    let p = p_cast_by_full(state, who, &keep, &buried, false, cutoff);
+    (buried.iter().map(|s| s.to_string()).collect(), p)
 }
 
 #[cfg(test)]
@@ -1457,23 +1601,57 @@ mod tests {
     }
 
     #[test]
+    fn p_at_least_one_matches_hypergeometric() {
+        // P(≥1 of K outs in d draws from N), product form, vs an empirical shuffle.
+        let (n, k, d) = (53u32, 8u32, 3u32);
+        let mut deck: Vec<bool> = (0..n).map(|i| i < k).collect();
+        let mut rng = SmallRng::seed_from_u64(0xB175_0001);
+        let (trials, mut hits) = (200_000u32, 0u32);
+        for _ in 0..trials {
+            deck.shuffle(&mut rng);
+            if deck[..d as usize].iter().any(|&x| x) {
+                hits += 1;
+            }
+        }
+        let empirical = hits as f64 / trials as f64;
+        let analytical = p_at_least_one(n, k, d);
+        println!("P(>=1 out) N={n} K={k} d={d}: analytical={analytical:.4} empirical={empirical:.4}");
+        assert!((empirical - analytical).abs() < 0.01);
+        assert_eq!(p_at_least_one(53, 0, 5), 0.0); // no outs
+        assert_eq!(p_at_least_one(53, 8, 0), 0.0); // no draws
+    }
+
+    #[test]
     fn ponder_keeps_a_useful_top_and_shuffles_a_brick() {
         // A draw-reliant hand: 2 lands + DD can't make BBB alone, so it leans on
-        // what comes off the top.
+        // what comes off the top. Objective is P(cast by the cutoff turn 4).
         let s = setup(
             &[],
             &["Underground Sea", "Underground Sea", "Doomsday"],
             &["Dark Ritual", "Dark Ritual", "Underground Sea", "Lotus Petal", "Brainstorm"],
         );
-        // Ponder draws after arranging: a top led by a ritual casts THIS turn (1.0) → keep.
+        // Ponder draws after arranging: a top led by a ritual casts this turn →
+        // P(cast by 4) = 1.0 → keep, ritual first.
         let good = vec!["Dark Ritual".to_string(), "Brainstorm".to_string(), "Brainstorm".to_string()];
-        let (choice, score) = best_top_choice(&s, PlayerId::Us, &good, true, 3);
+        let (choice, p) = best_top_choice(&s, PlayerId::Us, &good, true, 4);
         assert!(matches!(&choice, TopChoice::Keep(v) if v[0] == "Dark Ritual"));
-        assert_eq!(score, 1.0);
-        // An all-brick top-3 just locks dead draws onto the library → shuffle.
+        assert_eq!(p, 1.0);
+        // An all-brick top locks 3 dead draws past the cutoff (keep-P → 0) → shuffle.
         let brick = vec!["Brainstorm".to_string(), "Brainstorm".to_string(), "Brainstorm".to_string()];
-        let (choice, _) = best_top_choice(&s, PlayerId::Us, &brick, true, 3);
+        let (choice, _) = best_top_choice(&s, PlayerId::Us, &brick, true, 4);
         assert_eq!(choice, TopChoice::Shuffle);
+    }
+
+    #[test]
+    fn brainstorm_burst_casts_when_a_piece_arrives() {
+        // 2 lands + DD is a piece short. Brainstorm draws 3 INTO HAND now: a Dark
+        // Ritual among them completes the line this turn → P(cast by 4) = 1.0, and
+        // the 2 bricks are buried (re-drawn later, but we've already won).
+        let s = setup(&[], &["Underground Sea", "Underground Sea", "Doomsday"], &["Underground Sea", "Lotus Petal"]);
+        let drawn = vec!["Dark Ritual".to_string(), "Brainstorm".to_string(), "Brainstorm".to_string()];
+        let (buried, p) = best_brainstorm(&s, PlayerId::Us, &drawn, 4);
+        assert_eq!(p, 1.0);
+        assert!(buried.iter().all(|c| c == "Brainstorm"), "buries the bricks, keeps the ritual");
     }
 
     // ── sufficient? over real states ─────────────────────────────────────────
