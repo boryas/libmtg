@@ -395,9 +395,14 @@ impl Strategy for DDGoldfishStrategy {
             // Calibration probe: the kept hand's predicted P(cast by cutoff), to be
             // compared against the realized outcome (see `run_goldfish_calibration`).
             self.dlog(format!("CALIB {:.4}", p));
+            let det = recipe::deterministic_cast_turn(state, who, self.cutoff);
             let hand: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
-            self.dlog(format!("KEPT det={:?} [{}]",
-                recipe::deterministic_cast_turn(state, who, self.cutoff), names(state, &hand)));
+            self.dlog(format!("KEPT det={:?} [{}]", det, names(state, &hand)));
+            // Machine-readable per-game summary for the aggregate stats (mull level,
+            // predicted P, and whether the opening hand already had a deterministic
+            // line by the cutoff).
+            self.dlog(format!("STATS mull={} pred={:.4} det={}",
+                mulligans_taken, p, det.is_some() as u8));
         }
         self.dlog(format!("T0: mull#{} P(cast by {})={:.2} → {}",
             mulligans_taken, self.cutoff, p, if mull { "MULL" } else { "KEEP" }));
@@ -621,4 +626,44 @@ impl Strategy for DDGoldfishStrategy {
     }
 
     fn card_fills(&self, _card_id: ObjId, _gap: &TargetGap, _state: &SimState) -> f64 { 0.0 }
+}
+
+// ── AggroMullStrategy: experiment wrapper (baseline gameplay + aggressive mull) ──
+//
+// Completes the 2×2 (gameplay × mulligan): runs an inner strategy's gameplay
+// verbatim but swaps in the aggressive `p_cast_by`-threshold mulligan, to measure
+// how much of the ASAP edge is the mulligan vs the in-game play. Debug-only.
+
+pub struct AggroMullStrategy {
+    inner: Box<dyn Strategy>,
+    cutoff: u32,
+}
+
+impl AggroMullStrategy {
+    pub fn new(inner: Box<dyn Strategy>, cutoff: u32) -> Self {
+        Self { inner, cutoff: cutoff.max(1) }
+    }
+}
+
+impl Strategy for AggroMullStrategy {
+    // The one override: the aggressive P(cast by cutoff) threshold mulligan.
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
+        let who = self.inner.player_id();
+        let p = recipe::p_cast_by(state, who, self.cutoff);
+        let threshold = match mulligans_taken { 0 => 0.55, 1 => 0.38, _ => 0.20 };
+        mulligans_taken < 3 && p < threshold
+    }
+
+    // Forward exactly the methods DoomsdayStrategy overrides — its gameplay verbatim.
+    // Everything else falls through to the trait default, which is precisely what
+    // DoomsdayStrategy uses for those, so the wrapper is identical there.
+    fn choose_action(&mut self, s: &SimState, ap: PlayerId, l: &[LegalAction]) -> LegalAction { self.inner.choose_action(s, ap, l) }
+    fn choose_mana_ability(&mut self, s: &SimState, w: PlayerId, a: &[ManaAbilityOption], m: &ManaCost) -> Option<ManaActivation> { self.inner.choose_mana_ability(s, w, a, m) }
+    fn announce(&mut self, s: &SimState, c: ObjId, o: &AnnounceOptions) -> AnnounceChoice { self.inner.announce(s, c, o) }
+    fn declare_attackers(&mut self, s: &SimState) -> Vec<(ObjId, Option<ObjId>)> { self.inner.declare_attackers(s) }
+    fn declare_blockers(&mut self, s: &SimState) -> Vec<(ObjId, ObjId)> { self.inner.declare_blockers(s) }
+    fn player_id(&self) -> PlayerId { self.inner.player_id() }
+    fn plan_gap(&self, s: &SimState) -> TargetGap { self.inner.plan_gap(s) }
+    fn card_fills(&self, c: ObjId, g: &TargetGap, s: &SimState) -> f64 { self.inner.card_fills(c, g, s) }
+    fn drain_decisions(&mut self) -> Vec<String> { self.inner.drain_decisions() }
 }

@@ -45,10 +45,74 @@
     .ok { color: #6fcf6f; font-size: 0.85rem; }
     .progress { height: 0.55rem; background: #111a2e; border: 1px solid #0f3460; border-radius: 4px; overflow: hidden; margin-top: 0.8rem; }
     .progress-fill { height: 100%; width: 0; background: #5dade2; transition: width 0.08s linear; }
+    .info-badge { font-size: 0.72rem; color: #5dade2; text-decoration: none; border: 1px solid #0f3460;
+      border-radius: 4px; padding: 1px 7px; vertical-align: middle; margin-left: 0.5rem; font-weight: normal; }
+    .info-badge:hover { background: #0f3460; }
+    .methodology { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 0.3rem 0.9rem;
+      margin-bottom: 1rem; max-width: 60rem; }
+    .methodology > summary { cursor: pointer; color: #5dade2; font-size: 0.88rem; padding: 0.45rem 0; list-style-position: inside; }
+    .methodology-body { font-size: 0.83rem; color: #c8c8d4; line-height: 1.5; padding-bottom: 0.5rem; }
+    .methodology-body p { margin: 0.5rem 0; }
+    .methodology-body code { background: #111a2e; padding: 0 3px; border-radius: 3px; color: #9fd0ee; }
+    .methodology-body b { color: #e0e0e8; }
+    .methodology-body .caveats { color: #f5b041; }
+    .methodology-body ul.caveats { margin: 0.2rem 0 0.4rem 1.1rem; }
+    .methodology-body ul.caveats li { margin: 0.3rem 0; color: #c8c8d4; }
+    .breakdown { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; margin: 0.3rem 0 0.6rem; }
+    .breakdown .seg { font-size: 0.82rem; }
+    .breakdown .seg b { font-size: 1.0rem; }
+    .seg.det b { color: #6fcf6f; }
+    .seg.sto b { color: #5dade2; }
+    .seg.miss b { color: #cf6f6f; }
   </style>
 </head>
 <body>
-  <h1>dd-goldfish &mdash; Doomsday goldfish simulator</h1>
+  <h1>dd-goldfish &mdash; Doomsday goldfish simulator
+    <a id="methodology-toggle" href="#methodology" class="info-badge" title="How this works &amp; caveats">&#9432; methodology</a>
+  </h1>
+
+  <details id="methodology" class="methodology">
+    <summary>&#9432; How this works &amp; known caveats</summary>
+    <div class="methodology-body">
+      <p><b>What it is.</b> A <b>Monte-Carlo simulation</b>: thousands of real games are played
+        out by a <b>rules-accurate MTG engine</b> (stack, priority, mana, CR-correct
+        resolution &mdash; spells resolve while on the stack, searches are real choices,
+        etc.), with a <b>pluggable "goldfishing" strategy</b> as the pilot. "Goldfishing"
+        means <b>solitaire &mdash; no opponent</b>: we measure only <i>how fast</i> the deck
+        assembles its combo, never whether it would win a real game.</p>
+
+      <p><b>The objective.</b> Everything is scored by <b>P(cast Doomsday by the cut-off
+        turn)</b>. The cut-off is the turn past which a slow combo is assumed dead (raced /
+        Wastelanded). A slow hand is therefore nearly worthless, so the strategy plays&mdash;and
+        mulligans&mdash;aggressively for speed.</p>
+
+      <p><b>How the pilot decides.</b> A backward solver estimates, for any state,
+        <b>P(cast by cut-off)</b> (<code>g</code>) from a hypergeometric model: deterministic
+        mana assembly, plus drawing into the missing piece, with cantrips counted as extra
+        card "looks." If a <b>guaranteed (no-draw) line</b> lands by the cut-off it
+        <i>settles</i> and executes it; otherwise it <i>gambles</i> &mdash; develops a black
+        source and digs (and rips a fetch when even the best case is too slow). The mulligan
+        keeps a hand only if its <code>g</code> clears a threshold.</p>
+
+      <p class="caveats"><b>Structural caveats (true for any deck).</b></p>
+      <ul class="caveats">
+        <li><b>The true P(ttd &le; K) is genuinely hard to compute.</b> The exact probability that
+          the combo lands by turn K depends on library order, <i>chained</i> card selection (a
+          cantrip that finds another cantrip), and play sequencing &mdash; it is intractable to
+          evaluate exactly. <code>g</code> is a deliberately tractable <i>approximation</i>, so it
+          carries bias. Everything below follows from that.</li>
+        <li><b><code>g</code> is pessimistic.</b> It ranks hands correctly (monotone) but tends to
+          <i>under-predict</i> the true rate, worst on weak hands (the mana model is
+          single-resource; the cantrip terms are approximate).</li>
+        <li><b>Cantrip "looks" are a heuristic.</b> Non-additive and time-capped, with no true
+          modeling of chained cantrips.</li>
+        <li><b>The mulligan bar is a tuned heuristic</b>, and only optimal <i>given</i> <code>g</code>.</li>
+        <li>The per-hand predicted P is the model's <i>own estimate</i> of <code>g</code>; the
+          <b>headline % is the measured simulation rate</b> &mdash; the honest number, free of that bias.</li>
+      </ul>
+    </div>
+  </details>
+
   <div class="layout">
     <div>
       <label for="deck">Decklist (paste Moxfield / MTGGoldfish / Arena text export)</label>
@@ -60,10 +124,8 @@
       </select>
       <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
       <input type="number" id="cutoff" value="4" min="1" max="10">
-      <label for="games">Games</label>
-      <input type="number" id="games" value="2000" min="1" max="50000">
-      <label for="turns">Turn cap</label>
-      <input type="number" id="turns" value="10" min="1" max="30">
+      <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
+      <input type="number" id="games" value="1000" min="1" max="50000">
       <br>
       <button id="run" disabled>Loading wasm&hellip;</button>
       <div id="progress" class="progress" hidden><div id="progress-fill" class="progress-fill"></div></div>
@@ -76,7 +138,12 @@
   </div>
 
   <script type="module">
-    import init, { run_goldfish_web, run_goldfish_asap_web, missing_cards_web } from './crates/dd-goldfish/pkg/dd_goldfish.js';
+    // `?v=` cache-busts the glue + wasm together on each deploy (the files have stable
+    // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
+    // Bump this string on every deploy.
+    import init, { run_goldfish_web, run_goldfish_asap_web, missing_cards_web }
+      from './crates/dd-goldfish/pkg/dd_goldfish.js?v=20260618c';
+    const WASM_VER = '20260618c';
 
     const REPO = 'boryas/mtgctl';
 
@@ -187,11 +254,19 @@
     }
 
     // GoldfishStats are additive counts, so a big run = sum of small batches.
-    function emptyStats() { return { games: 0, fails: 0, cast_turn: {}, protection: {} }; }
+    function emptyStats() {
+      return { games: 0, fails: 0, cast_turn: {}, protection: {},
+               cutoff: 0, mull_count: {}, mull_pred_sum: {}, deterministic_cast: 0, stochastic_cast: 0 };
+    }
     function mergeStats(a, p) {
       a.games += p.games; a.fails += p.fails;
+      a.cutoff = p.cutoff || a.cutoff;
+      a.deterministic_cast += (p.deterministic_cast || 0);
+      a.stochastic_cast += (p.stochastic_cast || 0);
       for (const [k, v] of Object.entries(p.cast_turn)) a.cast_turn[k] = (a.cast_turn[k] || 0) + v;
       for (const [k, v] of Object.entries(p.protection)) a.protection[k] = (a.protection[k] || 0) + v;
+      for (const [k, v] of Object.entries(p.mull_count || {})) a.mull_count[k] = (a.mull_count[k] || 0) + v;
+      for (const [k, v] of Object.entries(p.mull_pred_sum || {})) a.mull_pred_sum[k] = (a.mull_pred_sum[k] || 0) + v;
     }
 
     function bar(frac, cls = '') {
@@ -209,7 +284,7 @@
       const { strategy, cutoff } = opts;
       const successes = s.games - s.fails;
       const turns = Object.keys(s.cast_turn).map(Number).sort((a, b) => a - b);
-      const maxT = $('turns').valueAsNumber || (turns.at(-1) ?? 1);
+      const maxT = cutoff; // sim is capped at the cut-off, so that's the last turn
       let castSum = 0, weighted = 0;
       for (const t of turns) { castSum += s.cast_turn[t]; weighted += t * s.cast_turn[t]; }
       const meanCast = successes ? (weighted / successes) : NaN;
@@ -233,6 +308,34 @@
       const pilot = strategy === 'asap'
         ? 'Aggressive (cast Doomsday ASAP)' : 'Baseline (develop &amp; protect)';
 
+      // ASAP-only rich stats (the strategy emits the per-game STATS line).
+      const hasRich = s.mull_count && Object.keys(s.mull_count).length > 0;
+      let breakdownHtml = '', mullHtml = '';
+      if (hasRich) {
+        const det = s.deterministic_cast || 0, sto = s.stochastic_cast || 0;
+        const miss = Math.max(0, s.games - det - sto);
+        const pct = (x) => (100 * x / Math.max(1, s.games)).toFixed(1);
+        breakdownHtml = `
+          <h2>How the combo came together (by T${cutoff})</h2>
+          <div class="breakdown">
+            <span class="seg det">guaranteed line in opening hand <b>${pct(det)}%</b></span>
+            <span class="seg sto">drew / cantripped into it <b>${pct(sto)}%</b></span>
+            <span class="seg miss">not by the cut-off <b>${pct(miss)}%</b></span>
+          </div>`;
+        const totalKeeps = Object.values(s.mull_count).reduce((a, b) => a + b, 0) || 1;
+        const mullRows = [];
+        for (let k = 0; k <= 3; k++) {
+          const n = s.mull_count[k] || 0;
+          if (!n) continue;
+          const avg = (s.mull_pred_sum[k] || 0) / n;
+          mullRows.push(`<tr><td>${7 - k} cards${k ? ` <span class="muted">(${k} mull)</span>` : ''}</td>`
+            + `<td>${bar(n / totalKeeps)}</td><td class="muted">avg predicted ${(avg * 100).toFixed(0)}%</td></tr>`);
+        }
+        mullHtml = `
+          <h2>Mulligans &mdash; kept hand size + avg predicted P(cast by T${cutoff})</h2>
+          <table>${mullRows.join('')}</table>`;
+      }
+
       $('results').className = '';
       $('results').innerHTML = `
         <h2>Goldfish results <span class="muted">&mdash; ${pilot}</span></h2>
@@ -244,10 +347,12 @@
             <div class="stat">mean cast turn <b>${meanCast.toFixed(2)}</b></div>
             <div class="stat">mean protection <b>${meanProt.toFixed(2)}</b></div>
           </div>
+          ${breakdownHtml}
           <h2>P(Doomsday cast on turn t) &mdash; density (PDF)</h2>
           <table>${pdfRows.join('')}</table>
           <h2>P(Doomsday cast by turn t) &mdash; cumulative (CDF)</h2>
           <table>${cdfRows.join('')}</table>
+          ${mullHtml}
           <h2>Protection layers in hand at cast</h2>
           <table>${protRows.join('')}</table>
         </div>`;
@@ -256,9 +361,11 @@
     async function run() {
       const deck = $('deck').value;
       const games = $('games').valueAsNumber || 2000;
-      const turns = $('turns').valueAsNumber || 10;
       const strategy = $('strategy').value;
-      const cutoff = Math.min($('cutoff').valueAsNumber || 4, turns);
+      const cutoff = $('cutoff').valueAsNumber || 4;
+      // The objective is P(cast by the cut-off), so there's no reason to simulate
+      // past it: the turn cap is just the cut-off.
+      const turns = cutoff;
       const sim = (n) => strategy === 'asap'
         ? run_goldfish_asap_web(deck, n, turns, cutoff)
         : run_goldfish_web(deck, n, turns);
@@ -289,7 +396,16 @@
       }
     }
 
-    await init();
+    // The title badge opens the methodology panel (and scrolls to it).
+    $('methodology-toggle').addEventListener('click', () => { $('methodology').open = true; });
+
+    try {
+      await init(`./crates/dd-goldfish/pkg/dd_goldfish_bg.wasm?v=${WASM_VER}`);
+    } catch (e) {
+      console.error('wasm init failed', e);
+      $('run').textContent = 'wasm failed — hard-refresh (Ctrl/Cmd-Shift-R)';
+      throw e;
+    }
     const btn = $('run');
     btn.disabled = false; btn.textContent = 'Goldfish it';
     btn.addEventListener('click', run);

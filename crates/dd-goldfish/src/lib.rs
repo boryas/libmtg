@@ -66,6 +66,19 @@ pub struct GoldfishStats {
     pub cast_turn: BTreeMap<u8, u32>,
     /// (#protection cards in hand at resolution) → number of games.
     pub protection: BTreeMap<u32, u32>,
+    /// The cutoff turn the (ASAP) strategy played to (0 = N/A, e.g. baseline).
+    pub cutoff: u8,
+    /// mulligans-taken (0..3) → number of games KEPT at that level (hand size 7−k).
+    pub mull_count: BTreeMap<u8, u32>,
+    /// mulligans-taken → Σ of the kept hand's predicted P(cast by cutoff); divide by
+    /// `mull_count` for the average predicted probability at that hand size.
+    pub mull_pred_sum: BTreeMap<u8, f64>,
+    /// Games that cast by the cutoff whose OPENING hand already had a guaranteed
+    /// (no-draw) line by the cutoff.
+    pub deterministic_cast: u32,
+    /// Games that cast by the cutoff by DRAWING / cantripping into the line (opening
+    /// hand had no guaranteed line).
+    pub stochastic_cast: u32,
 }
 
 impl GoldfishStats {
@@ -132,6 +145,7 @@ fn run_goldfish_inner<F>(
     games: u32,
     protection: &[&str],
     max_turns: u8,
+    cutoff: u8,
     make_us: F,
     evaluator: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync>,
 ) -> GoldfishStats
@@ -145,6 +159,7 @@ where
 
     let mut stats = GoldfishStats {
         games,
+        cutoff,
         ..Default::default()
     };
     for _ in 0..games {
@@ -162,6 +177,7 @@ where
             on_play: None,
         };
         let state = run_game(scenario, &mut rng);
+        let cast_by_cutoff = state.terminal && cutoff > 0 && state.current_turn <= cutoff;
         if state.terminal {
             *stats.cast_turn.entry(state.current_turn).or_insert(0) += 1;
             let prot = state
@@ -172,8 +188,37 @@ where
         } else {
             stats.fails += 1;
         }
+        // Rich per-game stats from the strategy's machine-readable summary line:
+        // "STATS mull=<k> pred=<p> det=<0|1>" (emitted only by the ASAP strategy).
+        if let Some((mull, pred, det)) = parse_stats_line(&state.decision_log) {
+            *stats.mull_count.entry(mull).or_insert(0) += 1;
+            *stats.mull_pred_sum.entry(mull).or_insert(0.0) += pred;
+            if cast_by_cutoff {
+                if det {
+                    stats.deterministic_cast += 1;
+                } else {
+                    stats.stochastic_cast += 1;
+                }
+            }
+        }
     }
     stats
+}
+
+/// Parse the strategy's `STATS mull=<k> pred=<p> det=<0|1>` summary, if present.
+fn parse_stats_line(log: &[String]) -> Option<(u8, f64, bool)> {
+    let line = log.iter().find(|l| l.starts_with("STATS "))?;
+    let (mut mull, mut pred, mut det) = (None, None, None);
+    for tok in line.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("mull=") {
+            mull = v.parse::<u8>().ok();
+        } else if let Some(v) = tok.strip_prefix("pred=") {
+            pred = v.parse::<f64>().ok();
+        } else if let Some(v) = tok.strip_prefix("det=") {
+            det = v.parse::<u8>().ok().map(|n| n != 0);
+        }
+    }
+    Some((mull?, pred?, det?))
 }
 
 /// Run `games` goldfish simulations of `deck` (a `[(name, qty, board)]` list) and
@@ -191,6 +236,7 @@ pub fn run_goldfish(
         games,
         protection,
         max_turns,
+        0, // baseline has no cutoff objective / STATS line
         || Box::new(DoomsdayStrategy::new(MatchupInfo::default())),
         evaluator,
     )
@@ -211,6 +257,7 @@ pub fn run_goldfish_asap(
         games,
         protection,
         max_turns,
+        cutoff.min(u8::MAX as u32) as u8,
         move || Box::new(DDGoldfishStrategy::new(cutoff)),
         dd_goldfish_evaluator(),
     )
@@ -259,6 +306,30 @@ pub fn run_goldfish_compare(
         }
     }
     out
+}
+
+/// Debug 2×2 cell: the **baseline `DoomsdayStrategy` gameplay** but with the
+/// **aggressive `p_cast_by` mulligan** swapped in (`AggroMullStrategy`). Isolates how
+/// much of the ASAP edge is the mulligan vs the in-game play.
+pub fn run_goldfish_baseline_aggro(
+    deck: &[(String, i32, String)],
+    games: u32,
+    protection: &[&str],
+    max_turns: u8,
+    cutoff: u32,
+) -> GoldfishStats {
+    run_goldfish_inner(
+        deck,
+        games,
+        protection,
+        max_turns,
+        cutoff.min(u8::MAX as u32) as u8,
+        move || Box::new(strategy::AggroMullStrategy::new(
+            Box::new(DoomsdayStrategy::new(MatchupInfo::default())),
+            cutoff,
+        )),
+        dd_card_evaluator(MatchupInfo::default()),
+    )
 }
 
 /// Debug: **calibration** of the strategy's `P(cast by cutoff)` estimate. Run

@@ -17,6 +17,8 @@ enum StrategyKind {
     Baseline,
     /// Aggressive cast-Doomsday-ASAP, following the recipe solver toward a cutoff.
     Asap,
+    /// 2×2 probe: baseline gameplay + the aggressive p_cast_by mulligan.
+    BaselineAggro,
 }
 
 #[derive(Parser)]
@@ -102,6 +104,7 @@ fn main() -> ExitCode {
     let label = match args.strategy {
         StrategyKind::Baseline => "baseline",
         StrategyKind::Asap => "cast-ASAP",
+        StrategyKind::BaselineAggro => "baseline+aggro-mull",
     };
     eprintln!(
         "Goldfishing {} games ({label}, cap {} turns, cutoff T{})…",
@@ -112,6 +115,9 @@ fn main() -> ExitCode {
         StrategyKind::Asap => {
             run_goldfish_asap(&deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff)
         }
+        StrategyKind::BaselineAggro => dd_goldfish::run_goldfish_baseline_aggro(
+            &deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff,
+        ),
     };
     print_report(&stats, args.max_turns, args.cutoff);
     ExitCode::SUCCESS
@@ -157,6 +163,26 @@ fn print_report(s: &GoldfishStats, max_turns: u8, cutoff: u32) {
     println!("  failed:          {} ({:.1}%)", s.fails, 100.0 * s.fail_rate());
     println!("  mean cast turn:  {:.2}", s.mean_cast_turn());
     println!("  mean protection: {:.2}", s.mean_protection());
+
+    if !s.mull_count.is_empty() {
+        let kept: u32 = s.mull_count.values().sum();
+        println!("\n  mulligans (kept at each hand size) + avg predicted P(cast by T{cutoff_t}):");
+        for k in 0u8..=3 {
+            let n = s.mull_count.get(&k).copied().unwrap_or(0);
+            if n == 0 { continue; }
+            let avg = s.mull_pred_sum.get(&k).copied().unwrap_or(0.0) / n as f64;
+            println!("    {} cards: {:>6} ({:>4.1}% of keeps)   avg predicted {:.3}",
+                7 - k, n, 100.0 * n as f64 / kept.max(1) as f64, avg);
+        }
+        let det = s.deterministic_cast;
+        let sto = s.stochastic_cast;
+        let g = s.games.max(1) as f64;
+        println!("\n  how we got there (by T{cutoff_t}):");
+        println!("    deterministic line in opening hand: {:>6} ({:.1}%)", det, 100.0 * det as f64 / g);
+        println!("    drew / cantripped into it:          {:>6} ({:.1}%)", sto, 100.0 * sto as f64 / g);
+        println!("    not by cutoff:                      {:>6} ({:.1}%)",
+            s.games - det - sto, 100.0 * (s.games - det - sto) as f64 / g);
+    }
 
     println!("\n  cast-turn distribution:");
     let max_c = s.cast_turn.values().copied().max().unwrap_or(1);
