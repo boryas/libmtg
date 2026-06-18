@@ -518,7 +518,6 @@ pub(crate) fn eff_fetch_search(
     dest: ZoneId,
 ) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
-        use rand::Rng;
         // `matches` falls back to the catalog for unmaterialized library cards.
         let env = crate::ir::executor::BindEnv::new().with_controller(who);
         let candidates: Vec<ObjId> = state.library_of(who)
@@ -526,7 +525,16 @@ pub(crate) fn eff_fetch_search(
             .map(|c| c.id)
             .collect();
         if !candidates.is_empty() {
-            let chosen_id = candidates[state.rng.gen_range(0..candidates.len())];
+            // CR 701.19: which card to find is the searching player's CHOICE, not a
+            // random pick — route it through the strategy (`choose_for_effect`). The
+            // fetch ability is still on the stack during its own resolution (CR 608.2m),
+            // so the stack top is the source the strategy can use to recognize the
+            // fetch and pick (e.g.) a black source. Default strategy picks the first.
+            let src = state.stack.last().copied().unwrap_or_default();
+            let chosen_id = state
+                .with_strategy(who, |s, st| s.choose_for_effect(src, &candidates, st))
+                .filter(|id| candidates.contains(id))
+                .unwrap_or(candidates[0]);
             let name = state.objects.get(&chosen_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
             state.log(t, who, format!("search → {}", name));
             change_zone(chosen_id, dest, state, t, who);

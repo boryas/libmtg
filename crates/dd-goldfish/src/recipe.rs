@@ -24,7 +24,7 @@
 //! production graph — so this exercises the model, not a parallel re-derivation.
 
 use mtg_engine::{
-    obj_matches, ActivationTiming, CardDef, Color, PlayerId, SimState, SourceZone,
+    obj_matches, ActivationTiming, CardDef, Color, ObjId, PlayerId, SimState, SourceZone,
 };
 
 const DOOMSDAY: &str = "Doomsday";
@@ -537,7 +537,7 @@ pub fn expected_draws_to_out(library: u32, outs: u32) -> f64 {
 
 /// Whether `who` already has the payoff accessible: Doomsday in hand, or a
 /// library-top tutor in hand that can fetch one (so no draw is needed to find it).
-fn payoff_in_hand(state: &SimState, who: PlayerId) -> bool {
+pub fn payoff_in_hand(state: &SimState, who: PlayerId) -> bool {
     state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY) || payoff_tutor_pip(state, who).is_some()
 }
 
@@ -779,9 +779,17 @@ fn p_at_least_one(library: u32, outs: u32, draws: u32) -> f64 {
 /// The stochastic side of `P(cast by cutoff)` given a draw budget `draws`: the mana
 /// side (deterministic by `cutoff`, else draw a `mana_gap` out) times the payoff
 /// side (in hand, else draw it). Crude independence; v1.
+///
+/// The draw budget is enlarged by the looks our castable cantrips provide
+/// (`cantrip_looks`): a cantrip lets you SEE extra cards toward the gap, so it
+/// behaves like extra hypergeometric draws. This is what stops `p_cast_by` from
+/// being cantrip-blind (treating "find the missing piece" as only the blind natural
+/// draws). It is the principled `g`-improvement: every decision keying off
+/// `p_cast_by` (mulligan + all selection) now credits a hand's digging.
 fn p_cast_stochastic(state: &SimState, who: PlayerId, cutoff: u32, draws: u32) -> f64 {
     let c = project(state, who);
     let (mana_outs, payoff_outs, library) = gap_outs(state, who);
+    let draws = draws + cantrip_looks(state, who, cutoff);
     let p_mana = if bbb_turn(&c, cutoff, c.pool).is_some() {
         1.0
     } else {
@@ -793,6 +801,69 @@ fn p_cast_stochastic(state: &SimState, who: PlayerId, cutoff: u32, draws: u32) -
         p_at_least_one(library, payoff_outs, draws)
     };
     p_mana * p_payoff
+}
+
+/// Whether `who` can produce blue (to cast the blue cantrips) — a blue source in
+/// play or playable from hand (a blue land, a fetch that can find one, or a petal).
+fn has_blue_source(state: &SimState, who: PlayerId) -> bool {
+    let inplay = state.permanents_of(who).any(|p| {
+        !p.bf().is_some_and(|bf| bf.tapped)
+            && state.def_of(p.id).is_some_and(|d| produces_color(d, Color::Blue))
+    });
+    let inhand = state.hand_of(who).any(|c| {
+        state.catalog.get(&c.catalog_key).is_some_and(|d| {
+            (d.is_land()
+                && (produces_color(d, Color::Blue)
+                    || (is_fetch(d) && library_has_target_color(state, who, Color::Blue))))
+                || is_free_artifact_of_color(d, Color::Blue)
+        })
+    });
+    inplay || inhand
+}
+
+/// Whether a SHUFFLE source is available (a fetch in hand/play, or a shuffle-cantrip
+/// like Ponder in hand) — it refreshes the top of the library so successive cantrips
+/// see new cards (otherwise a second look mostly re-sees arranged/put-back cards).
+fn has_shuffle_source(state: &SimState, who: PlayerId) -> bool {
+    let perm_fetch = state.permanents_of(who).any(|p| state.def_of(p.id).is_some_and(is_fetch));
+    let hand = state.hand_of(who).any(|c| {
+        state.catalog.get(&c.catalog_key).is_some_and(|d| is_fetch(d) || d.shuffles_on_resolve())
+    });
+    perm_fetch || hand
+}
+
+/// The "looks" our castable cantrips contribute to the find budget. Each cantrip's
+/// sight is read structurally (`cards_seen_on_resolve`: Ponder 4 / Brainstorm 3 /
+/// Consider 2 / …). NON-ADDITIVE without a shuffle: only the best cantrip counts in
+/// full; each additional one nets ~1 (it re-sees arranged/put-back cards) UNLESS a
+/// shuffle source (fetch / Ponder) refreshes the top, when they're additive again.
+/// Capped by realizable time (~one cantrip per remaining turn before the cutoff) and
+/// gated on castability (a blue source). APPROXIMATION — see `p_cast_stochastic`.
+fn cantrip_looks(state: &SimState, who: PlayerId, cutoff: u32) -> u32 {
+    if !has_blue_source(state, who) {
+        return 0;
+    }
+    let mut seen: Vec<u32> = state
+        .hand_of(who)
+        .filter_map(|c| {
+            let def = state.catalog.get(&c.catalog_key)?;
+            (def.digs_on_resolve() && def.is_blue()).then(|| def.cards_seen_on_resolve())
+        })
+        .collect();
+    if seen.is_empty() {
+        return 0;
+    }
+    seen.sort_unstable_by(|a, b| b.cmp(a)); // best (most sight) first
+    // Time cap: ~one cantrip per remaining turn before the cutoff cast.
+    let elapsed = (state.current_turn as u32).max(1);
+    let cap = cutoff.saturating_sub(elapsed).max(1) as usize;
+    seen.truncate(cap);
+    let shuffle = has_shuffle_source(state, who);
+    let mut looks = seen[0];
+    for &s in &seen[1..] {
+        looks += if shuffle { s } else { 1 };
+    }
+    looks
 }
 
 /// `P(cast Doomsday by turn cutoff)` — THE objective. `1.0` if a deterministic line
@@ -931,10 +1002,211 @@ pub fn best_brainstorm(
     (buried.iter().map(|s| s.to_string()).collect(), p)
 }
 
+// ── Card valuation: the solver's role classification for the strategy ─────────
+//
+// The strategy (DDGoldfishStrategy) and the goldfish card-evaluator need a single
+// "how useful is this card toward casting Doomsday?" verdict. `card_role` is that
+// classification, read structurally from card IR (the same private helpers the
+// backward planner uses) — no card names except the payoff's own identity. The
+// strategy keys its proactive action choice off the role; the evaluator turns it
+// into the scalar `dd_card_value` that drives the engine's evaluator-defaulted
+// decisions (Brainstorm bury / scry / surveil).
+
+/// What role a card plays toward casting Doomsday fast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardRole {
+    /// Doomsday itself — the payoff.
+    Payoff,
+    /// A library-top tutor that can fetch the payoff (Personal/Vampiric Tutor).
+    PayoffTutor,
+    /// A ritual spell that adds black on resolution (Dark Ritual).
+    Ritual,
+    /// A free mana artifact that makes black (Lotus Petal).
+    Petal,
+    /// A fetch land that can find a black source from the current library.
+    Fetch,
+    /// An untapped black-producing land (Underground Sea, Swamp).
+    BlackLandUntapped,
+    /// A black-producing land that enters tapped (surveil dual).
+    BlackLandTapped,
+    /// A cantrip / dig spell (Ponder, Brainstorm, Consider, Flow State, Preordain).
+    Cantrip,
+    /// A blue (non-black) mana source — useful only to cast cantrips/tutors.
+    BlueSource,
+    /// Anything else: dead weight pre-Doomsday.
+    Other,
+}
+
+/// Classify `id`'s role toward casting Doomsday (structural, from IR). Fetches and
+/// payoff-tutors are grounded against the current library (a fetch with no black
+/// target, or a tutor that can't reach a Doomsday, is just `Other`).
+pub fn card_role(state: &SimState, who: PlayerId, id: ObjId) -> CardRole {
+    let Some(obj) = state.objects.get(&id) else { return CardRole::Other };
+    if obj.catalog_key == DOOMSDAY {
+        return CardRole::Payoff;
+    }
+    let Some(def) = state.catalog.get(&obj.catalog_key) else { return CardRole::Other };
+    if let Some(filter) = def.library_top_tutor() {
+        let finds_dd = state
+            .library_of(who)
+            .any(|c| c.catalog_key == DOOMSDAY && obj_matches(filter, c.id, state));
+        if finds_dd {
+            return CardRole::PayoffTutor;
+        }
+    }
+    if is_black_ritual(def) {
+        return CardRole::Ritual;
+    }
+    if is_free_black_artifact(def) {
+        return CardRole::Petal;
+    }
+    if def.is_land() {
+        if is_fetch(def) {
+            return if library_has_black_target(state, who) {
+                CardRole::Fetch
+            } else {
+                CardRole::Other
+            };
+        }
+        if produces_black(def) {
+            return if def.enters_tapped() {
+                CardRole::BlackLandTapped
+            } else {
+                CardRole::BlackLandUntapped
+            };
+        }
+        if produces_color(def, Color::Blue) {
+            return CardRole::BlueSource;
+        }
+        return CardRole::Other;
+    }
+    if (def.is_instant() || def.is_sorcery()) && def.digs_on_resolve() {
+        return CardRole::Cantrip;
+    }
+    // A free artifact that taps for blue but not black — still a blue source.
+    if def.mana_cost().trim() == "0" && produces_color(def, Color::Blue) {
+        return CardRole::BlueSource;
+    }
+    CardRole::Other
+}
+
+/// REFERENCE heuristic value table — retained ONLY for A/B decision comparison
+/// (`DDGoldfishStrategy`'s compare mode diffs the principled policy against it).
+/// The strategy's actual play decisions do **not** consult this; they use the
+/// objective (`min_ttd` / `p_cast_by` / `mana_gap`). Kept so we can see exactly
+/// where the tuned table and the principled policy disagree while debugging.
+pub fn dd_card_value(state: &SimState, who: PlayerId, id: ObjId) -> f64 {
+    match card_role(state, who, id) {
+        CardRole::Payoff => {
+            let secured = state.hand_of(who).any(|c| c.id != id && c.catalog_key == DOOMSDAY);
+            if secured { 0.15 } else { 1.0 }
+        }
+        CardRole::PayoffTutor => 0.95,
+        CardRole::BlackLandUntapped => 0.85,
+        CardRole::Fetch => 0.82,
+        CardRole::Ritual => 0.80,
+        CardRole::Petal => 0.78,
+        CardRole::BlackLandTapped => 0.70,
+        CardRole::Cantrip => 0.50,
+        CardRole::BlueSource => 0.40,
+        CardRole::Other => 0.05,
+    }
+}
+
+// ── min-TTD: the optimistic "if everything goes perfectly" cast turn ──────────
+//
+// Three distinct quantities (see the dd-goldfish-strategy charter):
+//   • ttd       — the random variable (E[ttd], P(ttd ≤ K); see `p_cast_by`/`e_ttd`).
+//   • det-ttd   — the GUARANTEED turn using no draws (`deterministic_cast_turn`).
+//   • min-ttd   — the OPTIMISTIC turn assuming the most helpful cards the library
+//                 actually contains are drawn on schedule. A scalar bound, and
+//                 always ≤ det-ttd (a lucky draw only helps). 3 black lands +
+//                 Doomsday is det-ttd 3 but min-ttd 2 (a drawn petal/ritual).
+//
+// min-ttd is the feasibility gate: `min-ttd > cutoff` ⟹ even perfect luck can't
+// cast by the cutoff ⟹ P(ttd ≤ cutoff) = 0, so a keep is dead (bin/shuffle and hope
+// for a hand whose min-ttd ≤ cutoff). The gap det-ttd − min-ttd is the value of luck
+// (and thus of digging).
+
+/// One representative library card per *helpful* kind, in acceleration priority
+/// (payoff → ritual → petal → untapped black / fetch → tapped black). These are the
+/// cards a favorable draw would supply; used to compute the optimistic min-ttd.
+fn helpful_library_reps(state: &SimState, who: PlayerId) -> Vec<String> {
+    let need_payoff = !payoff_in_hand(state, who);
+    let (mut pay, mut rit, mut pet, mut ub, mut tb): (
+        Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
+    ) = (None, None, None, None, None);
+    for card in state.library_of(who) {
+        match card_role(state, who, card.id) {
+            CardRole::Payoff | CardRole::PayoffTutor if need_payoff => {
+                pay.get_or_insert_with(|| card.catalog_key.clone());
+            }
+            CardRole::Ritual => { rit.get_or_insert_with(|| card.catalog_key.clone()); }
+            CardRole::Petal => { pet.get_or_insert_with(|| card.catalog_key.clone()); }
+            CardRole::BlackLandUntapped | CardRole::Fetch => {
+                ub.get_or_insert_with(|| card.catalog_key.clone());
+            }
+            CardRole::BlackLandTapped => { tb.get_or_insert_with(|| card.catalog_key.clone()); }
+            _ => {}
+        }
+    }
+    [pay, rit, pet, ub, tb].into_iter().flatten().collect()
+}
+
+/// The optimistic min-ttd (≤ `max_turn`, else `None`): the earliest turn Doomsday is
+/// castable if the most helpful library cards arrive as natural draws. Reuses the
+/// validated no-draw reachability with those cards staged as a known top
+/// (`deterministic_cast_turn_with_known` already mins against the no-draw line).
+/// The staging order is the acceleration priority (an internal bound computation,
+/// not a play decision); if imperfect it only over-estimates min-ttd — still a valid
+/// optimistic bound.
+pub fn min_ttd(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
+    let reps = helpful_library_reps(state, who);
+    let seq: Vec<&str> = reps.iter().map(String::as_str).collect();
+    deterministic_cast_turn_with_known(state, who, &seq, false, max_turn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mtg_engine::{build_catalog, PlayerState, Zone};
+
+    /// PROBE (cantrip-aware `g` sanity): a hand with HALF the combo + cantrips to find
+    /// the rest must score high; cantrips ALONE (no combo half) must score low — the
+    /// cantrips amplify existing pieces, they aren't a combo by themselves.
+    #[test]
+    fn cantrips_plus_half_score_high_cantrips_alone_low() {
+        let names: Vec<String> = crate::sample_doomsday_deck()
+            .iter()
+            .flat_map(|(n, q, _)| std::iter::repeat(n.clone()).take((*q).max(0) as usize))
+            .collect();
+        let g = |hand: &[&str]| -> f64 {
+            let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+            s.catalog = build_catalog();
+            let mut rest = names.clone();
+            for &h in hand {
+                if let Some(p) = rest.iter().position(|n| n == h) { rest.remove(p); }
+            }
+            for &h in hand { s.place_card(PlayerId::Us, h, Zone::Hand { known: false }); }
+            for n in &rest { s.place_card(PlayerId::Us, n, Zone::Library); }
+            p_cast_by(&s, PlayerId::Us, 4)
+        };
+        let bricks = ["Wasteland", "Daze", "Murktide Regent", "Force of Will"];
+        let two_cantrips = g(&["Island", "Ponder", "Brainstorm", bricks[0], bricks[1], bricks[2], bricks[3]]);
+        let rit_only     = g(&["Underground Sea", "Dark Ritual", bricks[0], bricks[1], bricks[2], bricks[3], "Thoughtseize"]);
+        let rit_cantrips = g(&["Underground Sea", "Dark Ritual", "Ponder", "Brainstorm", bricks[0], bricks[1], bricks[2]]);
+        let dd_cantrips  = g(&["Underground Sea", "Doomsday", "Ponder", "Brainstorm", bricks[0], bricks[1], bricks[2]]);
+        eprintln!(
+            "PROBE p_cast_by(T4): 2-cantrips-only={two_cantrips:.3}  rit-only={rit_only:.3}  \
+             rit+cantrips={rit_cantrips:.3}  dd+cantrips={dd_cantrips:.3}"
+        );
+        assert!(rit_cantrips > two_cantrips + 0.1,
+            "ritual+cantrips ({rit_cantrips:.3}) should clearly beat 2-cantrips-only ({two_cantrips:.3})");
+        assert!(dd_cantrips > two_cantrips + 0.1,
+            "dd+cantrips ({dd_cantrips:.3}) should clearly beat 2-cantrips-only ({two_cantrips:.3})");
+        assert!(rit_cantrips >= rit_only,
+            "cantrips should not hurt a ritual hand ({rit_cantrips:.3} vs {rit_only:.3})");
+    }
     use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
     use std::collections::HashMap;
 

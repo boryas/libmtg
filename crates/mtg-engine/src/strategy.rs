@@ -183,6 +183,41 @@ pub trait Strategy {
         scored.into_iter().map(|(id, _)| id).collect()
     }
 
+    /// Scry N (CR 701.18): look at the top N cards, then put any number on the
+    /// bottom and the rest back on top in any order. Returns
+    /// `(keep_on_top_in_order, to_bottom)` — both player decisions (which to bottom
+    /// + the order of the kept). The engine sanitizes the result (only the
+    /// looked-at ids, deduped; any omitted card is kept on top).
+    /// Default: keep cards the evaluator scores ≥ 0.3 (in look order), bottom the
+    /// rest — matching the old engine `scry_by_evaluator` behavior.
+    fn scry(&mut self, top: &[ObjId], state: &SimState) -> (Vec<ObjId>, Vec<ObjId>) {
+        let who = self.player_id();
+        let eval = std::sync::Arc::clone(&state.evaluate_card);
+        let (mut keep, mut bottom) = (Vec::new(), Vec::new());
+        for &id in top {
+            if eval(who, id, state) >= 0.3 { keep.push(id); } else { bottom.push(id); }
+        }
+        (keep, bottom)
+    }
+
+    /// "Put N cards from your hand on top of your library in any order"
+    /// (Brainstorm). Returns the chosen cards top-to-bottom (`chosen[0]` ends up
+    /// closest to the top, drawn first). The engine sanitizes (only hand ids,
+    /// deduped, truncated to `count`). `top` is the placement (always true for
+    /// Brainstorm; `false` would be bottom).
+    /// Default: the `count` lowest-value cards (via the evaluator) — matching the
+    /// old engine behavior of binning the worst cards.
+    fn put_on_library(&mut self, count: usize, candidates: &[ObjId], _top: bool,
+                      state: &SimState) -> Vec<ObjId> {
+        let who = self.player_id();
+        let eval = std::sync::Arc::clone(&state.evaluate_card);
+        let mut scored: Vec<(ObjId, f64)> = candidates.iter()
+            .map(|&id| (id, eval(who, id, state)))
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(count).map(|(id, _)| id).collect()
+    }
+
     /// Drain accumulated decision-log entries. Called by the engine after each
     /// strategy invocation; entries are appended to `SimState::decision_log`.
     fn drain_decisions(&mut self) -> Vec<String> { Vec::new() }

@@ -18,7 +18,7 @@ mod strategy;
 mod objective;
 
 pub use objective::DoomsdayResolvedObjective;
-pub use strategy::{DoomsdayStrategy, GenericOppStrategy, MatchupInfo};
+pub use strategy::{dd_should_mulligan, DoomsdayStrategy, GenericOppStrategy, MatchupInfo};
 
 #[cfg(test)]
 mod tests;

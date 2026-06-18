@@ -3342,28 +3342,41 @@ fn resolve_top_of_stack(
     t: u8,
     _ap: PlayerId,
 ) {
-    let id = state.stack.pop().unwrap();
+    // CR 608.2m: a spell/ability stays on the stack while it resolves; it leaves
+    // the stack only as the FINAL step of resolution (to the graveyard / battlefield,
+    // or it ceases to exist). Peek here and let each branch remove it *after* its
+    // effect runs — so effects that read the stack or count the graveyard (Flow
+    // State's instant∧sorcery check, delve, threshold) see the correct state and do
+    // not observe the resolving object as already in the graveyard.
+    let id = *state.stack.last().unwrap();
     let is_ability = state.objects.get(&id).map_or(false, |o| o.ability().is_some());
     if is_ability {
         // Card-less stack object: an activated/triggered ability resolves, then
-        // ceases to exist (CR 608.2m). Remove it up front and take ownership of
-        // its payload so the effect can mutate state freely.
-        let obj = state.objects.remove(&id).expect("ability object on stack");
-        let controller = obj.controller;
-        let ObjectRole::StackAbility(ability) = obj.role else {
-            panic!("ability object carries an ability payload");
+        // ceases to exist (CR 608.2m). Clone its payload (Effect is an Arc — cheap)
+        // but LEAVE the object on the stack while the effect runs; remove it after.
+        let (effect, chosen_targets, choice_spec, costs_paid_ctx, controller) = {
+            let obj = state.objects.get(&id).expect("ability object on stack");
+            let controller = obj.controller;
+            let ObjectRole::StackAbility(ability) = &obj.role else {
+                panic!("ability object carries an ability payload");
+            };
+            (ability.effect.clone(), ability.chosen_targets.clone(),
+             ability.choice_spec.clone(), ability.costs_paid_ctx.clone(), controller)
         };
-        let mut effect_targets = ability.chosen_targets.clone();
-        if let Some(ref spec) = ability.choice_spec {
+        let mut effect_targets = chosen_targets;
+        if let Some(ref spec) = choice_spec {
             let choices = enumerate_choices(spec, controller, state);
             if let Some(chosen) = state.with_strategy(controller, |s, st| s.choose_for_effect(id, &choices, st)) {
                 effect_targets.insert(0, chosen);
             }
         }
         // Make costs_paid_ctx visible to the effect closure (e.g. ninjutsu reads attack_target).
-        state.resolving_costs_ctx = ability.costs_paid_ctx;
-        ability.effect.call(state, t, &effect_targets);
+        state.resolving_costs_ctx = costs_paid_ctx;
+        effect.call(state, t, &effect_targets);
         state.resolving_costs_ctx = CostsPaidCtx::default();
+        // Resolution complete → the ability leaves the stack and ceases to exist.
+        state.stack.retain(|&x| x != id);
+        state.objects.remove(&id);
     } else if state.objects.contains_key(&id) {
         // It's a spell (card on the stack)
         let spell = state.objects[&id].spell().cloned().unwrap_or_else(|| SpellState {
@@ -3386,6 +3399,8 @@ fn resolve_top_of_stack(
             if let Some(ref eff) = spell.effect {
                 eff.call(state, t, &spell.chosen_targets);
             }
+            // Resolved → leaves the stack (exiled on adventure).
+            state.stack.retain(|&x| x != id);
             let back_name = state.catalog.get(name.as_str())
                 .and_then(|d| d.back.as_ref())
                 .map(|b| b.name.as_str())
@@ -3402,9 +3417,17 @@ fn resolve_top_of_stack(
                 .unwrap_or(false);
             if !is_perm {
                 state.log(t, owner, format!("{} resolves", name));
-                change_zone(id, ZoneId::Graveyard, state, t, owner);
+                // The effect runs WHILE the spell is still on the stack (CR 608.2m):
+                // graveyard-counting effects (Flow State, delve, threshold) must not
+                // see this spell in the graveyard — it isn't there yet.
                 eff.call(state, t, &spell.chosen_targets);
+                // Final resolution step: it leaves the stack for the graveyard.
+                state.stack.retain(|&x| x != id);
+                change_zone(id, ZoneId::Graveyard, state, t, owner);
             } else {
+                // A permanent spell becomes the permanent: it leaves the stack and
+                // enters the battlefield.
+                state.stack.retain(|&x| x != id);
                 // Stash costs-paid ctx so ETB replacement effects (e.g. Murktide) can read it.
                 state.resolving_costs_ctx = spell.costs_paid_ctx.clone();
                 // Move the spell object from Stack → Battlefield (same object, no
@@ -3420,6 +3443,7 @@ fn resolve_top_of_stack(
             }
         } else {
             state.log(t, owner, format!("{} resolves", name));
+            state.stack.retain(|&x| x != id);
             change_zone(id, ZoneId::Graveyard, state, t, owner);
         }
 

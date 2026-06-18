@@ -501,7 +501,33 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::Scry { who, n } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(n, state, env)) as usize;
-            scry_by_evaluator(state, who, n);
+            let top: Vec<ObjId> = state.library_of(who).take(n).map(|o| o.id).collect();
+            if top.is_empty() {
+                return ExecResult::Ok;
+            }
+            // Keep/bottom + the kept order is a player decision (CR 701.18).
+            let (keep, bottom) = state.with_strategy(who, |s, st| s.scry(&top, st));
+            // Sanitize: only looked-at ids, deduped; any omitted card stays on top.
+            let mut seen: std::collections::HashSet<ObjId> = Default::default();
+            let mut keep: Vec<ObjId> =
+                keep.into_iter().filter(|id| top.contains(id) && seen.insert(*id)).collect();
+            let bottom: Vec<ObjId> =
+                bottom.into_iter().filter(|id| top.contains(id) && seen.insert(*id)).collect();
+            for &id in &top {
+                if !keep.contains(&id) && !bottom.contains(&id) {
+                    keep.push(id);
+                }
+            }
+            let lib = &mut state.player_mut(who).library_order;
+            for _ in 0..top.len().min(lib.len()) {
+                lib.pop_front();
+            }
+            for &id in keep.iter().rev() {
+                lib.push_front(id);
+            }
+            for &id in &bottom {
+                lib.push_back(id);
+            }
             ExecResult::Ok
         }
 
@@ -737,35 +763,37 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::PutOnLibrary { who, count, from, top } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(count, state, env)) as usize;
-            let from_kind = *from;
-            for _ in 0..n {
-                let eval_cb = std::sync::Arc::clone(&state.evaluate_card);
-                let candidates: Vec<(ObjId, f64)> = match from_kind {
-                    ZoneKindSel::Hand => state.hand_of(who)
-                        .map(|c| (c.id, eval_cb(who, c.id, state)))
-                        .collect(),
-                    _ => break,
-                };
-                let Some(&(pick, _)) = candidates.iter()
-                    .min_by(|a, b| a.1.partial_cmp(&b.1)
-                        .unwrap_or(std::cmp::Ordering::Equal))
-                else { break; };
-                change_zone(pick, ZoneId::Library, state, t, who);
-                let lib = match who {
-                    PlayerId::Us => &mut state.player_mut(PlayerId::Us).library_order,
-                    PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
-                };
-                if *top && lib.back() == Some(&pick) {
-                    lib.pop_back();
-                    lib.push_front(pick);
+            if !matches!(*from, ZoneKindSel::Hand) {
+                return ExecResult::Ok; // only hand source is modelled
+            }
+            // WHICH cards (and their order) is a player decision (Brainstorm:
+            // "two cards from your hand ... in any order"), routed through Strategy.
+            let candidates: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
+            let chosen = state.with_strategy(who, |s, st| s.put_on_library(n, &candidates, *top, st));
+            // Sanitize: only hand ids, deduped, at most `count`.
+            let mut seen: std::collections::HashSet<ObjId> = Default::default();
+            let chosen: Vec<ObjId> = chosen
+                .into_iter()
+                .filter(|id| candidates.contains(id) && seen.insert(*id))
+                .take(n)
+                .collect();
+            for &id in &chosen {
+                change_zone(id, ZoneId::Library, state, t, who);
+            }
+            // Place on top with `chosen[0]` closest to the top (drawn first).
+            if *top {
+                let lib = &mut state.player_mut(who).library_order;
+                for &id in chosen.iter().rev() {
+                    if let Some(pos) = lib.iter().position(|&x| x == id) {
+                        lib.remove(pos);
+                        lib.push_front(id);
+                    }
                 }
             }
-            if matches!(from_kind, ZoneKindSel::Hand) {
-                let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
-                for id in remaining {
-                    if let Some(card) = state.objects.get_mut(&id) {
-                        card.set_zone(Zone::Hand { known: false });
-                    }
+            let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
+            for id in remaining {
+                if let Some(card) = state.objects.get_mut(&id) {
+                    card.set_zone(Zone::Hand { known: false });
                 }
             }
             ExecResult::Ok
@@ -1741,39 +1769,6 @@ fn obj_ids_of(v: Value) -> Vec<ObjId> {
 /// Evaluator-driven scry: mirrors `effects::eff_scry`. Scores each of the top
 /// `n` library cards for `who`; scores ≥ 0.3 stay on top in order, the rest go
 /// to the bottom.
-fn scry_by_evaluator(state: &mut SimState, who: PlayerId, n: usize) {
-    let eval = std::sync::Arc::clone(&state.evaluate_card);
-    let top_ids: Vec<ObjId> = match who {
-        PlayerId::Us => state.player(PlayerId::Us).library_order.iter().take(n).copied().collect(),
-        PlayerId::Opp => state.player(PlayerId::Opp).library_order.iter().take(n).copied().collect(),
-    };
-    if top_ids.is_empty() {
-        return;
-    }
-    let mut keep_top = Vec::new();
-    let mut send_bottom = Vec::new();
-    for &id in &top_ids {
-        if eval(who, id, state) >= 0.3 {
-            keep_top.push(id);
-        } else {
-            send_bottom.push(id);
-        }
-    }
-    let lib = match who {
-        PlayerId::Us => &mut state.player_mut(PlayerId::Us).library_order,
-        PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
-    };
-    for _ in 0..top_ids.len().min(lib.len()) {
-        lib.pop_front();
-    }
-    for &id in keep_top.iter().rev() {
-        lib.push_front(id);
-    }
-    for &id in &send_bottom {
-        lib.push_back(id);
-    }
-}
-
 fn expect_player(v: Value) -> PlayerId {
     if let Value::Player(p) = v {
         p

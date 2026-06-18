@@ -848,6 +848,71 @@ fn first_top_library_search(
     }
 }
 
+/// True if an IR action tree contains a card-selection / card-draw primitive —
+/// the signature of a cantrip or dig spell (`Draw`, `Dig`, `Scry`, `Surveil`,
+/// `OrderTop`). Used by [`CardDef::digs_on_resolve`]. A library-top tutor
+/// (`Search`→top) is intentionally excluded (see [`first_top_library_search`]).
+fn body_digs(action: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action;
+    match action {
+        Action::Draw { .. }
+        | Action::Dig { .. }
+        | Action::Scry { .. }
+        | Action::Surveil { .. }
+        | Action::OrderTop { .. } => true,
+        Action::Sequence(actions) => actions.iter().any(body_digs),
+        Action::IfThen { then, else_, .. } => {
+            body_digs(then) || else_.as_ref().map_or(false, |e| body_digs(e))
+        }
+        Action::MayDo { action, .. } => body_digs(action),
+        Action::ForEach { body, .. } => body_digs(body),
+        Action::Choose { options, .. } => options.iter().any(|o| body_digs(&o.action)),
+        _ => false,
+    }
+}
+
+/// Total cards a resolve-body lets you SEE for selection — the sum of the counts on
+/// `Draw` / `OrderTop` / `Dig` / `Surveil` / `Scry` / `Look`. (Ponder: OrderTop 3 +
+/// Draw 1 = 4; Brainstorm: Draw 3 = 3; Consider: Surveil 1 + Draw 1 = 2.) Branches
+/// take the max (you see one branch's cards). Non-literal counts contribute 0.
+fn body_cards_seen(action: &crate::ir::action::Action) -> u32 {
+    use crate::ir::action::Action;
+    use crate::ir::expr::Expr;
+    let n = |e: &Expr| if let Expr::Num(v) = e { (*v).max(0) as u32 } else { 0 };
+    match action {
+        Action::Draw { n: c, .. }
+        | Action::OrderTop { n: c, .. }
+        | Action::Dig { n: c, .. }
+        | Action::Surveil { n: c, .. }
+        | Action::Scry { n: c, .. }
+        | Action::Look { n: c, .. } => n(c),
+        Action::Sequence(actions) => actions.iter().map(body_cards_seen).sum(),
+        Action::IfThen { then, else_, .. } => {
+            body_cards_seen(then).max(else_.as_ref().map_or(0, |e| body_cards_seen(e)))
+        }
+        Action::MayDo { action, .. } => body_cards_seen(action),
+        Action::ForEach { body, .. } => body_cards_seen(body),
+        Action::Choose { options, .. } => options.iter().map(|o| body_cards_seen(&o.action)).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// True if a resolve-body can shuffle the library (Ponder's `MayDo(Shuffle)`).
+fn body_shuffles(action: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action;
+    match action {
+        Action::Shuffle { .. } => true,
+        Action::Sequence(actions) => actions.iter().any(body_shuffles),
+        Action::IfThen { then, else_, .. } => {
+            body_shuffles(then) || else_.as_ref().map_or(false, |e| body_shuffles(e))
+        }
+        Action::MayDo { action, .. } => body_shuffles(action),
+        Action::ForEach { body, .. } => body_shuffles(body),
+        Action::Choose { options, .. } => options.iter().any(|o| body_shuffles(&o.action)),
+        _ => false,
+    }
+}
+
 /// True if an IR action tree contains a `Tap` (used to recognise the
 /// `Replace(Sequence([Move, Tap]))` shape of an enters-tapped replacement).
 fn action_taps_self(action: &crate::ir::action::Action) -> bool {
@@ -1069,6 +1134,45 @@ impl CardDef {
             return None;
         }
         first_top_library_search(&modes[0].body)
+    }
+
+    /// True if this card's on-resolve effect looks at / selects / draws cards — a
+    /// cantrip or dig spell (a `Draw`, `Dig`, `Scry`, `Surveil`, or `OrderTop`
+    /// somewhere in its IR body). Read structurally, no card names; a multi-mode
+    /// spell qualifies if ANY mode digs. Permanents/lands (no `OnResolve` body) and
+    /// the empty-bodied combo payload are never diggers. A library-top tutor
+    /// (`Search`→top) is deliberately NOT counted here — that's [`library_top_tutor`].
+    pub fn digs_on_resolve(&self) -> bool {
+        use crate::ir::ability::AbilityKind;
+        self.abilities.iter().any(|a| match &a.kind {
+            AbilityKind::OnResolve { modes } => modes.iter().any(|m| body_digs(&m.body)),
+            _ => false,
+        })
+    }
+
+    /// How many cards this card's on-resolve effect lets you SEE for selection — the
+    /// "looks" of a cantrip (Ponder 4, Brainstorm 3, Consider 2, …), read structurally
+    /// from the IR (no name table). 0 for non-spells / non-diggers. Multi-mode takes
+    /// the max over modes.
+    pub fn cards_seen_on_resolve(&self) -> u32 {
+        use crate::ir::ability::AbilityKind;
+        self.abilities.iter().find_map(|a| match &a.kind {
+            AbilityKind::OnResolve { modes } => {
+                Some(modes.iter().map(|m| body_cards_seen(&m.body)).max().unwrap_or(0))
+            }
+            _ => None,
+        }).unwrap_or(0)
+    }
+
+    /// True if this card's on-resolve effect can shuffle the library (Ponder). Used
+    /// to model that a shuffle "refreshes" the top so successive cantrips see new
+    /// cards. Structural, no name check.
+    pub fn shuffles_on_resolve(&self) -> bool {
+        use crate::ir::ability::AbilityKind;
+        self.abilities.iter().any(|a| match &a.kind {
+            AbilityKind::OnResolve { modes } => modes.iter().any(|m| body_shuffles(&m.body)),
+            _ => false,
+        })
     }
 
     pub(crate) fn abilities_mut(&mut self) -> &mut [AbilityDef] {

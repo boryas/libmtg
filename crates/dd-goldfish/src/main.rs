@@ -4,9 +4,20 @@
 
 use std::process::ExitCode;
 
-use clap::Parser;
-use dd_goldfish::{run_goldfish, sample_doomsday_deck, GoldfishStats, DEFAULT_PROTECTION};
+use clap::{Parser, ValueEnum};
+use dd_goldfish::{
+    run_goldfish, run_goldfish_asap, sample_doomsday_deck, GoldfishStats, DEFAULT_CUTOFF,
+    DEFAULT_PROTECTION,
+};
 use mtg_engine::{build_catalog, warn_unimplemented_cards};
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StrategyKind {
+    /// Baseline DoomsdayStrategy (mana-development oriented).
+    Baseline,
+    /// Aggressive cast-Doomsday-ASAP, following the recipe solver toward a cutoff.
+    Asap,
+}
 
 #[derive(Parser)]
 #[command(about = "Goldfish Monte-Carlo simulator for Doomsday (race to cast DD)")]
@@ -21,6 +32,23 @@ struct Args {
     /// Turn cap per game.
     #[arg(long, default_value_t = 10)]
     max_turns: u8,
+    /// Which pilot to simulate.
+    #[arg(long, value_enum, default_value_t = StrategyKind::Asap)]
+    strategy: StrategyKind,
+    /// Cutoff turn for the cast-ASAP objective `P(cast by cutoff)`.
+    #[arg(long, default_value_t = DEFAULT_CUTOFF)]
+    cutoff: u32,
+    /// A/B debug: print, for a few SEEDED games, every decision where the principled
+    /// policy disagrees with the reference value-table heuristic.
+    #[arg(long)]
+    compare: bool,
+    /// Seed for `--compare` (reproducible games).
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Calibration: bucket the kept-hand P(cast by cutoff) prediction vs the realized
+    /// success rate (is our estimate accurate?).
+    #[arg(long)]
+    calibrate: bool,
 }
 
 fn main() -> ExitCode {
@@ -40,12 +68,52 @@ fn main() -> ExitCode {
     // Surface cards the engine can't simulate (dropped / inert) before running.
     warn_unimplemented_cards(&deck, "deck", &build_catalog());
 
+    if std::env::var("AUDIT_DET").is_ok() {
+        eprintln!("Auditing deterministic-but-failed games (seed {}, cutoff T{})…", args.seed, args.cutoff);
+        for line in dd_goldfish::run_goldfish_audit_det(&deck, args.cutoff, args.seed, args.games, 3) {
+            println!("{line}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    if args.calibrate {
+        eprintln!("Calibration: {} games, cutoff T{} — predicted P(cast by cutoff) vs observed…",
+            args.games, args.cutoff);
+        println!("  bucket        n     predicted   observed");
+        for (b, (pred, obs, n)) in dd_goldfish::run_goldfish_calibration(&deck, args.cutoff, args.games)
+            .into_iter().enumerate()
+        {
+            if n == 0 { continue; }
+            println!("  [{:.1},{:.1})  {:>6}    {:>6.3}     {:>6.3}",
+                b as f64 / 10.0, (b + 1) as f64 / 10.0, n, pred, obs);
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    if args.compare {
+        let n = args.games.min(500);
+        eprintln!("A/B decision comparison: {n} seeded game(s), seed {}, cutoff T{}…", args.seed, args.cutoff);
+        for line in dd_goldfish::run_goldfish_compare(&deck, args.cutoff, args.seed, n) {
+            println!("{line}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let label = match args.strategy {
+        StrategyKind::Baseline => "baseline",
+        StrategyKind::Asap => "cast-ASAP",
+    };
     eprintln!(
-        "Goldfishing {} games (cap {} turns)…",
-        args.games, args.max_turns
+        "Goldfishing {} games ({label}, cap {} turns, cutoff T{})…",
+        args.games, args.max_turns, args.cutoff
     );
-    let stats = run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.max_turns);
-    print_report(&stats, args.max_turns);
+    let stats = match args.strategy {
+        StrategyKind::Baseline => run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.max_turns),
+        StrategyKind::Asap => {
+            run_goldfish_asap(&deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff)
+        }
+    };
+    print_report(&stats, args.max_turns, args.cutoff);
     ExitCode::SUCCESS
 }
 
@@ -73,8 +141,14 @@ fn bar(c: u32, max: u32, width: usize) -> String {
     "█".repeat(n)
 }
 
-fn print_report(s: &GoldfishStats, max_turns: u8) {
+fn print_report(s: &GoldfishStats, max_turns: u8, cutoff: u32) {
     println!("\n══ Doomsday goldfish — {} games ══", s.games);
+    let cutoff_t = cutoff.min(max_turns as u32) as u8;
+    println!(
+        "  P(cast by T{}): {:.1}%   ← cut-off objective",
+        cutoff_t,
+        100.0 * s.cast_by(cutoff_t)
+    );
     println!(
         "  cast DD:         {} ({:.1}%)",
         s.successes(),

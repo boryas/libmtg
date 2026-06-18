@@ -14,6 +14,12 @@
     label { font-size: 0.8rem; color: #aaa; display: block; margin: 0.6rem 0 0.2rem; }
     input[type=number] { background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px;
       padding: 0.3rem 0.5rem; font-size: 0.8rem; width: 6rem; }
+    select { background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px;
+      padding: 0.3rem 0.5rem; font-size: 0.8rem; width: 100%; }
+    .headline { font-size: 0.95rem; margin-bottom: 0.7rem; padding-bottom: 0.6rem; border-bottom: 1px solid #0f3460; }
+    .headline b { color: #f5b041; font-size: 1.5rem; margin: 0 0.2rem; }
+    tr.cutoff td { color: #f5b041; font-weight: bold; }
+    tr.cutoff .bar { background: #8a5a1a; }
     button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 0.45rem 0.9rem;
       cursor: pointer; font-size: 0.85rem; border-radius: 4px; margin-top: 0.8rem; }
     button:hover:enabled { background: #0f3460; }
@@ -47,6 +53,13 @@
     <div>
       <label for="deck">Decklist (paste Moxfield / MTGGoldfish / Arena text export)</label>
       <textarea id="deck" spellcheck="false"></textarea>
+      <label for="strategy">Pilot</label>
+      <select id="strategy">
+        <option value="asap" selected>Aggressive &mdash; cast Doomsday ASAP (solver)</option>
+        <option value="baseline">Baseline &mdash; develop &amp; protect</option>
+      </select>
+      <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
+      <input type="number" id="cutoff" value="4" min="1" max="10">
       <label for="games">Games</label>
       <input type="number" id="games" value="2000" min="1" max="50000">
       <label for="turns">Turn cap</label>
@@ -63,7 +76,7 @@
   </div>
 
   <script type="module">
-    import init, { run_goldfish_web, missing_cards_web } from './crates/dd-goldfish/pkg/dd_goldfish.js';
+    import init, { run_goldfish_web, run_goldfish_asap_web, missing_cards_web } from './crates/dd-goldfish/pkg/dd_goldfish.js';
 
     const REPO = 'boryas/mtgctl';
 
@@ -185,7 +198,15 @@
       return `<span class="bar ${cls}" style="width:${(frac * 140).toFixed(0)}px"></span> ${(frac * 100).toFixed(1)}%`;
     }
 
-    function renderStats(s) {
+    function castBy(s, t) {
+      if (!s.games) return 0;
+      let n = 0;
+      for (const k of Object.keys(s.cast_turn)) if (Number(k) <= t) n += s.cast_turn[k];
+      return n / s.games;
+    }
+
+    function renderStats(s, opts) {
+      const { strategy, cutoff } = opts;
       const successes = s.games - s.fails;
       const turns = Object.keys(s.cast_turn).map(Number).sort((a, b) => a - b);
       const maxT = $('turns').valueAsNumber || (turns.at(-1) ?? 1);
@@ -195,24 +216,31 @@
       let protW = 0, protN = 0;
       for (const [p, c] of Object.entries(s.protection)) { protW += Number(p) * c; protN += c; }
       const meanProt = protN ? (protW / protN) : NaN;
+      const pByCutoff = castBy(s, cutoff);
 
       let cum = 0;
       const pdfRows = [], cdfRows = [];
       for (let t = (turns[0] ?? 1); t <= maxT; t++) {
         const c = s.cast_turn[t] || 0;
         cum += c;
-        pdfRows.push(`<tr><td>T${t}</td><td>${bar(c / s.games)}</td></tr>`);
-        cdfRows.push(`<tr><td>≤ T${t}</td><td>${bar(cum / s.games)}</td></tr>`);
+        const mark = t === cutoff ? ' class="cutoff"' : '';
+        pdfRows.push(`<tr${mark}><td>T${t}</td><td>${bar(c / s.games)}</td></tr>`);
+        cdfRows.push(`<tr${mark}><td>≤ T${t}</td><td>${bar(cum / s.games)}</td></tr>`);
       }
       const protRows = Object.keys(s.protection).map(Number).sort((a, b) => a - b).map(p =>
         `<tr><td>${p} layer${p === 1 ? '' : 's'}</td><td>${bar(s.protection[p] / successes, 'prot')}</td></tr>`);
 
+      const pilot = strategy === 'asap'
+        ? 'Aggressive (cast Doomsday ASAP)' : 'Baseline (develop &amp; protect)';
+
       $('results').className = '';
       $('results').innerHTML = `
-        <h2>Goldfish results</h2>
+        <h2>Goldfish results <span class="muted">&mdash; ${pilot}</span></h2>
         <div class="panel">
+          <div class="headline">P(cast Doomsday by T${cutoff}) <b>${(pByCutoff * 100).toFixed(1)}%</b>
+            <span class="muted">&mdash; the cut-off objective</span></div>
           <div class="summary">
-            <div class="stat">success <b>${(successes / s.games * 100).toFixed(1)}%</b> <span class="muted">(${successes}/${s.games})</span></div>
+            <div class="stat">cast eventually <b>${(successes / s.games * 100).toFixed(1)}%</b> <span class="muted">(${successes}/${s.games})</span></div>
             <div class="stat">mean cast turn <b>${meanCast.toFixed(2)}</b></div>
             <div class="stat">mean protection <b>${meanProt.toFixed(2)}</b></div>
           </div>
@@ -229,6 +257,11 @@
       const deck = $('deck').value;
       const games = $('games').valueAsNumber || 2000;
       const turns = $('turns').valueAsNumber || 10;
+      const strategy = $('strategy').value;
+      const cutoff = Math.min($('cutoff').valueAsNumber || 4, turns);
+      const sim = (n) => strategy === 'asap'
+        ? run_goldfish_asap_web(deck, n, turns, cutoff)
+        : run_goldfish_web(deck, n, turns);
       const btn = $('run'), prog = $('progress'), fill = $('progress-fill'), plabel = $('progress-label');
       btn.disabled = true; btn.textContent = 'Simulating…';
       prog.hidden = false; fill.style.width = '0'; plabel.textContent = '';
@@ -243,13 +276,13 @@
         const agg = emptyStats();
         for (let done = 0; done < games; ) {
           const n = Math.min(batch, games - done);
-          mergeStats(agg, JSON.parse(run_goldfish_web(deck, n, turns)));
+          mergeStats(agg, JSON.parse(sim(n)));
           done += n;
           fill.style.width = (done / games * 100).toFixed(1) + '%';
           plabel.textContent = `simulating… ${done.toLocaleString()} / ${games.toLocaleString()} games`;
           await new Promise(r => setTimeout(r, 0));
         }
-        renderStats(agg);
+        renderStats(agg, { strategy, cutoff });
       } finally {
         prog.hidden = true; plabel.textContent = '';
         btn.disabled = false; btn.textContent = 'Goldfish it';

@@ -239,7 +239,7 @@ pub(crate) fn dd_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, w
 /// - Need ≥1 blue source (casts cantrips) OR ≥3 black sources (hardcasts DD).
 /// - Mull flood (≥5 lands) or hands with no path to DD (no threats/cantrips).
 /// - 4 or fewer cards: always keep.
-pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
+pub fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
     if mulligans_taken >= 3 { return false; } // always keep at 4 cards
 
     let hand: Vec<(ObjId, Option<CardCategory>)> = state.hand_of(who)

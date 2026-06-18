@@ -2304,6 +2304,49 @@
         assert!(!log.contains("countered"), "resolving an instant must not produce 'countered' in the log");
     }
 
+    /// Resolution order (CR 608.2m): a spell stays on the stack while its effect
+    /// resolves, and moves to the graveyard only afterward. Regression for the bug
+    /// where the spell was popped + moved to the graveyard BEFORE its effect ran —
+    /// which made graveyard-counting effects (Flow State's instant∧sorcery check,
+    /// delve, threshold) wrongly observe the resolving spell itself.
+    #[test]
+    fn resolving_spell_stays_on_stack_until_its_effect_finishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let mut state = make_state();
+        let id = state.alloc_id();
+        let on_stack = Arc::new(AtomicBool::new(false));
+        let in_gy = Arc::new(AtomicBool::new(false));
+        let (os, ig) = (on_stack.clone(), in_gy.clone());
+        // An effect that observes its OWN spell's zone the moment it resolves.
+        let eff = crate::effects::Effect(Arc::new(move |st: &mut SimState, _t: u8, _tg: &[ObjId]| {
+            os.store(st.stack.contains(&id), Ordering::SeqCst);
+            ig.store(st.graveyard_of(PlayerId::Us).any(|o| o.id == id), Ordering::SeqCst);
+        }));
+        state.objects.insert(id, GameObject {
+            id,
+            catalog_key: "Observer".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            is_token: false,
+            materialized: None,
+            counters: HashMap::new(),
+            ci_timestamp: 0,
+            role: ObjectRole::StackSpell(SpellState {
+                effect: Some(eff),
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+        });
+        state.stack.push(id);
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us);
+        assert!(on_stack.load(Ordering::SeqCst), "spell must be ON the stack while its effect resolves");
+        assert!(!in_gy.load(Ordering::SeqCst), "spell must NOT be in the graveyard during its effect");
+        assert!(state.graveyard_of(PlayerId::Us).any(|o| o.id == id), "spell goes to graveyard after resolving");
+        assert!(!state.stack.contains(&id), "spell leaves the stack after resolving");
+    }
+
     /// After a sacrifice_self ability's cost is paid (permanent leaves battlefield), the action
     /// layer must never offer that ability again. This tests the structural guarantee that
     /// effects only arise from stack resolution — not from the decision layer re-selecting
