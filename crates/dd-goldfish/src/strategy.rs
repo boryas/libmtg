@@ -76,6 +76,17 @@ impl DDGoldfishStrategy {
         state.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_else(|| "?".to_string())
     }
 
+    /// Whether we actually *hold* the payoff (Doomsday) in hand. A tutor that can
+    /// fetch Doomsday does NOT count — it must still be cast and resolved before we
+    /// hold the payoff. This is what gates casting the tutor: `payoff_in_hand` is
+    /// true when a tutor is in hand, so using it here would (wrongly) conclude the
+    /// payoff is already secured and assemble mana for a Doomsday we never acquire.
+    fn holds_payoff(&self, state: &SimState, who: PlayerId) -> bool {
+        state
+            .hand_of(who)
+            .any(|c| recipe::card_role(state, who, c.id) == CardRole::Payoff)
+    }
+
     /// A complete recipe is assemblable this turn — emit the next mana-assembly
     /// step toward casting Doomsday. We try the steps that don't spend a card first
     /// (land drop, then deploy a petal, then crack a fetch) and only cast a ritual
@@ -83,6 +94,15 @@ impl DDGoldfishStrategy {
     /// castable, so a ritual is only ever cast when genuinely needed.
     fn assemble_step(&self, state: &SimState, who: PlayerId, legal: &[LegalAction]) -> Option<LegalAction> {
         use CardRole::*;
+        // 0. If the deterministic line runs through a tutor (Personal Tutor) and we
+        //    don't yet hold Doomsday, cast the tutor to put it on top — otherwise we
+        //    assemble BBB for a payoff we never acquire. Falls through to a land drop
+        //    when no blue source is online yet, then casts the tutor on re-entry.
+        if !self.holds_payoff(state, who) {
+            if let Some(a) = first_cast(state, who, legal, &[PayoffTutor]) {
+                return Some(a);
+            }
+        }
         // 1. Play a black source (untapped land / fetch / tapland).
         if let Some(a) = best_land_drop(state, who, legal, &[BlackLandUntapped, Fetch, BlackLandTapped]) {
             return Some(a);
@@ -115,8 +135,9 @@ impl DDGoldfishStrategy {
         if let Some(a) = fetch_activation(state, legal) {
             return Some(a);
         }
-        // c) If we hold no payoff, tutor for Doomsday.
-        if !recipe::payoff_in_hand(state, who) {
+        // c) If we don't hold Doomsday itself, cast a tutor for it (having the tutor
+        //    in hand is not the same as holding the payoff — it must be cast).
+        if !self.holds_payoff(state, who) {
             if let Some(a) = first_cast(state, who, legal, &[PayoffTutor]) {
                 return Some(a);
             }
