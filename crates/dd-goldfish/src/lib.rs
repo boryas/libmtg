@@ -18,6 +18,11 @@ use mtg_engine::{
 use rand::SeedableRng;
 use serde::Serialize;
 
+/// SPIKE: backward "can we cast Doomsday?" over the resource model (capabilities
+/// read from IR; mana by subtraction, the gap by recomputed sufficiency).
+/// See `~/org/projects/mtgctl/dd-goldfish-strategy.org`.
+pub mod recipe;
+
 /// v1 "protection layers": disruption the Doomsday player holds to protect the
 /// combo turn. Counted by name in hand at resolution. Mana-castability weighting
 /// is the documented v2.

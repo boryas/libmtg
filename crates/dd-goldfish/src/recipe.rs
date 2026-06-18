@@ -1,0 +1,1330 @@
+//! SPIKE — validate the resource model on a real (UB tempo) list.
+//!
+//! The model (charter: `~/org/projects/mtgctl/dd-goldfish-strategy.org`):
+//! resources are *legal actions* gated by `Object(Filter)` + fungible `Mana`;
+//! actions chain by lining up produces↔consumes; we reason **backward** from the
+//! goal `BBB + Doomsday-in-hand`, so choices are bound by the subgoal (no
+//! heuristics) and the unsatisfied frontier *is* the gap.
+//!
+//! This is a SPIKE, not the production engine. Faithful simplifications, all
+//! flagged, that the real version removes:
+//!   1. The search works over **capability counts** extracted from card IR, not
+//!      `obj_matches` grounding over individual object instances.
+//!   2. Mana is tracked as a **black count**, not full per-colour `ManaPool`
+//!      arithmetic — exact for the all-black DD goal (`BBB`, Dark Ritual's `B`).
+//!   3. A ritual is "needs a 1-black seed → yields 3" (Dark Ritual shape), read
+//!      from `added_mana_on_resolve`; richer ritual costs aren't modelled.
+//!   4. Fetch type-matching is assumed: a fetch reaches black iff the deck has
+//!      an untapped black land. Exact for this manabase; target depletion isn't
+//!      counted. The real version grounds the fetch's search filter against the
+//!      library via `obj_matches`.
+//!
+//! Even so, every capability below is *read structurally from IR* (never a card
+//! name, except the payoff's identity), and the chaining is the real backward
+//! production graph — so this exercises the model, not a parallel re-derivation.
+
+use mtg_engine::{
+    obj_matches, ActivationTiming, CardDef, Color, PlayerId, SimState, SourceZone,
+};
+
+const DOOMSDAY: &str = "Doomsday";
+
+// ── Capability projection (read from IR via the existing accessors) ──────────
+
+/// Has a battlefield mana ability that can *unconditionally* produce black
+/// (lands, Lotus Petal on the battlefield, moxen). `Default` timing excludes LED
+/// (`Instant`-timed). Conditional mana is skipped — e.g. Cavern of Souls' colored
+/// mana is gated on casting a creature spell (`ma.condition`), so it can't pay
+/// for Doomsday. SPIKE: this conservatively drops *all* conditional sources;
+/// the production version evaluates the condition (board-state gates like
+/// metalcraft can still qualify, casting-spell gates like Cavern's don't).
+fn produces_color(def: &CardDef, color: Color) -> bool {
+    def.mana_abilities().iter().any(|ma| {
+        matches!(ma.source_zone, SourceZone::Battlefield)
+            && ma.timing == ActivationTiming::Default
+            && ma.condition.is_none()
+            && ma.produces.contains(&color)
+    })
+}
+
+/// Specialization for the Doomsday goal's black requirement.
+fn produces_black(def: &CardDef) -> bool {
+    produces_color(def, Color::Black)
+}
+
+/// Produces `color` via a RENEWABLE battlefield mana ability — one whose cost
+/// TAPS (does not sacrifice) the source. The untapped-state the cost consumes is
+/// restored by every untap step, so the source is available again EACH turn
+/// (lands, moxen). This is the cost-level half of the sac/tap distinction.
+fn renewable_produces_color(def: &CardDef, color: Color) -> bool {
+    def.mana_abilities().iter().any(|ma| {
+        matches!(ma.source_zone, SourceZone::Battlefield)
+            && ma.timing == ActivationTiming::Default
+            && ma.condition.is_none()
+            && ma.produces.contains(&color)
+            && !ma.costs.requires_sac_self()
+    })
+}
+
+/// Produces `color` via a ONE-SHOT battlefield mana ability — one whose cost
+/// SACRIFICES the source (Lotus Petal). The cost consumes the object itself, which
+/// no untap restores, so the source is spent exactly once across the whole plan.
+fn oneshot_produces_color(def: &CardDef, color: Color) -> bool {
+    def.mana_abilities().iter().any(|ma| {
+        matches!(ma.source_zone, SourceZone::Battlefield)
+            && ma.timing == ActivationTiming::Default
+            && ma.condition.is_none()
+            && ma.produces.contains(&color)
+            && ma.costs.requires_sac_self()
+    })
+}
+
+/// A spell that adds black on resolution (a "ritual", generically — Dark Ritual,
+/// not by name). Read from the structured `added_mana_on_resolve`.
+fn is_black_ritual(def: &CardDef) -> bool {
+    match def.added_mana_on_resolve() {
+        Some(out) => out.colors.as_ref().map_or(true, |cs| cs.contains(&Color::Black)),
+        None => false,
+    }
+}
+
+/// A free (0-mana) artifact that taps/sacs for `color` — Lotus Petal, generically.
+/// LED is excluded: its mana ability is `Instant`-timed, so `produces_color` is false.
+fn is_free_artifact_of_color(def: &CardDef, color: Color) -> bool {
+    !def.is_land() && def.mana_cost().trim() == "0" && produces_color(def, color)
+}
+
+fn is_free_black_artifact(def: &CardDef) -> bool {
+    is_free_artifact_of_color(def, Color::Black)
+}
+
+fn is_fetch(def: &CardDef) -> bool {
+    def.is_land() && def.abilities().iter().any(|a| a.is_fetch_ability())
+}
+
+// ── The available black-producing capabilities, projected from a state ───────
+//
+// The model is the resources → costs → effects → resources cycle. A mana source
+// is a resource; spending it pays a COST that consumes a resource, and what the
+// cost consumes is the whole sac/tap story:
+//   • a TAP cost consumes the source's *untapped-state* — regenerated every untap
+//     step, so the source is RENEWABLE (available again next turn);
+//   • a SAC cost consumes the *object itself* — nothing restores it, so it's
+//     ONE-SHOT (spent once across the entire plan).
+// So renewable capacity is tracked per-turn (it comes back), while one-shot
+// sources are a shared `pool` that depletes as costs consume it.
+
+/// The resource frontier toward `BBB`, separated by what a source's cost consumes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Caps {
+    /// RENEWABLE black capacity already online: tap sources in play (lands, moxen)
+    /// + in-play fetches (each cracks into a renewable land). The untapped-state
+    /// these spend is restored every untap step → available every turn.
+    renew_inplay: u32,
+    /// Renewable black tap-lands in hand that enter UNTAPPED (Sea/Swamp,
+    /// fetch→untapped): a land drop turns them into renewable capacity, usable the
+    /// turn played.
+    untapped_lands: u32,
+    /// Renewable black tap-lands in hand that enter TAPPED (surveil duals): usable
+    /// the turn AFTER played — they untap on the next PASS.
+    tapped_lands: u32,
+    /// ONE-SHOT any-colour mana objects (Lotus Petal — sac cost): a shared pool
+    /// whose members are CONSUMED when spent and never restored. Spending one to
+    /// pay a pip removes it from BBB; this is the cost cycle, not a special case.
+    pool: u32,
+    /// One-shot ritual spells (each: 1-black seed → 3 black), consumed on cast.
+    rituals: u32,
+    /// Is the once-per-turn land drop still available THIS turn?
+    land_drop: bool,
+}
+
+fn library_has_target_color(state: &SimState, who: PlayerId, color: Color) -> bool {
+    state.library_of(who).any(|c| {
+        state
+            .catalog
+            .get(&c.catalog_key)
+            .is_some_and(|d| d.is_land() && produces_color(d, color) && !d.enters_tapped())
+    })
+}
+
+fn library_has_black_target(state: &SimState, who: PlayerId) -> bool {
+    library_has_target_color(state, who, Color::Black)
+}
+
+fn project(state: &SimState, who: PlayerId) -> Caps {
+    let mut c = Caps {
+        land_drop: state.player(who).lands_played_this_turn < 1,
+        ..Default::default()
+    };
+    let fetch_target = library_has_black_target(state, who);
+
+    // In play: classify each untapped black source by what its cost consumes —
+    // one-shot (sac → pool) vs renewable (tap, or a fetch that becomes a land).
+    for perm in state.permanents_of(who) {
+        if perm.bf().is_some_and(|bf| bf.tapped) {
+            continue;
+        }
+        let Some(def) = state.def_of(perm.id) else { continue };
+        if oneshot_produces_color(def, Color::Black) {
+            c.pool += 1;
+        } else if renewable_produces_color(def, Color::Black) || (is_fetch(def) && fetch_target) {
+            c.renew_inplay += 1;
+        }
+    }
+
+    // Hand: free mana artifacts (cast for 0 this turn, then used — sac→pool,
+    // tap→renewable like a Mox), black tap-lands (land-drop gated), rituals.
+    for card in state.hand_of(who) {
+        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+        if !def.is_land() && def.mana_cost().trim() == "0" {
+            if oneshot_produces_color(def, Color::Black) {
+                c.pool += 1;
+            } else if renewable_produces_color(def, Color::Black) {
+                c.renew_inplay += 1;
+            }
+        } else if def.is_land() {
+            if is_fetch(def) && fetch_target {
+                c.untapped_lands += 1;
+            } else if produces_black(def) {
+                // Enters-tapped honesty: a tapland makes no mana the turn it's
+                // played, but untaps on the next PASS → usable a turn later.
+                if def.enters_tapped() {
+                    c.tapped_lands += 1;
+                } else {
+                    c.untapped_lands += 1;
+                }
+            }
+        } else if is_black_ritual(def) {
+            c.rituals += 1;
+        }
+    }
+    c
+}
+
+// ── Backward black-mana reachability ─────────────────────────────────────────
+
+/// Can we reach `need` black this turn? Backward production graph: a flat
+/// producer gives +1; the land drop gives +1 once; a ritual converts a 1-black
+/// seed into 3. Sound + complete for the all-black goal (every producer is
+/// dominant toward black).
+fn reach_black(need: i32, flat: u32, land_gated: u32, rituals: u32, land_drop: bool) -> bool {
+    if need <= 0 {
+        return true;
+    }
+    // a flat producer (+1)
+    if flat > 0 && reach_black(need - 1, flat - 1, land_gated, rituals, land_drop) {
+        return true;
+    }
+    // the land drop (+1, once)
+    if land_drop && land_gated > 0 && reach_black(need - 1, flat, land_gated - 1, rituals, false) {
+        return true;
+    }
+    // a ritual: produce its 1-black seed from the rest, then it yields 3 (≥ need ≤ 3)
+    if rituals > 0 && need <= 3 && reach_black(1, flat, land_gated, rituals - 1, land_drop) {
+        return true;
+    }
+    false
+}
+
+/// How many lands in hand can be ONLINE (untapped, tappable) by turn `turn` —
+/// PASS-as-action, deterministically. Color-agnostic: it's purely land-drop
+/// timing (the caller projects `untapped`/`tapped` for whichever color it cares
+/// about). `turn` is the 1-based turn number (turn 1 = now / the casting turn for
+/// a "turn-1 Doomsday"). One land drop per turn (turn 1's only if `land_drop` is
+/// still available), everything untaps between turns, so a tapland played on an
+/// earlier turn is online by `turn`. Drops by `turn` = `(turn-1) + land_drop`; a
+/// tapland needs an "early" slot (a turn before `turn`) to have untapped in time;
+/// untapped lands are online the turn they're played.
+fn online_lands(untapped: u32, tapped: u32, land_drop: bool, turn: u32) -> u32 {
+    let drops = turn.saturating_sub(1) + land_drop as u32;
+    if drops == 0 {
+        return 0;
+    }
+    let early = drops - 1;
+    (untapped + tapped.min(early)).min(drops)
+}
+
+/// Renewable black capacity online by turn `turn` (1-based, no draws): in-play tap
+/// sources plus black tap-lands deployable and online by then. Excludes the
+/// one-shot pool — that's a consumable threaded separately.
+fn renew_black_by_turn(c: &Caps, turn: u32) -> u32 {
+    c.renew_inplay + online_lands(c.untapped_lands, c.tapped_lands, c.land_drop, turn)
+}
+
+/// Can BBB (3 black) be produced on turn `turn` with `pool` one-shot tokens still
+/// available? Renewable capacity is per-turn (it returns each untap); the pool and
+/// rituals are consumables. `pool` is passed explicitly so a caller that already
+/// spent a token (e.g. a sac'd petal paying a pip) charges BBB the depleted pool.
+fn bbb_on_turn(c: &Caps, turn: u32, pool: u32) -> bool {
+    reach_black(3, renew_black_by_turn(c, turn) + pool, 0, c.rituals, false)
+}
+
+/// Earliest turn (≤ `max_turn`) BBB is producible with `pool` one-shot tokens, or
+/// `None`. Monotonic in `turn` (renewable capacity only grows).
+fn bbb_turn(c: &Caps, max_turn: u32, pool: u32) -> Option<u32> {
+    (1..=max_turn).find(|&t| bbb_on_turn(c, t, pool))
+}
+
+// ── Deterministic payoff acquisition (Personal Tutor) ────────────────────────
+//
+// A library-top tutor (Personal Tutor) makes the PAYOFF an acquirable resource,
+// symmetric to a fetch making mana acquirable: both "search library → produce an
+// object", grounded by the SAME `obj_matches` question ("can it get DD?" ≡ "can
+// this fetch get black?"). The one difference is the destination zone — a fetch's
+// land lands in play (instantly usable), a tutor's card lands on TOP of the
+// library, so it needs one more action to reach hand: next turn's natural draw.
+// That draw is normally the STOCHASTIC half; the tutor's trick is that it makes
+// that one draw DETERMINISTIC (you know the top card — you put it there), which is
+// why the payoff line lives in this deterministic layer. Hence "+1 turn": tutor
+// turn N, draw DD turn N+1.
+
+/// The single colored pip of a mana cost, or `None` if the cost isn't exactly one
+/// colored pip (e.g. it has generic/colorless mana or two colored pips). SPIKE:
+/// the deterministic payoff line models only a one-pip, MV-1 tutor (Personal/
+/// Mystical/Vampiric Tutor) — "1 source of its colour" is the whole cost; richer
+/// tutor costs aren't modelled (production: full cost payment).
+fn single_colored_pip(cost: &str) -> Option<Color> {
+    let mut colors = Vec::new();
+    let mut has_other = false;
+    for ch in cost.trim().chars() {
+        match ch {
+            'W' => colors.push(Color::White),
+            'U' => colors.push(Color::Blue),
+            'B' => colors.push(Color::Black),
+            'R' => colors.push(Color::Red),
+            'G' => colors.push(Color::Green),
+            _ => has_other = true, // generic digits, {C}, etc.
+        }
+    }
+    (colors.len() == 1 && !has_other).then(|| colors[0])
+}
+
+/// If `who` holds a card that can tutor the payoff (`Doomsday`) to the TOP of the
+/// library, return the tutor's single colored pip — the "1 source" requirement.
+/// Grounded by `obj_matches`: the tutor's own search `Filter` must actually match
+/// a Doomsday that is IN the library (so a "find an instant" tutor wouldn't
+/// qualify, and a tutor can't get a Doomsday that isn't in the library). The
+/// library-top shape is read structurally (`CardDef::library_top_tutor`), no
+/// name-check; battlefield searchers (Green Sun's Zenith) are excluded there.
+fn payoff_tutor_pip(state: &SimState, who: PlayerId) -> Option<Color> {
+    let dd_in_lib: Vec<_> = state
+        .library_of(who)
+        .filter(|c| c.catalog_key == DOOMSDAY)
+        .map(|c| c.id)
+        .collect();
+    if dd_in_lib.is_empty() {
+        return None;
+    }
+    for card in state.hand_of(who) {
+        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+        let Some(filter) = def.library_top_tutor() else { continue };
+        if !dd_in_lib.iter().any(|&id| obj_matches(filter, id, state)) {
+            continue;
+        }
+        if let Some(pip) = single_colored_pip(def.mana_cost()) {
+            return Some(pip);
+        }
+    }
+    None
+}
+
+/// The earliest turn (1-based, ≤ `max_turn`) a RENEWABLE source of `color` is
+/// online, or `None`. Renewable means the cost taps (not sacrifices) the source,
+/// so its untapped-state returns each turn — it can pay a pip AND still be free for
+/// a later demand. The one-shot pool is deliberately EXCLUDED here: a pool token
+/// paying the pip is consumed, so it's charged against BBB in `deterministic_cast_turn`,
+/// not double-counted as a standing source.
+fn renew_color_turn(state: &SimState, who: PlayerId, color: Color, max_turn: u32) -> Option<u32> {
+    let land_drop = state.player(who).lands_played_this_turn < 1;
+    let fetch_target = library_has_target_color(state, who, color);
+    // A renewable colour source already in play → online right now (turn 1).
+    let inplay = state.permanents_of(who).any(|perm| {
+        !perm.bf().is_some_and(|bf| bf.tapped)
+            && state
+                .def_of(perm.id)
+                .is_some_and(|def| renewable_produces_color(def, color) || (is_fetch(def) && fetch_target))
+    });
+    if inplay {
+        return Some(1);
+    }
+    // Otherwise the earliest turn a renewable colour tap-land in hand comes online.
+    let (mut untapped, mut tapped) = (0u32, 0u32);
+    for card in state.hand_of(who) {
+        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+        if !def.is_land() {
+            continue;
+        }
+        if is_fetch(def) && fetch_target {
+            untapped += 1;
+        } else if renewable_produces_color(def, color) {
+            if def.enters_tapped() {
+                tapped += 1;
+            } else {
+                untapped += 1;
+            }
+        }
+    }
+    (1..=max_turn).find(|&t| online_lands(untapped, tapped, land_drop, t) >= 1)
+}
+
+// ── The functions ────────────────────────────────────────────────────────────
+
+/// `state → sufficient?` — can `who` cast Doomsday on turn 1 (this turn)? The
+/// whole one-shot pool is available (nothing's been pre-spent this turn).
+pub fn sufficient(state: &SimState, who: PlayerId) -> bool {
+    let has_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    let c = project(state, who);
+    has_dd && bbb_on_turn(&c, 1, c.pool)
+}
+
+/// The earliest turn (1-based; turn 1 = now) by which `who` can cast Doomsday
+/// using ONLY the current hand+board — no *blind* draws relied upon. PASS untaps
+/// and grants a land drop each turn (so taplands come online, and lands
+/// accumulate), but its draw isn't used for unknown cards. `None` if not reachable
+/// deterministically by `max_turn`. (A tight depth bound is roughly "black lands
+/// in hand − black available now"; `max_turn = 3` is the cap — we don't model
+/// turn 4.)
+///
+/// Two deterministic lines are considered and the earlier taken:
+/// - **Direct** — Doomsday already in hand: the earliest turn BBB is reachable
+///   (the full one-shot pool is available for BBB).
+/// - **Tutor** — a library-top tutor for Doomsday in hand (see `payoff_tutor_pip`):
+///   pay its pip, the *known* card is drawn the turn after, then cast once BBB is
+///   up. Paying the pip is a COST that consumes a resource, so the line forks on
+///   *which* source pays it:
+///     * a **renewable** pip-colour source (tap) — its untapped-state returns next
+///       turn, so the pool stays whole for BBB; pip on turn `s` ⇒ draw `s+1`;
+///     * a **one-shot** pool token (sac, turn 1) — the pool loses one for BBB; draw
+///       turn 2. No petal special-case — it's the sac cost consuming the object.
+///   This is honest: the drawn card is one the player placed, not a deck peek.
+pub fn deterministic_cast_turn(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
+    let c = project(state, who);
+    let has_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+
+    // Direct: DD in hand, earliest turn BBB is up with the full pool.
+    let direct = if has_dd { bbb_turn(&c, max_turn, c.pool) } else { None };
+
+    let tutor = payoff_tutor_pip(state, who).and_then(|pip| {
+        let mut best: Option<u32> = None;
+        let mut consider = |t: u32| {
+            if t <= max_turn {
+                best = Some(best.map_or(t, |b: u32| b.min(t)));
+            }
+        };
+        // Pay the pip with a RENEWABLE source: pool intact, but the pip (hence the
+        // draw) is bounded by when that source comes online.
+        if let Some(s) = renew_color_turn(state, who, pip, max_turn) {
+            if let Some(b) = bbb_turn(&c, max_turn, c.pool) {
+                consider((s + 1).max(b));
+            }
+        }
+        // Pay the pip with a ONE-SHOT pool token (turn 1): the pool loses one.
+        if c.pool >= 1 {
+            if let Some(b) = bbb_turn(&c, max_turn, c.pool - 1) {
+                consider(2u32.max(b));
+            }
+        }
+        best
+    });
+
+    match (direct, tutor) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The missing ingredients: which single producer kind, if added, flips an
+/// otherwise-insufficient mana position to sufficient. Recomputed, not authored
+/// — this is the "sufficient cards" set. (Assumes Doomsday itself is in hand.)
+pub fn mana_gap(state: &SimState, who: PlayerId) -> Vec<&'static str> {
+    let c = project(state, who);
+    // Sufficiency THIS turn (turn 1, full pool) with `du` extra untapped lands /
+    // `dp` extra petals (pool) / `dr` extra rituals added to hand.
+    let suff = |du: u32, dp: u32, dr: u32| {
+        let renew = c.renew_inplay + online_lands(c.untapped_lands + du, c.tapped_lands, c.land_drop, 1);
+        reach_black(3, renew + c.pool + dp, 0, c.rituals + dr, false)
+    };
+    let mut gap = Vec::new();
+    if suff(0, 0, 0) {
+        return gap;
+    }
+    if suff(1, 0, 0) {
+        gap.push("land");
+    }
+    if suff(0, 1, 0) {
+        gap.push("petal");
+    }
+    if suff(0, 0, 1) {
+        gap.push("ritual");
+    }
+    gap
+}
+
+/// A `deck → {dd-sufficient-resources}` bundle: counts of black-source units,
+/// petals, and rituals that together cast Doomsday. (`lands` are black-source
+/// units available this turn, abstracting over in-play vs. land-drop.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bundle {
+    pub lands: u32,
+    pub petals: u32,
+    pub rituals: u32,
+}
+
+/// Derive the minimal sufficient bundles from a deck, capped by the deck's own
+/// petal/ritual counts (so the absent "3 petals" bundle is a fact of the list).
+pub fn bundles(deck: &[(String, i32, String)]) -> Vec<Bundle> {
+    let catalog = mtg_engine::build_catalog();
+    let (mut max_petals, mut max_rituals) = (0u32, 0u32);
+    for (name, qty, _) in deck {
+        let Some(def) = catalog.get(name.as_str()) else { continue };
+        let q = (*qty).max(0) as u32;
+        if is_free_black_artifact(def) {
+            max_petals += q;
+        } else if is_black_ritual(def) {
+            max_rituals += q;
+        }
+    }
+    // A ritual is never worth more than one in a *minimal* bundle; ≥3 black units
+    // is the most a minimal bundle needs.
+    let cap_petals = max_petals.min(3);
+    let cap_rituals = max_rituals.min(1);
+
+    let suff = |b: Bundle| reach_black(3, b.lands + b.petals, 0, b.rituals, false);
+    let dominated = |b: Bundle, found: &[Bundle]| {
+        found.iter().any(|s| {
+            *s != b && s.lands <= b.lands && s.petals <= b.petals && s.rituals <= b.rituals && suff(*s)
+        })
+    };
+
+    let mut out: Vec<Bundle> = Vec::new();
+    for lands in 0..=3 {
+        for petals in 0..=cap_petals {
+            for rituals in 0..=cap_rituals {
+                let b = Bundle { lands, petals, rituals };
+                if suff(b) && !dominated(b, &out) {
+                    // drop any already-found bundle this one dominates
+                    out.retain(|s| !(b.lands <= s.lands && b.petals <= s.petals && b.rituals <= s.rituals));
+                    out.push(b);
+                }
+            }
+        }
+    }
+    out
+}
+
+// ── Stochastic gap-closing (#7b): expected turns to draw into the gap ─────────
+//
+// The deterministic layer says what's castable with NO blind draws. When that's
+// short, the natural per-turn draw closes the gap stochastically. We model the
+// draw HONESTLY as deck-level probability (you know your 60, never the order): the
+// expected number of draws to hit one of K "outs" in an N-card library is the
+// negative-hypergeometric mean (N+1)/(K+1). This layer only consumes the gap +
+// library counts — never peeks at library order — and is kept separate from the
+// deterministic reachability. v1 models AGGRESSIVE (not breakneck) play: one draw
+// to find each missing piece, assume you can deploy it; it does NOT chain
+// speculative lines (e.g. double-ritual Flow State), and it ignores opponent
+// disruption (Wasteland) entirely — both deliberately out of scope.
+
+/// Expected number of blind draws to hit the first of `outs` cards in an
+/// `library`-card library drawn without replacement — the negative-hypergeometric
+/// mean `(N+1)/(K+1)`. `∞` when there are no outs (the gap never closes by drawing).
+pub fn expected_draws_to_out(library: u32, outs: u32) -> f64 {
+    if outs == 0 {
+        return f64::INFINITY;
+    }
+    (library as f64 + 1.0) / (outs as f64 + 1.0)
+}
+
+/// Whether `who` already has the payoff accessible: Doomsday in hand, or a
+/// library-top tutor in hand that can fetch one (so no draw is needed to find it).
+fn payoff_in_hand(state: &SimState, who: PlayerId) -> bool {
+    state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY) || payoff_tutor_pip(state, who).is_some()
+}
+
+/// The stochastic frontier as library out-counts: `(mana_outs, payoff_outs,
+/// library)`. `mana_outs` = library cards whose kind is in the current `mana_gap`
+/// (drawing one flips the mana position); `payoff_outs` = Doomsdays + tutors for
+/// one still in the library, or 0 if the payoff is already in hand.
+fn gap_outs(state: &SimState, who: PlayerId) -> (u32, u32, u32) {
+    let library = state.library_of(who).count() as u32;
+    let gap = mana_gap(state, who);
+    let mana = state
+        .library_of(who)
+        .filter(|c| {
+            state.catalog.get(&c.catalog_key).is_some_and(|def| {
+                (gap.contains(&"land") && def.is_land() && produces_black(def) && !def.enters_tapped())
+                    || (gap.contains(&"petal") && is_free_black_artifact(def))
+                    || (gap.contains(&"ritual") && is_black_ritual(def))
+            })
+        })
+        .count() as u32;
+    let payoff = if payoff_in_hand(state, who) {
+        0
+    } else {
+        let dd_ids: Vec<_> = state
+            .library_of(who)
+            .filter(|c| c.catalog_key == DOOMSDAY)
+            .map(|c| c.id)
+            .collect();
+        state
+            .library_of(who)
+            .filter(|c| {
+                c.catalog_key == DOOMSDAY
+                    || state
+                        .catalog
+                        .get(&c.catalog_key)
+                        .and_then(|d| d.library_top_tutor())
+                        .is_some_and(|f| dd_ids.iter().any(|&id| obj_matches(f, id, state)))
+            })
+            .count() as u32
+    };
+    (mana, payoff, library)
+}
+
+/// Crude v1 E[turns-to-Doomsday] (1-based; `1.0` = castable now, `∞` = a brick).
+/// The two halves of the resource problem run in PARALLEL (you draw toward both at
+/// once), so the estimate is the MAX of their arrival turns:
+/// - **mana** — the deterministic BBB-assembly turn if assemblable without draws,
+///   else one draw to find a `mana_gap` out (plus deploying it);
+/// - **payoff** — `1` if Doomsday/tutor is in hand, else one draw to find it.
+///
+/// KNOWN v1 LIMITATION (flagged): when a deterministic line exists this returns its
+/// floor and does NOT credit stochastic *acceleration* — e.g. "3 lands + DD in
+/// hand" reads as turn 3, even though a drawn ritual/petal would cast it sooner, so
+/// cantrips are still useful here. Crediting that needs the per-turn cast-probability
+/// model (the Ponder keep-vs-shuffle layer), which subsumes this scalar. For now
+/// `e_ttd` is a coarse `MulliganMode`-threshold quantity, not a cantrip evaluator.
+pub fn e_ttd(state: &SimState, who: PlayerId, max_turn: u32) -> f64 {
+    if let Some(t) = deterministic_cast_turn(state, who, max_turn) {
+        return t as f64;
+    }
+    let c = project(state, who);
+    let (mana_outs, payoff_outs, library) = gap_outs(state, who);
+    let mana_turn = bbb_turn(&c, max_turn, c.pool)
+        .map(|t| t as f64)
+        .unwrap_or_else(|| 1.0 + expected_draws_to_out(library, mana_outs));
+    let payoff_turn = if payoff_in_hand(state, who) {
+        1.0
+    } else {
+        1.0 + expected_draws_to_out(library, payoff_outs)
+    };
+    mana_turn.max(payoff_turn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mtg_engine::{build_catalog, PlayerState, Zone};
+    use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
+    use std::collections::HashMap;
+
+    fn choose(n: i64, k: i64) -> f64 {
+        if k < 0 || k > n {
+            return 0.0;
+        }
+        let k = k.min(n - k);
+        let mut r = 1.0f64;
+        for i in 0..k {
+            r = r * (n - i) as f64 / (i + 1) as f64;
+        }
+        r
+    }
+
+    /// Categorize a deck into `[DD, untapped-black-land, tapped-black-land,
+    /// ritual, petal, other]` counts via the IR helpers (engine-unimplemented →
+    /// other). Same classification the solver uses, so analytical and empirical
+    /// agree on card categories.
+    fn categorize(deck: &[(String, i32, String)], catalog: &HashMap<String, CardDef>) -> [i64; 6] {
+        let (mut dd, mut u, mut tl, mut ritual, mut petal, mut other) = (0i64, 0, 0, 0, 0, 0);
+        for (name, qty, _) in deck {
+            let q = *qty as i64;
+            if name == "Doomsday" {
+                dd += q;
+            } else if let Some(def) = catalog.get(name.as_str()) {
+                if is_free_black_artifact(def) {
+                    petal += q;
+                } else if is_black_ritual(def) {
+                    ritual += q;
+                } else if is_fetch(def) {
+                    u += q;
+                } else if def.is_land() && produces_black(def) {
+                    if def.enters_tapped() {
+                        tl += q;
+                    } else {
+                        u += q;
+                    }
+                } else {
+                    other += q;
+                }
+            } else {
+                other += q;
+            }
+        }
+        [dd, u, tl, ritual, petal, other]
+    }
+
+    /// Exact P(deterministically cast Doomsday by `turn`) for a deck with the
+    /// given `[DD,U,T,ritual,petal,other]` counts — multivariate hypergeometric
+    /// over the INDEPENDENT `schedule_cast_by` oracle (no Monte-Carlo, no solver).
+    fn analytical_cast_by(c: [i64; 6], turn: i64) -> f64 {
+        let [dd, u, tl, ritual, petal, other] = c;
+        let (total, hsize) = (60i64, 7i64);
+        let denom = choose(total, hsize);
+        let mut p = 0.0;
+        for d in 1..=dd.min(hsize) {
+            for uu in 0..=u.min(hsize) {
+                for tt in 0..=tl.min(hsize) {
+                    for pp in 0..=petal.min(hsize) {
+                        for rr in 0..=ritual.min(hsize) {
+                            let o = hsize - d - uu - tt - pp - rr;
+                            if o < 0 || o > other {
+                                continue;
+                            }
+                            if !schedule_cast_by(pp, uu, tt, rr, turn) {
+                                continue;
+                            }
+                            p += choose(dd, d) * choose(u, uu) * choose(tl, tt)
+                                * choose(petal, pp) * choose(ritual, rr) * choose(other, o)
+                                / denom;
+                        }
+                    }
+                }
+            }
+        }
+        p
+    }
+
+    /// Finer categorisation for the PT-aware oracle: the black-mana split of
+    /// `categorize` plus the extra axes the Personal-Tutor line needs —
+    /// `[DD, ub, sw, tl, ritual, petal, il, pt, other]` where:
+    /// - `ub` = untapped lands that make BOTH black and blue (Underground Sea,
+    ///   fetches → a UB dual) — black mana AND a turn-1 blue source for `{U}`,
+    /// - `sw` = untapped black-ONLY land (Swamp) — black mana, no blue,
+    /// - `il` = untapped blue-ONLY land (Island) — a blue source, no black,
+    /// - `tl` = tapped black land (Undercity Sewers),
+    /// - `pt` = a blue library-top tutor for the payoff (Personal Tutor).
+    /// `ub + sw` is exactly the old `u` (untapped black); `il`/`pt` come out of
+    /// `other`. Classification uses the same IR helpers as the solver.
+    fn categorize_pt(deck: &[(String, i32, String)], catalog: &HashMap<String, CardDef>) -> [i64; 9] {
+        let (mut dd, mut ub, mut sw, mut tl) = (0i64, 0, 0, 0);
+        let (mut ritual, mut petal, mut il, mut pt, mut other) = (0i64, 0, 0, 0, 0);
+        for (name, qty, _) in deck {
+            let q = *qty as i64;
+            let Some(def) = (if name == "Doomsday" { None } else { catalog.get(name.as_str()) }) else {
+                if name == "Doomsday" { dd += q } else { other += q }
+                continue;
+            };
+            if def.library_top_tutor().is_some() && single_colored_pip(def.mana_cost()) == Some(Color::Blue) {
+                pt += q;
+            } else if is_free_black_artifact(def) {
+                petal += q; // Lotus Petal: free, any colour (so a blue source too)
+            } else if is_black_ritual(def) {
+                ritual += q;
+            } else if is_fetch(def) {
+                ub += q; // a fetch reaches a UB dual → both colours, untapped
+            } else if def.is_land() {
+                let (blk, blu) = (produces_black(def), produces_color(def, Color::Blue));
+                match (def.enters_tapped(), blk, blu) {
+                    (true, true, _) => tl += q,   // tapped black land
+                    (false, true, true) => ub += q,
+                    (false, true, false) => sw += q,
+                    (false, false, true) => il += q,
+                    _ => other += q,
+                }
+            } else {
+                other += q;
+            }
+        }
+        [dd, ub, sw, tl, ritual, petal, il, pt, other]
+    }
+
+    /// Exact P(deterministically cast Doomsday by `turn`) WITH the Personal-Tutor
+    /// line, as a multivariate hypergeometric over the 9 categories — independent
+    /// of `deterministic_cast_turn` (it reuses only the validated `schedule_cast_by`
+    /// BBB enumerator). A hand casts by `turn` iff BBB is reachable by then AND the
+    /// payoff is in hand by then:
+    /// - **direct** — a Doomsday in the opening hand, or
+    /// - **tutor** — a Personal Tutor + a turn-1 blue source, one turn later
+    ///   (`turn ≥ 2`). The blue source is a blue land (`ub`/`il`) or a petal.
+    ///
+    /// `correct_petal` toggles the petal's one-mana honesty: when the ONLY blue
+    /// source is a petal, paying `{U}` sacrifices it, so BBB must hold with one
+    /// fewer petal. `false` mirrors the solver (which double-counts the petal — as
+    /// both the blue source and a black source); the `true`/`false` gap bounds that
+    /// over-count.
+    fn analytical_cast_by_pt(c: [i64; 9], turn: i64, correct_petal: bool) -> f64 {
+        let [dd, ub, sw, tl, ritual, petal, il, pt, other] = c;
+        let (total, hsize) = (60i64, 7i64);
+        let denom = choose(total, hsize);
+        let mut p = 0.0;
+        for d in 0..=dd.min(hsize) {
+        for a in 0..=ub.min(hsize) {
+        for s in 0..=sw.min(hsize) {
+        for tt in 0..=tl.min(hsize) {
+        for r in 0..=ritual.min(hsize) {
+        for pp in 0..=petal.min(hsize) {
+        for ii in 0..=il.min(hsize) {
+        for q in 0..=pt.min(hsize) {
+            let o = hsize - d - a - s - tt - r - pp - ii - q;
+            if o < 0 || o > other {
+                continue;
+            }
+            let black_untapped = a + s;
+            let direct = d >= 1 && schedule_cast_by(pp, black_untapped, tt, r, turn);
+            let tutor = pt >= 1 && q >= 1 && turn >= 2 && {
+                if a >= 1 || ii >= 1 {
+                    // A blue LAND pays {U}; the petal stays free for BBB.
+                    schedule_cast_by(pp, black_untapped, tt, r, turn)
+                } else if pp >= 1 {
+                    // Only a petal can pay {U}: spend one (if honest), BBB from the rest.
+                    let pp_black = if correct_petal { pp - 1 } else { pp };
+                    schedule_cast_by(pp_black, black_untapped, tt, r, turn)
+                } else {
+                    false
+                }
+            };
+            if direct || tutor {
+                p += choose(dd, d) * choose(ub, a) * choose(sw, s) * choose(tl, tt)
+                    * choose(ritual, r) * choose(petal, pp) * choose(il, ii)
+                    * choose(pt, q) * choose(other, o)
+                    / denom;
+            }
+        }}}}}}}}
+        p
+    }
+
+    // ── deterministic multi-turn lookahead (PASS-as-action) ──────────────────
+
+    #[test]
+    fn sewers_comes_online_after_a_pass() {
+        // Two Seas in play + a surveil dual in hand: tapped on turn 1 (can't go
+        // off), but play it now, PASS, and it untaps → BBB on turn 2.
+        let s = setup(&["Underground Sea", "Underground Sea"], &["Undercity Sewers", "Doomsday"], &[]);
+        assert!(!sufficient(&s, PlayerId::Us));
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(2));
+    }
+
+    #[test]
+    fn three_taplands_are_a_turn_four_line_so_out_of_range() {
+        // Three surveil duals, one land drop per turn: all three untapped only by
+        // turn 4 (play T1/T2/T3, they untap T2/T3/T4). We cap at turn 3 → None.
+        let s = setup(&[], &["Undercity Sewers", "Undercity Sewers", "Undercity Sewers", "Doomsday"], &[]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    #[test]
+    fn three_untapped_lands_in_hand_cast_by_turn_three() {
+        // One land drop per turn → three untapped lands online by turn 3.
+        let s = setup(&[], &["Underground Sea", "Underground Sea", "Underground Sea", "Doomsday"], &[]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(3));
+    }
+
+    #[test]
+    fn in_play_source_plus_ritual_is_turn_one() {
+        let s = setup(&["Underground Sea"], &["Underground Sea", "Dark Ritual", "Doomsday"], &[]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(1));
+    }
+
+    #[test]
+    fn one_source_never_reaches_bbb_deterministically() {
+        // A single black land and nothing else can't make BBB, however many turns.
+        let s = setup(&[], &["Underground Sea", "Doomsday"], &[]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    #[test]
+    fn ritual_without_a_seed_cannot_cast() {
+        // Dark Ritual costs B — it needs a 1-black seed to cast. With no land or
+        // petal there's nothing to produce it, and rituals can't bootstrap each
+        // other, so even two rituals + Doomsday is never castable.
+        let s = setup(&[], &["Dark Ritual", "Dark Ritual", "Doomsday"], &[]);
+        assert!(!sufficient(&s, PlayerId::Us));
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    // ── deterministic payoff acquisition (Personal Tutor) ─────────────────────
+
+    #[test]
+    fn personal_tutor_acquires_doomsday_one_turn_late() {
+        // BBB online now (3 Seas) but no Doomsday in hand — Personal Tutor in hand
+        // and DD in library: pay {U} this turn (a Sea), draw the seeded DD next
+        // turn → cast turn 2. Not castable turn 1 (no DD in hand yet).
+        let s = setup(
+            &["Underground Sea", "Underground Sea", "Underground Sea"],
+            &["Personal Tutor"],
+            &["Doomsday"],
+        );
+        assert!(!sufficient(&s, PlayerId::Us));
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(2));
+    }
+
+    #[test]
+    fn personal_tutor_needs_a_source_of_its_pip_colour() {
+        // Three Swamps make BBB, but Personal Tutor costs {U} and a Swamp makes no
+        // blue → the tutor is uncastable, so no payoff line exists.
+        let s = setup(
+            &["Swamp", "Swamp", "Swamp"],
+            &["Personal Tutor"],
+            &["Doomsday"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    #[test]
+    fn personal_tutor_needs_doomsday_in_the_library() {
+        // PT can only acquire a Doomsday that's actually in the library (grounded
+        // by obj_matches). With none there, it's not a payoff line.
+        let s = setup(
+            &["Underground Sea", "Underground Sea", "Underground Sea"],
+            &["Personal Tutor"],
+            &["Island"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    #[test]
+    fn battlefield_searcher_is_not_a_payoff_tutor() {
+        // Green Sun's Zenith searches the library but puts the find onto the
+        // BATTLEFIELD — it can't seed the top of the library for a draw, so it's
+        // structurally excluded as a payoff tutor (and couldn't get a sorcery anyway).
+        let s = setup(
+            &["Underground Sea", "Underground Sea", "Underground Sea"],
+            &["Green Sun's Zenith"],
+            &["Doomsday"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    #[test]
+    fn doomsday_in_hand_beats_the_tutor_line() {
+        // With both DD in hand and a tutor, the direct line (cast now) wins over
+        // the one-turn-late tutor line.
+        let s = setup(
+            &["Underground Sea", "Underground Sea", "Underground Sea"],
+            &["Doomsday", "Personal Tutor"],
+            &["Doomsday"],
+        );
+        assert!(sufficient(&s, PlayerId::Us));
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(1));
+    }
+
+    #[test]
+    fn baseline_oracle_requires_a_seed_for_rituals() {
+        // The independent hypergeometric oracle must also reject seedless rituals.
+        assert!(!schedule_cast_by(0, 0, 0, 2, 3)); // 2 rituals, no land/petal, by turn 3 → no
+        assert!(schedule_cast_by(0, 1, 0, 1, 1)); // land seeds the ritual → turn 1
+        assert!(schedule_cast_by(1, 0, 0, 1, 1)); // petal seeds the ritual → turn 1
+    }
+
+    /// The canonical "tempo dd tami waste" list (Moxfield M_yMyiTfg0eoKTkaqCkJ_Q),
+    /// 60-card mainboard. Cards the engine doesn't implement are still listed —
+    /// they classify as "other"; only the mana package + Doomsday drive T1
+    /// sufficiency. (Tamiyo uses its front-face catalog key.)
+    fn canonical_tempo_dd() -> Vec<(String, i32, String)> {
+        [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 1),
+            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Bloodstained Mire", 1),
+            ("Swamp", 1), ("Island", 1), ("Undercity Sewers", 1), ("Wasteland", 2),
+            ("Cavern of Souls", 1),
+            ("Lotus Petal", 2), ("Lion's Eye Diamond", 1), ("Dark Ritual", 4),
+            ("Doomsday", 4),
+            ("Brainstorm", 4), ("Ponder", 4), ("Consider", 1), ("Flow State", 4),
+            ("Edge of Autumn", 1), ("Street Wraith", 1),
+            ("Force of Will", 4), ("Daze", 2), ("Thoughtseize", 2),
+            ("Thassa's Oracle", 1), ("Jace, Wielder of Mysteries", 1),
+            ("Tamiyo, Inquisitive Student", 4), ("Murktide Regent", 2),
+        ]
+        .iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
+    }
+
+    /// The "tempo dd tami pt" variant (Moxfield k9KeAU6pl3C-qDNSWOqzxg): vs the
+    /// `waste` list, +1 Lotus Petal (3 total), +Personal Tutor, +1 Thassa,
+    /// −2 Wasteland, −Jace. Still 60.
+    fn canonical_tempo_dd_pt() -> Vec<(String, i32, String)> {
+        [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 1),
+            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Bloodstained Mire", 1),
+            ("Swamp", 1), ("Island", 1), ("Undercity Sewers", 1),
+            ("Cavern of Souls", 1),
+            ("Lotus Petal", 3), ("Lion's Eye Diamond", 1), ("Dark Ritual", 4),
+            ("Doomsday", 4), ("Personal Tutor", 1),
+            ("Brainstorm", 4), ("Ponder", 4), ("Consider", 1), ("Flow State", 4),
+            ("Edge of Autumn", 1), ("Street Wraith", 1),
+            ("Force of Will", 4), ("Daze", 2), ("Thoughtseize", 2),
+            ("Thassa's Oracle", 2),
+            ("Tamiyo, Inquisitive Student", 4), ("Murktide Regent", 2),
+        ]
+        .iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
+    }
+
+    /// Compare two builds on the deterministic cast-by-turn metric. The `pt`
+    /// list's extra Lotus Petal (3 vs 2) is the only DETERMINISTIC difference
+    /// (Personal Tutor finds DD via a draw, Street Wraith is a free redraw — both
+    /// land in the stochastic-draw model, not here). Quantifies the petal's speed.
+    #[test]
+    fn extra_petal_speeds_up_deterministic_doomsday() {
+        let catalog = build_catalog();
+        let waste = categorize(&canonical_tempo_dd(), &catalog);
+        let pt = categorize(&canonical_tempo_dd_pt(), &catalog);
+        println!("waste [DD,U,T,R,P,other] = {waste:?}");
+        println!("pt    [DD,U,T,R,P,other] = {pt:?}");
+        for turn in 1..=3i64 {
+            let a = analytical_cast_by(waste, turn);
+            let b = analytical_cast_by(pt, turn);
+            println!("turn {turn}: waste = {a:.4}, +petal = {b:.4}, Δ = +{:.4}", b - a);
+            assert!(b >= a - 1e-9, "an extra petal can't slow deterministic DD");
+        }
+    }
+
+    /// Independent oracle: can the opening hand reach 3 black by `turn`, decided
+    /// by EXPLICITLY enumerating which lands take which land-drop slot (a tapland
+    /// is online only if played before `turn`, i.e. it untaps in time). This is a
+    /// different algorithm from the solver's closed-form `online_black_lands`, so
+    /// agreement cross-checks the multi-turn scheduling.
+    fn schedule_cast_by(petals: i64, untapped: i64, tapped: i64, rituals: i64, turn: i64) -> bool {
+        let slots = turn; // one land drop per turn, turns 1..=turn (turn 1 = now)
+        let early = turn - 1; // slots before `turn`, where a tapland still untaps by then
+        for tp in 0..=tapped.min(early) {
+            let up = untapped.min(slots - tp); // untapped lands fill remaining slots
+            let black = petals + up + tp;
+            if black >= 3 || (rituals >= 1 && black >= 1) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Empirical "can deterministically cast Doomsday by turn t" rate (t = 1,2,3)
+    /// over `k` random opening hands, via `deterministic_cast_turn` (so PT lines
+    /// are included). Returns `[_, p1, p2, p3]` (index 0 unused). The harness
+    /// mirrors a real draw: 7 cards to hand, the rest to library — so a tutor can
+    /// reach a Doomsday sitting in the library.
+    fn empirical_cast_by(deck: &[(String, i32, String)], k: u32, seed: u64) -> [f64; 4] {
+        let names: Vec<&str> = deck
+            .iter()
+            .flat_map(|(n, q, _)| std::iter::repeat(n.as_str()).take((*q).max(0) as usize))
+            .collect();
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut state = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        state.catalog = build_catalog();
+        let (us_pid, opp_pid) = (state.player_id(PlayerId::Us), state.player_id(PlayerId::Opp));
+        let mut shuffled = names.clone();
+        let mut by = [0u32; 4]; // games castable by turn 0,1,2,3
+        for _ in 0..k {
+            shuffled.shuffle(&mut rng);
+            state.objects.retain(|id, _| *id == us_pid || *id == opp_pid);
+            state.player_mut(PlayerId::Us).library_order.clear();
+            for (i, name) in shuffled.iter().enumerate() {
+                let zone = if i < 7 { Zone::Hand { known: false } } else { Zone::Library };
+                state.place_card(PlayerId::Us, name, zone);
+            }
+            if let Some(s) = deterministic_cast_turn(&state, PlayerId::Us, 3) {
+                for slot in by.iter_mut().skip(s as usize) {
+                    *slot += 1;
+                }
+            }
+        }
+        [0.0, by[1] as f64 / k as f64, by[2] as f64 / k as f64, by[3] as f64 / k as f64]
+    }
+
+    /// Validate the deterministic multi-turn solver: for each turn t∈1..3 the
+    /// empirical "can cast by turn t" rate over K random opening hands (via
+    /// `deterministic_cast_turn`) must match the exact hypergeometric probability
+    /// of the same event, where sufficiency is decided by the INDEPENDENT
+    /// `schedule_cast_by` enumeration (not the solver's formula). The canonical
+    /// list has NO Personal Tutor, so PT lines never fire and the agreement still
+    /// cross-checks the scheduling math AND the harness, turn by turn.
+    #[test]
+    fn deterministic_cast_rate_matches_hypergeometric() {
+        let deck = canonical_tempo_dd();
+        let catalog = build_catalog();
+
+        // Categorize via the shared IR-based helper (engine-unimplemented →
+        // "other"). by-hand: 4 DD / 13 untapped / 1 tapped / 4 ritual / 2 petal / 36 other.
+        let counts = categorize(&deck, &catalog);
+        let [dd, u, tl, ritual, petal, other] = counts;
+        assert_eq!(counts.iter().sum::<i64>(), 60);
+        println!("categories: DD={dd} untapped={u} tapped={tl} ritual={ritual} petal={petal} other={other}");
+
+        let rates = empirical_cast_by(&deck, 30_000, 0xD00D_5DA7);
+        for turn in 1..=3usize {
+            let p = analytical_cast_by(counts, turn as i64);
+            let emp = rates[turn];
+            println!("cast by turn {turn}: analytical = {p:.4}, empirical = {emp:.4} (|Δ| = {:.4})", (emp - p).abs());
+            assert!(
+                (emp - p).abs() < 0.012,
+                "turn {turn}: empirical {emp:.4} diverges from hypergeometric {p:.4}"
+            );
+        }
+    }
+
+    /// A very fast 4×Personal-Tutor Doomsday list (MTGGoldfish deck 7805658),
+    /// 60-card mainboard. vs the canonical tempo lists: 4 Personal Tutor (not 0/1),
+    /// 4 Lotus Petal, 4 Daze, no Tamiyo/Murktide/Wasteland. Engine-unimplemented
+    /// cards classify as "other".
+    fn fast_pt_doomsday() -> Vec<(String, i32, String)> {
+        [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 3),
+            ("Bloodstained Mire", 1), ("Swamp", 1), ("Island", 1),
+            ("Undercity Sewers", 1), ("Cavern of Souls", 1),
+            ("Lotus Petal", 4), ("Lion's Eye Diamond", 1), ("Dark Ritual", 4),
+            ("Doomsday", 4), ("Personal Tutor", 4),
+            ("Brainstorm", 4), ("Ponder", 4), ("Consider", 1),
+            ("Edge of Autumn", 2), ("Street Wraith", 2),
+            ("Force of Will", 4), ("Daze", 4), ("Thoughtseize", 4),
+            ("Thassa's Oracle", 1), ("Jace, Wielder of Mysteries", 1),
+        ]
+        .iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
+    }
+
+    /// The 4×Personal-Tutor list quantified. Personal Tutor turns a no-Doomsday
+    /// hand into a one-turn-late cast (seed the payoff on top, draw it). We compare
+    /// the PT-AWARE deterministic empirical rate against the PT-BLIND hypergeometric
+    /// (which counts Personal Tutor as "other") — the gap is exactly what 4 tutors
+    /// buy in deterministic speed — and print the 0-PT / 1-PT canonical lists
+    /// alongside for scale. (Cross-list ordering isn't asserted: the lists differ
+    /// in more than PT, so only the self-comparison PT-aware vs PT-blind is causal.)
+    #[test]
+    fn four_personal_tutors_speed_up_deterministic_doomsday() {
+        let catalog = build_catalog();
+        let fast = fast_pt_doomsday();
+        let counts = categorize(&fast, &catalog);
+        let [dd, u, tl, ritual, petal, other] = counts;
+        assert_eq!(counts.iter().sum::<i64>(), 60);
+        println!("fast-PT categories: DD={dd} untapped={u} tapped={tl} ritual={ritual} petal={petal} other={other} (PT∈other)");
+
+        let k = 20_000u32;
+        let waste = empirical_cast_by(&canonical_tempo_dd(), k, 0xFA57_0001);
+        let pt1 = empirical_cast_by(&canonical_tempo_dd_pt(), k, 0xFA57_0002);
+        let fast_e = empirical_cast_by(&fast, k, 0xFA57_0003);
+
+        println!("deterministic cast-by-turn (PT-aware empirical):");
+        for turn in 1..=3usize {
+            let blind = analytical_cast_by(counts, turn as i64); // PT counted as "other"
+            println!(
+                "  turn {turn}: waste(0PT)={:.4}  pt(1PT)={:.4}  fast(4PT)={:.4}  | fast PT-blind={:.4}  Δ(PT)=+{:.4}",
+                waste[turn], pt1[turn], fast_e[turn], blind, fast_e[turn] - blind
+            );
+            // PT lines only ADD deterministic castability — never remove it.
+            assert!(
+                fast_e[turn] >= blind - 5e-3,
+                "PT lines can't slow the 4-PT list at turn {turn} (PT-aware {:.4} < PT-blind {blind:.4})",
+                fast_e[turn]
+            );
+        }
+        // Turn 1: PT can't help (its line is ≥ turn 2) → PT-aware ≈ PT-blind.
+        assert!(
+            (fast_e[1] - analytical_cast_by(counts, 1)).abs() < 6e-3,
+            "Personal Tutor must not change the turn-1 rate"
+        );
+        // By turn 2, four tutors must add measurable deterministic castability.
+        assert!(
+            fast_e[2] > analytical_cast_by(counts, 2) + 0.01,
+            "4 Personal Tutors should add >1% deterministic castability by turn 2"
+        );
+    }
+
+    /// Cross-check the PT-FACTORING math: the empirical PT-aware cast-by-turn rate
+    /// (Monte-Carlo over `deterministic_cast_turn`) must match an INDEPENDENT
+    /// closed-form hypergeometric that includes the tutor line
+    /// (`analytical_cast_by_pt`, which never calls the solver — it reuses only the
+    /// validated `schedule_cast_by` BBB enumerator and an independently-derived PT
+    /// factor). Agreement validates the tutor line's implementation AND the MC
+    /// harness. Also reports the petal one-mana honesty gap (mirror vs correct).
+    #[test]
+    fn pt_aware_cast_rate_matches_hypergeometric() {
+        let catalog = build_catalog();
+        let deck = fast_pt_doomsday();
+        let c9 = categorize_pt(&deck, &catalog);
+        assert_eq!(c9.iter().sum::<i64>(), 60);
+        let [dd, ub, sw, tl, ritual, petal, il, pt, other] = c9;
+        println!("9-way: DD={dd} ub={ub} sw={sw} tl={tl} ritual={ritual} petal={petal} il={il} pt={pt} other={other}");
+
+        let emp = empirical_cast_by(&deck, 40_000, 0x9A57_C0DE);
+        for turn in 1..=3usize {
+            let correct = analytical_cast_by_pt(c9, turn as i64, true); // petal = one mana (honest)
+            let mirror = analytical_cast_by_pt(c9, turn as i64, false); // petal double-use (the old bug)
+            println!(
+                "turn {turn}: empirical={:.4}  analytical(honest)={correct:.4}  (|Δ|={:.4})   would-be-double-use={mirror:.4}  (cost-cycle removed {:.4})",
+                emp[turn], (emp[turn] - correct).abs(), mirror - correct
+            );
+            // The solver now models the sac cost as consuming the petal-object, so
+            // it must match the HONEST closed form (petal = one mana) within noise.
+            assert!(
+                (emp[turn] - correct).abs() < 0.012,
+                "turn {turn}: empirical {:.4} diverges from honest PT-aware hypergeometric {correct:.4}",
+                emp[turn]
+            );
+            // And it must NOT match the double-use model: the cost-cycle fix put it
+            // on the honest side of the gap. (No assertion at turn 1, where the gap is 0.)
+            if mirror - correct > 0.003 {
+                assert!(
+                    (emp[turn] - correct).abs() < (emp[turn] - mirror).abs(),
+                    "turn {turn}: solver is closer to the double-use model than the honest one"
+                );
+            }
+        }
+    }
+
+    fn setup(bf: &[&str], hand: &[&str], library: &[&str]) -> SimState {
+        let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s.catalog = build_catalog();
+        for n in bf {
+            s.place_card(PlayerId::Us, n, Zone::Battlefield);
+        }
+        for n in hand {
+            s.place_card(PlayerId::Us, n, Zone::Hand { known: false });
+        }
+        for n in library {
+            s.place_card(PlayerId::Us, n, Zone::Library);
+        }
+        s
+    }
+
+    fn ub_mana_deck() -> Vec<(String, i32, String)> {
+        [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 2),
+            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Bloodstained Mire", 1),
+            ("Swamp", 1), ("Undercity Sewers", 1),
+            ("Lotus Petal", 2), ("Dark Ritual", 4), ("Doomsday", 4),
+        ]
+        .iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
+    }
+
+    // ── stochastic gap-closing (#7b) ──────────────────────────────────────────
+
+    #[test]
+    fn expected_draws_to_out_matches_negative_hypergeometric() {
+        // (N+1)/(K+1) is the mean position of the first "out" when K outs are
+        // uniformly placed in N cards. Cross-check by shuffling and recording the
+        // first hit — an independent confirmation of the closed form.
+        let (n, k) = (53u32, 13u32);
+        let mut deck: Vec<bool> = (0..n).map(|i| i < k).collect();
+        let mut rng = SmallRng::seed_from_u64(0x0177_5EED);
+        let trials = 200_000u32;
+        let mut total = 0u64;
+        for _ in 0..trials {
+            deck.shuffle(&mut rng);
+            total += deck.iter().position(|&x| x).unwrap() as u64 + 1; // 1-based
+        }
+        let empirical = total as f64 / trials as f64;
+        let analytical = expected_draws_to_out(n, k);
+        println!("E[draws to first out] N={n} K={k}: analytical={analytical:.4} empirical={empirical:.4}");
+        assert!((empirical - analytical).abs() < 0.05, "negative-hypergeometric mean mismatch");
+        assert!(expected_draws_to_out(40, 0).is_infinite(), "no outs ⇒ never closes");
+    }
+
+    /// Mean finite E[TTD] over `k` random opening hands, plus the brick rate
+    /// (fraction with no out at all). Shares the opening-hand harness.
+    fn mean_e_ttd(deck: &[(String, i32, String)], k: u32, seed: u64) -> (f64, f64) {
+        let names: Vec<&str> = deck
+            .iter()
+            .flat_map(|(n, q, _)| std::iter::repeat(n.as_str()).take((*q).max(0) as usize))
+            .collect();
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut state = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        state.catalog = build_catalog();
+        let (us_pid, opp_pid) = (state.player_id(PlayerId::Us), state.player_id(PlayerId::Opp));
+        let mut shuffled = names.clone();
+        let (mut sum, mut finite, mut bricks) = (0.0f64, 0u32, 0u32);
+        for _ in 0..k {
+            shuffled.shuffle(&mut rng);
+            state.objects.retain(|id, _| *id == us_pid || *id == opp_pid);
+            state.player_mut(PlayerId::Us).library_order.clear();
+            for (i, name) in shuffled.iter().enumerate() {
+                let zone = if i < 7 { Zone::Hand { known: false } } else { Zone::Library };
+                state.place_card(PlayerId::Us, name, zone);
+            }
+            let v = e_ttd(&state, PlayerId::Us, 3);
+            if v.is_finite() {
+                sum += v;
+                finite += 1;
+            } else {
+                bricks += 1;
+            }
+        }
+        (sum / finite as f64, bricks as f64 / k as f64)
+    }
+
+    #[test]
+    fn e_ttd_ranks_fast_pt_below_waste() {
+        let k = 8_000;
+        let (fast_mean, fast_brick) = mean_e_ttd(&fast_pt_doomsday(), k, 0xE77D_0001);
+        let (waste_mean, waste_brick) = mean_e_ttd(&canonical_tempo_dd(), k, 0xE77D_0002);
+        println!(
+            "E[TTD] fast(4PT)={fast_mean:.3} (brick {fast_brick:.3})  waste(0PT)={waste_mean:.3} (brick {waste_brick:.3})"
+        );
+        // The faster, tutor-rich list resolves Doomsday sooner in expectation.
+        assert!(fast_mean < waste_mean, "the 4-PT list should have lower mean E[TTD]");
+    }
+
+    // ── sufficient? over real states ─────────────────────────────────────────
+
+    #[test]
+    fn three_black_in_play() {
+        assert!(sufficient(&setup(&["Underground Sea", "Underground Sea", "Swamp"], &["Doomsday"], &[]), PlayerId::Us));
+    }
+
+    #[test]
+    fn two_seas_plus_ritual() {
+        assert!(sufficient(&setup(&["Underground Sea", "Underground Sea"], &["Dark Ritual", "Doomsday"], &[]), PlayerId::Us));
+    }
+
+    #[test]
+    fn two_seas_plus_petal() {
+        assert!(sufficient(&setup(&["Underground Sea", "Underground Sea"], &["Lotus Petal", "Doomsday"], &[]), PlayerId::Us));
+    }
+
+    #[test]
+    fn fetch_in_hand_to_ritual() {
+        // Play a fetch (untapped) → it can get a Sea (in library) → tap → seed Dark Ritual.
+        let s = setup(&[], &["Polluted Delta", "Dark Ritual", "Doomsday"], &["Underground Sea"]);
+        assert!(sufficient(&s, PlayerId::Us));
+    }
+
+    #[test]
+    fn surveil_dual_land_drop_makes_no_mana_this_turn() {
+        // Two black in play; the one land drop is a surveil dual (enters tapped) →
+        // no third black this turn → insufficient. An untapped dual instead → fine.
+        let tapped = setup(&["Underground Sea", "Underground Sea"], &["Undercity Sewers", "Doomsday"], &[]);
+        assert!(!sufficient(&tapped, PlayerId::Us));
+        let untapped = setup(&["Underground Sea", "Underground Sea"], &["Underground Sea", "Doomsday"], &[]);
+        assert!(sufficient(&untapped, PlayerId::Us));
+    }
+
+    #[test]
+    fn one_land_drop_per_turn() {
+        // Three black lands in hand, none in play: only one is playable → short.
+        assert!(!sufficient(&setup(&[], &["Swamp", "Swamp", "Swamp", "Doomsday"], &[]), PlayerId::Us));
+    }
+
+    #[test]
+    fn no_doomsday_is_insufficient() {
+        assert!(!sufficient(&setup(&["Underground Sea", "Underground Sea", "Swamp"], &["Dark Ritual"], &[]), PlayerId::Us));
+    }
+
+    // ── the gap is the missing ingredients ───────────────────────────────────
+
+    #[test]
+    fn two_seas_gap_is_land_petal_or_ritual() {
+        let s = setup(&["Underground Sea", "Underground Sea"], &["Doomsday"], &[]);
+        assert_eq!(mana_gap(&s, PlayerId::Us), vec!["land", "petal", "ritual"]);
+    }
+
+    // ── deck → {sufficient} reproduces the five bundles ──────────────────────
+
+    #[test]
+    fn ub_deck_yields_the_five_bundles() {
+        let mut got = bundles(&ub_mana_deck());
+        got.sort_by_key(|b| (b.lands, b.petals, b.rituals));
+        let mut want = vec![
+            Bundle { lands: 3, petals: 0, rituals: 0 }, // 3 untapped lands
+            Bundle { lands: 2, petals: 1, rituals: 0 }, // 2 lands + petal
+            Bundle { lands: 1, petals: 2, rituals: 0 }, // 1 land + 2 petals
+            Bundle { lands: 1, petals: 0, rituals: 1 }, // 1 land + ritual
+            Bundle { lands: 0, petals: 1, rituals: 1 }, // petal + ritual
+        ];
+        want.sort_by_key(|b| (b.lands, b.petals, b.rituals));
+        assert_eq!(got, want);
+    }
+}
