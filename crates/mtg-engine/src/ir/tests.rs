@@ -1507,6 +1507,7 @@ mod execute_parity {
                 filter: creature_filter,
                 count: Expr::Num(1),
                 dest: ZoneKindSel::Hand,
+                to_top: false,
                 shuffle: true,
                 bind_as: None,
             },
@@ -1521,6 +1522,121 @@ mod execute_parity {
         assert!(!matches!(
             s.objects.get(&land).unwrap().zone(), Some(Zone::Hand { .. })
         ));
+    }
+
+    fn make_sorcery(name: &str) -> CardDef {
+        let sp = crate::catalog::SpellData { mana_cost: "{B}".into(), ..Default::default() };
+        CardDef::new(
+            name, CardKind::Sorcery(sp), vec![Color::Black], None, vec![],
+            CardLayout::Normal, None, vec![], vec![], vec![], vec![],
+        )
+    }
+
+    // Personal Tutor pattern: search → shuffle → put the chosen card on TOP.
+    #[test]
+    fn search_to_top_after_shuffle_puts_chosen_sorcery_on_top() {
+        let mut s = make_state();
+        s.rng = seeded_rng(7);
+        // One sorcery among non-sorceries in the library.
+        let sorc = insert_obj(&mut s, PlayerId::Us, make_sorcery("Doomsday"));
+        let _l1 = insert_obj(&mut s, PlayerId::Us, make_land("Island"));
+        let _l2 = insert_obj(&mut s, PlayerId::Us, make_land("Island"));
+        let _c = insert_obj(&mut s, PlayerId::Us, make_creature("A", "{G}", 1, 1));
+
+        let sorcery_filter = Filter(Expr::Contains(
+            Box::new(Expr::TypeLit(crate::CardType::Sorcery)),
+            Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+        ));
+        execute(
+            &Action::Search {
+                who: Who::You,
+                zone: ZoneKindSel::Library,
+                filter: sorcery_filter,
+                count: Expr::Num(1),
+                dest: ZoneKindSel::Library,
+                to_top: true,
+                shuffle: true,
+                bind_as: None,
+            },
+            &mut s,
+            &BindEnv::new().with_controller(PlayerId::Us),
+        );
+
+        // The chosen sorcery sits on top (shuffle happened first, then it was lifted).
+        assert_eq!(s.player(PlayerId::Us).library_order.front(), Some(&sorc));
+        // Still four cards in the library — nothing left the zone.
+        assert_eq!(s.player(PlayerId::Us).library_order.len(), 4);
+    }
+
+    fn make_instant(name: &str) -> CardDef {
+        let sp = crate::catalog::SpellData { mana_cost: "{U}".into(), ..Default::default() };
+        CardDef::new(
+            name, CardKind::Instant(sp), vec![Color::Blue], None, vec![],
+            CardLayout::Normal, None, vec![], vec![], vec![], vec![],
+        )
+    }
+
+    // Dig: look at top N, keep K to hand (NOT a draw), rest to the bottom.
+    #[test]
+    fn dig_keeps_chosen_and_bottoms_the_rest() {
+        let mut s = make_state();
+        s.rng = seeded_rng(1);
+        let t1 = insert_obj(&mut s, PlayerId::Us, make_creature("T1", "{G}", 1, 1));
+        let t2 = insert_obj(&mut s, PlayerId::Us, make_land("L2"));
+        let t3 = insert_obj(&mut s, PlayerId::Us, make_creature("T3", "{G}", 1, 1));
+        let below = insert_obj(&mut s, PlayerId::Us, make_land("Below"));
+
+        // Look at the top 3 [t1,t2,t3]; keep 1 (default strategy keeps the first, t1).
+        execute(
+            &Action::Dig { who: Who::You, n: Expr::Num(3), take: Expr::Num(1) },
+            &mut s,
+            &BindEnv::new().with_controller(PlayerId::Us),
+        );
+        assert_eq!(s.hand_of(PlayerId::Us).map(|o| o.id).collect::<Vec<_>>(), vec![t1]);
+        // The un-looked card rises to the top; the two un-kept go to the bottom.
+        assert_eq!(
+            s.player(PlayerId::Us).library_order.iter().copied().collect::<Vec<_>>(),
+            vec![below, t2, t3],
+        );
+    }
+
+    // Flow State keeps two only when both an instant AND a sorcery are in the graveyard.
+    #[test]
+    fn flow_state_keeps_two_only_with_instant_and_sorcery_in_graveyard() {
+        let cat = crate::card_defs::build_catalog();
+        let fs = cat.get("Flow State").expect("Flow State registered in catalog");
+        let crate::ir::ability::AbilityKind::OnResolve { modes } = &fs
+            .abilities
+            .iter()
+            .find(|a| matches!(a.kind, crate::ir::ability::AbilityKind::OnResolve { .. }))
+            .unwrap()
+            .kind
+        else {
+            unreachable!()
+        };
+        let body = modes[0].body.clone();
+
+        let run = |inst: bool, sorc: bool| -> usize {
+            let mut s = make_state();
+            s.rng = seeded_rng(2);
+            for nm in ["A", "B", "C", "D"] {
+                insert_obj(&mut s, PlayerId::Us, make_land(nm));
+            }
+            if inst {
+                let id = insert_obj(&mut s, PlayerId::Us, make_instant("Bolt"));
+                s.set_card_zone(id, Zone::Graveyard);
+            }
+            if sorc {
+                let id = insert_obj(&mut s, PlayerId::Us, make_sorcery("Sorc"));
+                s.set_card_zone(id, Zone::Graveyard);
+            }
+            execute(&body, &mut s, &BindEnv::new().with_controller(PlayerId::Us));
+            s.hand_of(PlayerId::Us).count()
+        };
+        assert_eq!(run(false, false), 1, "no graveyard spells → keep 1");
+        assert_eq!(run(true, false), 1, "only an instant → keep 1");
+        assert_eq!(run(false, true), 1, "only a sorcery → keep 1");
+        assert_eq!(run(true, true), 2, "instant AND sorcery → keep 2");
     }
 
     // Silence unused imports (Keyword/Supertype appear only in sibling module).

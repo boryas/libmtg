@@ -79,6 +79,10 @@ pub enum Action {
         filter: Filter,
         count: Expr,
         dest: ZoneKindSel,
+        /// When `dest` is `Library`, place the found card(s) on TOP rather than
+        /// the (default) bottom — for tutors that put on top (Personal Tutor,
+        /// Vampiric/Mystical Tutor). Ignored for other destinations.
+        to_top: bool,
         shuffle: bool,
         bind_as: Option<&'static str>,
     },
@@ -305,6 +309,16 @@ pub enum Action {
     OrderTop {
         who: Who,
         n: Expr,
+    },
+    /// Look at the top `n` cards of `who`'s library; the player puts `take` of
+    /// them into hand and the rest on the bottom (any order). The kept cards are
+    /// a plain move into hand — NOT a draw (no Draw event/triggers fire). The
+    /// to-hand choice routes through `Strategy::choose_for_effect`. Sibling of
+    /// Scry/Surveil/OrderTop in the look-at-top family (Flow State, Stock Up).
+    Dig {
+        who: Who,
+        n: Expr,
+        take: Expr,
     },
     Reveal {
         who: Who,

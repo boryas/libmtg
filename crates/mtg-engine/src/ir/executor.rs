@@ -557,11 +557,12 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
-        Action::Search { who, zone, filter, count, dest, shuffle, bind_as: _ } => {
-            use rand::Rng;
+        Action::Search { who, zone, filter, count, dest, to_top, shuffle, bind_as: _ } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(count, state, env)) as usize;
             let dest_zone = zone_id_from_kind(*dest);
+            let src = env.source.unwrap_or_default();
+            let mut found: Vec<ObjId> = Vec::new();
             for _ in 0..n {
                 let candidates: Vec<ObjId> = enumerate_kind_for_player(state, *zone, who)
                     .into_iter()
@@ -570,12 +571,70 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 if candidates.is_empty() {
                     break;
                 }
-                let pick = state.rng.gen_range(0..candidates.len());
-                let id = candidates[pick];
+                // Searching the library is a player choice (CR 701.19), not random —
+                // the strategy picks which card matching the filter to find.
+                let id = state
+                    .with_strategy(who, |s, st| s.choose_for_effect(src, &candidates, st))
+                    .unwrap_or(candidates[0]);
                 change_zone(id, dest_zone, state, t, who);
+                found.push(id);
             }
+            // Order matters: shuffle FIRST, then place on top — e.g. Personal
+            // Tutor / Vampiric Tutor are "shuffle, then put the card on top."
+            // Doing it the other way would scatter the just-placed card.
             if *shuffle {
                 state.shuffle_library(who);
+            }
+            if *to_top && matches!(*dest, ZoneKindSel::Library) {
+                for &id in found.iter().rev() {
+                    let lib = &mut state.player_mut(who).library_order;
+                    if let Some(pos) = lib.iter().position(|&x| x == id) {
+                        lib.remove(pos);
+                        lib.push_front(id);
+                    }
+                }
+            }
+            ExecResult::Ok
+        }
+
+        Action::Dig { who, n, take } => {
+            let who = resolve_who(who, state, env, actor);
+            let n = expect_num(eval_expr(n, state, env)).max(0) as usize;
+            let take = expect_num(eval_expr(take, state, env)).max(0) as usize;
+            // The looked-at cards are the top `n`, in library order.
+            let top: Vec<ObjId> = state
+                .player(who)
+                .library_order
+                .iter()
+                .take(n)
+                .copied()
+                .collect();
+            if top.is_empty() {
+                return ExecResult::Ok;
+            }
+            let src = env.source.unwrap_or_default();
+            // The player chooses which of the looked-at cards to keep (CR: a choice).
+            let mut remaining = top.clone();
+            let mut to_hand: Vec<ObjId> = Vec::new();
+            for _ in 0..take.min(top.len()) {
+                let pick = state
+                    .with_strategy(who, |s, st| s.choose_for_effect(src, &remaining, st))
+                    .unwrap_or(remaining[0]);
+                remaining.retain(|&x| x != pick);
+                to_hand.push(pick);
+            }
+            // Kept cards enter hand via a plain zone move — NOT a draw (no Draw
+            // event), so draw-triggers like Orcish Bowmasters don't fire.
+            for &id in &to_hand {
+                change_zone(id, ZoneId::Hand, state, t, who);
+            }
+            // The rest go to the bottom of the library, in any order.
+            for &id in &remaining {
+                let lib = &mut state.player_mut(who).library_order;
+                if let Some(pos) = lib.iter().position(|&x| x == id) {
+                    lib.remove(pos);
+                    lib.push_back(id);
+                }
             }
             ExecResult::Ok
         }

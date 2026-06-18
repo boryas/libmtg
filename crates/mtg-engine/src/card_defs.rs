@@ -268,6 +268,7 @@ fn all_cards() -> Vec<CardDef> {
         hymn_to_tourach(),
         edge_of_autumn(),
         personal_tutor(),
+        flow_state(),
         green_suns_zenith(),
         show_and_tell(),
         omniscience(),
@@ -2379,10 +2380,63 @@ fn stock_up() -> CardDef {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
                 target_spec: TargetSpec::None,
-                body: Action::Draw { who: IrWho::You, n: Expr::Num(2) },
+                // De-hacked: real "look at top 5, keep 2, rest to bottom" — a dig,
+                // not a Draw N (which was a player-agency + too-specific shortcut).
+                body: Action::Dig { who: IrWho::You, n: Expr::Num(5), take: Expr::Num(2) },
             }],
         },
-        text: Some("Draw two cards."),
+        text: Some("Look at the top five cards of your library. Put two of them into your hand and the rest on the bottom of your library in any order."),
+    }];
+    card
+}
+
+/// Look at the top three cards; put one (two if there's an instant AND a sorcery
+/// in your graveyard) into hand, rest on the bottom. CR 701.* (look/choose).
+fn flow_state() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
+    let mut card = simple("Flow State", CardKind::Sorcery(SpellData {
+        mana_cost: "1U".to_string(),
+        modes: None,
+        ..Default::default()
+    }), parse_colors("U", false, false), None);
+
+    // ">= 1 card of `ty` in your graveyard".
+    let gy_has = |ty: CardType, bind: &'static str| -> Expr {
+        Expr::Ge(
+            Box::new(Expr::Count(Box::new(Expr::AllObjects {
+                zone: ZoneSel::Scoped {
+                    zone_kind: ZoneKindSel::Graveyard,
+                    owner: Box::new(Expr::Ctx(Ctx::Controller)),
+                },
+                bind,
+                filter: Box::new(Expr::Contains(
+                    Box::new(Expr::TypeLit(ty)),
+                    Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::Var(bind))))),
+                )),
+            }))),
+            Box::new(Expr::Num(1)),
+        )
+    };
+    let cond = Expr::And(
+        Box::new(gy_has(CardType::Instant, "fs_i")),
+        Box::new(gy_has(CardType::Sorcery, "fs_s")),
+    );
+
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::IfThen {
+                    cond,
+                    then: Box::new(Action::Dig { who: IrWho::You, n: Expr::Num(3), take: Expr::Num(2) }),
+                    else_: Some(Box::new(Action::Dig { who: IrWho::You, n: Expr::Num(3), take: Expr::Num(1) })),
+                },
+            }],
+        },
+        text: Some("Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order. If there is an instant card and a sorcery card in your graveyard, instead put two of them into your hand and the rest on the bottom of your library in any order."),
     }];
     card
 }
@@ -2553,12 +2607,13 @@ fn personal_tutor() -> CardDef {
                     filter: ir_type(CardType::Sorcery),
                     count: Expr::Num(1),
                     dest: ZoneKindSel::Library,
+                    to_top: true,
                     shuffle: true,
                     bind_as: None,
                 },
             }],
         },
-        text: Some("Search your library for a sorcery card, then shuffle."),
+        text: Some("Search your library for a sorcery card and reveal that card. Shuffle your library, then put the card on top of it."),
     }];
     card
 }
@@ -2584,6 +2639,7 @@ fn green_suns_zenith() -> CardDef {
                     filter: ir_and(ir_color(Color::Green), ir_type(CardType::Creature)),
                     count: Expr::Num(1),
                     dest: ZoneKindSel::Battlefield,
+                    to_top: false,
                     shuffle: true,
                     bind_as: None,
                 },

@@ -29,7 +29,7 @@ pub use snapshot::{
 // projections of materialized state, not heuristics (those live in content).
 pub use catalog::{
     CardDef, CardKind, ManaCost, Keyword, SourceZone, ActivationTiming, AbilityDef,
-    ManaAbility, parse_mana_cost,
+    ManaAbility, AddedMana, parse_mana_cost,
 };
 pub use predicates::{obj_matches, has_valid_target, pick_targets, legal_targets, is_protected_from};
 pub use strategy::TargetGap;

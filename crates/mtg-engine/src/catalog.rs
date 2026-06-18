@@ -788,6 +788,83 @@ pub struct CardDef {
 pub type StaticAbilityDef =
     std::sync::Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>;
 
+/// Digested result of [`CardDef::added_mana_on_resolve`] — the mana a ritual
+/// spell adds on resolution, read structurally from its IR body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddedMana {
+    /// Total mana produced.
+    pub count: u32,
+    /// `Some(colors)` = the produced mana is these fixed colors (Dark Ritual →
+    /// `[Black, Black, Black]`); a colored list shorter than `count` is padded
+    /// with colorless. `None` = all `count` mana are a single color the
+    /// controller chooses at resolution (Lotus Petal / LED style).
+    pub colors: Option<Vec<Color>>,
+}
+
+/// Walk an IR action tree for the first reachable `AddMana` (mirrors the
+/// engine's internal `find_first_add_mana`). Pessimistic over branches.
+fn first_add_mana(
+    action: &crate::ir::action::Action,
+) -> Option<(&crate::ir::expr::Expr, &crate::ir::action::ManaSpec)> {
+    use crate::ir::action::Action;
+    match action {
+        Action::AddMana { count, spec, .. } => Some((count, spec)),
+        Action::Sequence(actions) => actions.iter().find_map(first_add_mana),
+        Action::IfThen { then, else_, .. } => {
+            first_add_mana(then).or_else(|| else_.as_ref().and_then(|e| first_add_mana(e)))
+        }
+        Action::MayDo { action, .. } => first_add_mana(action),
+        Action::ForEach { body, .. } => first_add_mana(body),
+        Action::Choose { options, .. } => options.iter().find_map(|o| first_add_mana(&o.action)),
+        _ => None,
+    }
+}
+
+/// The library-search `Filter` of the first "search library → put the find on
+/// TOP" tutor in an IR action tree (Personal/Vampiric/Mystical Tutor), or `None`.
+/// A `dest:Battlefield` searcher (Green Sun's Zenith) is NOT a top tutor: it
+/// doesn't place a card where a subsequent draw will see it, so it can't acquire
+/// a hand-cast payoff.
+fn first_top_library_search(
+    action: &crate::ir::action::Action,
+) -> Option<&crate::ir::expr::Filter> {
+    use crate::ir::action::Action;
+    use crate::ir::expr::ZoneKindSel;
+    match action {
+        Action::Search {
+            zone: ZoneKindSel::Library,
+            dest: ZoneKindSel::Library,
+            to_top: true,
+            filter,
+            ..
+        } => Some(filter),
+        Action::Sequence(actions) => actions.iter().find_map(first_top_library_search),
+        Action::IfThen { then, else_, .. } => first_top_library_search(then)
+            .or_else(|| else_.as_ref().and_then(|e| first_top_library_search(e))),
+        Action::MayDo { action, .. } => first_top_library_search(action),
+        Action::ForEach { body, .. } => first_top_library_search(body),
+        Action::Choose { options, .. } => options.iter().find_map(|o| first_top_library_search(&o.action)),
+        _ => None,
+    }
+}
+
+/// True if an IR action tree contains a `Tap` (used to recognise the
+/// `Replace(Sequence([Move, Tap]))` shape of an enters-tapped replacement).
+fn action_taps_self(action: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action;
+    match action {
+        Action::Tap { .. } => true,
+        Action::Sequence(actions) => actions.iter().any(action_taps_self),
+        Action::IfThen { then, else_, .. } => {
+            action_taps_self(then) || else_.as_ref().map_or(false, |e| action_taps_self(e))
+        }
+        Action::MayDo { action, .. } => action_taps_self(action),
+        Action::ForEach { body, .. } => action_taps_self(body),
+        Action::Choose { options, .. } => options.iter().any(|o| action_taps_self(&o.action)),
+        _ => false,
+    }
+}
+
 impl CardDef {
     /// Name of the back/second face (DFC, split, adventure), if any. Public
     /// accessor so app crates (e.g. the pilegen snapshot registry) can enumerate
@@ -909,6 +986,89 @@ impl CardDef {
             CardKind::Artifact(a) => &a.mana_abilities,
             _ => &[],
         }
+    }
+
+    /// Mana this card adds *when it resolves as a spell* (a "ritual" like Dark
+    /// Ritual) — introspected from the `OnResolve` IR body, not name-hardcoded.
+    /// This is the structured truth the planner's `spell_mana_production`
+    /// name-list only approximated.
+    ///
+    /// Returns `None` (i.e. "no guaranteed ritual mana") when production isn't
+    /// statically and unconditionally known, so callers never overcount:
+    /// - the card has no `OnResolve` body (not a spell, or a non-mana spell),
+    /// - it's modal (`modes.len() != 1`) — production depends on a chosen mode,
+    /// - the `AddMana` count isn't a constant `Expr::Num` (e.g. a threshold-
+    ///   conditional Cabal Ritual).
+    ///
+    /// Mana abilities (Lotus Petal's sac-for-mana, Moxen) are NOT covered here —
+    /// they surface through [`CardDef::mana_abilities`]; this is only the
+    /// stack-using spell-resolution path.
+    pub fn added_mana_on_resolve(&self) -> Option<AddedMana> {
+        use crate::ir::ability::AbilityKind;
+        use crate::ir::action::ManaSpec;
+        use crate::ir::expr::Expr;
+
+        let modes = self.abilities.iter().find_map(|a| match &a.kind {
+            AbilityKind::OnResolve { modes } => Some(modes),
+            _ => None,
+        })?;
+        if modes.len() != 1 {
+            return None;
+        }
+        let (count, spec) = first_add_mana(&modes[0].body)?;
+        let count = match count {
+            Expr::Num(n) if *n >= 0 => *n as u32,
+            _ => return None,
+        };
+        let colors = match spec {
+            ManaSpec::Fixed(cs) => Some(cs.clone()),
+            ManaSpec::AnyOneColor => None,
+        };
+        Some(AddedMana { count, colors })
+    }
+
+    /// True if this card enters the battlefield tapped — read structurally from
+    /// a self-ETB `Replacement` whose body taps the entering object (surveil
+    /// duals, taplands; engine composes this as `Replace(Sequence([Move, Tap]))`,
+    /// CR 614.1).
+    ///
+    /// Conservative: returns `true` whenever such a replacement is present, even
+    /// if it carries an "unless …" condition (e.g. Mistrise Village). A mana
+    /// solver must err toward *tapped* so it never credits same-turn mana a land
+    /// can't actually produce — over-counting speed is the cardinal sin here.
+    pub fn enters_tapped(&self) -> bool {
+        use crate::ir::ability::{AbilityKind, EventPattern, ReplacementBody};
+        use crate::ir::expr::ZoneKindSel;
+        self.abilities.iter().any(|a| {
+            let AbilityKind::Replacement { matches, body, .. } = &a.kind else { return false };
+            let EventPattern::EntersZone { zone_kind: ZoneKindSel::Battlefield, .. } = matches else {
+                return false;
+            };
+            matches!(body, ReplacementBody::Replace(action) if action_taps_self(action))
+        })
+    }
+
+    /// The library-search `Filter` of a "search your library, put the found card
+    /// on TOP" tutor (Personal/Vampiric/Mystical Tutor), read from the single-mode
+    /// `OnResolve` IR — `None` for anything else. Lets a planner ask "can this card
+    /// tutor up <payoff>?" by grounding the returned filter against the payoff
+    /// object with `obj_matches`, no name-check. `dest:Battlefield` searchers
+    /// (Green Sun's Zenith) are correctly excluded: they don't place a card where
+    /// next turn's draw will see it, so they can't acquire a hand-cast payoff.
+    ///
+    /// Returns `None` for modal spells (`modes.len() != 1`) — like
+    /// [`CardDef::added_mana_on_resolve`], production that depends on a chosen mode
+    /// isn't statically known.
+    pub fn library_top_tutor(&self) -> Option<&crate::ir::expr::Filter> {
+        use crate::ir::ability::AbilityKind;
+        let modes = self.abilities.iter().find_map(|a| match &a.kind {
+            AbilityKind::OnResolve { modes } => Some(modes),
+            _ => None,
+        })?;
+        if modes.len() != 1 {
+            return None;
+        }
+        first_top_library_search(&modes[0].body)
     }
 
     pub(crate) fn abilities_mut(&mut self) -> &mut [AbilityDef] {
@@ -1705,3 +1865,38 @@ pub(crate) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller
     None
 }
 
+
+#[cfg(test)]
+mod added_mana_tests {
+    use crate::{build_catalog, Color};
+
+    #[test]
+    fn dark_ritual_adds_bbb() {
+        let cat = build_catalog();
+        let dr = cat.get("Dark Ritual").expect("Dark Ritual in catalog");
+        let m = dr.added_mana_on_resolve().expect("Dark Ritual is a ritual");
+        assert_eq!(m.count, 3);
+        assert_eq!(m.colors, Some(vec![Color::Black, Color::Black, Color::Black]));
+    }
+
+    #[test]
+    fn non_ritual_spells_and_lands_add_no_resolve_mana() {
+        let cat = build_catalog();
+        // A cantrip resolves to a draw, not mana.
+        assert!(cat.get("Ponder").unwrap().added_mana_on_resolve().is_none());
+        // A land has no OnResolve body at all.
+        assert!(cat.get("Underground Sea").unwrap().added_mana_on_resolve().is_none());
+        // Lotus Petal makes mana via an activated sac ABILITY, not on resolve.
+        assert!(cat.get("Lotus Petal").unwrap().added_mana_on_resolve().is_none());
+    }
+
+    #[test]
+    fn surveil_duals_enter_tapped_abu_duals_dont() {
+        let cat = build_catalog();
+        // MKM surveil dual — always enters tapped.
+        assert!(cat.get("Undercity Sewers").unwrap().enters_tapped());
+        // ABU dual + basic — enter untapped.
+        assert!(!cat.get("Underground Sea").unwrap().enters_tapped());
+        assert!(!cat.get("Swamp").unwrap().enters_tapped());
+    }
+}

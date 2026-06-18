@@ -472,6 +472,7 @@ fn walk(
         | Action::Search { .. }
         | Action::ForEach { .. }
         | Action::OrderTop { .. }
+        | Action::Dig { .. }
         | Action::MayDo { .. } => Some(()),
     }
 }
