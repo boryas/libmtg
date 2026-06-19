@@ -289,6 +289,39 @@ fn cast_named(state: &SimState, legal: &[LegalAction], name: &str) -> Option<Leg
         .cloned()
 }
 
+/// Translate one emitted [`recipe::LineStep`] into the matching legal engine action
+/// for *this* window, if it is available now. The strategy executes the first step
+/// of the freshly-emitted line that is currently legal, so the engine's state
+/// advance + re-emission walks the multi-turn line.
+fn line_step_action(step: recipe::LineStep, legal: &[LegalAction]) -> Option<LegalAction> {
+    use recipe::LineStep;
+    let hits = |a: &LegalAction| match step {
+        LineStep::PlayLand(id) => matches!(a, LegalAction::LandDrop(x) if *x == id),
+        LineStep::CrackFetch(id) => {
+            matches!(a, LegalAction::ActivateAbility { source_id, .. } if *source_id == id)
+        }
+        LineStep::CastPetal(id)
+        | LineStep::CastRitual(id)
+        | LineStep::CastTutor(id)
+        | LineStep::CastDoomsday(id) => {
+            matches!(a, LegalAction::CastSpell { card_id, .. } if *card_id == id)
+        }
+    };
+    legal.iter().find(|a| hits(a)).cloned()
+}
+
+/// Follow the solved deterministic line: emit the first of its steps that is legal
+/// this window. `None` only when the emitter can't build a line (exotic source it
+/// doesn't model) — the caller logs + falls back so we can measure that gap.
+fn follow_line(state: &SimState, who: PlayerId, legal: &[LegalAction], max_turn: u32)
+    -> Option<LegalAction>
+{
+    let line = recipe::deterministic_line(state, who, max_turn)?;
+    // A real line may have nothing to do *this* window (it matures next turn) — return
+    // an explicit Pass so the caller doesn't fall back as if the emitter failed.
+    Some(line.steps.iter().find_map(|&s| line_step_action(s, legal)).unwrap_or(LegalAction::Pass))
+}
+
 /// A legal fetch-land activation (sac → search), if any.
 fn fetch_activation(state: &SimState, legal: &[LegalAction]) -> Option<LegalAction> {
     legal.iter()
@@ -370,6 +403,13 @@ impl Strategy for DDGoldfishStrategy {
             // sac a petal to cantrip, then whiff and fail to cast). If there's nothing
             // to assemble this window, pass and let the line mature next turn.
             self.dlog(format!("T{}: settle (det-ttd={:?}, min-ttd={:?})", state.current_turn, det, mn));
+            // FOLLOW the solved line — execute its next legal step, nothing else.
+            if let Some(a) = follow_line(state, who, legal, self.cutoff.max(1)) {
+                return a;
+            }
+            // Emitter gap (an unmodelled source): log it so we can measure how often
+            // the follow-the-line path is incomplete, then fall back.
+            self.dlog(format!("T{}: settle FALLBACK — line emitter gap", state.current_turn));
             return self.assemble_step(state, who, legal).unwrap_or(LegalAction::Pass);
         }
         // 3) No guaranteed line by the cutoff → GAMBLE. Per the policy: if even the
@@ -388,12 +428,10 @@ impl Strategy for DDGoldfishStrategy {
             self.dlog(format!("T{}: gamble (min-ttd={:?})", state.current_turn, mn));
             return a;
         }
-        // 4) No by-cutoff line and nothing left to dig — execute a slower deterministic
+        // 4) No by-cutoff line and nothing left to dig — follow a slower deterministic
         //    line if one exists (better late than never).
-        if recipe::deterministic_cast_turn(state, who, FALLBACK_HORIZON).is_some() {
-            if let Some(a) = self.assemble_step(state, who, legal) {
-                return a;
-            }
+        if let Some(a) = follow_line(state, who, legal, FALLBACK_HORIZON) {
+            return a;
         }
         LegalAction::Pass
     }
@@ -508,8 +546,19 @@ impl Strategy for DDGoldfishStrategy {
             .or_else(|| state.objects.get(&effect_id).and_then(|o| state.catalog.get(&o.catalog_key)));
         let is_fetch = src_def.map_or(false, |d| d.abilities().iter().any(|a| a.is_fetch_ability()));
         let principled = if is_fetch {
-            // Fetch: the goal needs black mana → fetch a black source (untapped first).
-            choices.iter().copied().max_by_key(|&id| land_priority(recipe::card_role(state, who, id)))
+            // A fetched land enters now (like a dig to hand): pick the candidate that
+            // most advances the objective, NOT merely "a black source". This prefers a
+            // dual that also supplies the colour the line needs next (e.g. blue for the
+            // tutor's pip) over a same-priority off-colour land (Underground Sea vs a
+            // plain Swamp both rank as untapped-black, but only the Sea pays the pip).
+            // Ties (objective-indifferent) break on land priority — untapped first.
+            choices.iter().copied().max_by(|&a, &b| {
+                self.candidate_p(state, a, false)
+                    .partial_cmp(&self.candidate_p(state, b, false))
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| land_priority(recipe::card_role(state, who, a))
+                        .cmp(&land_priority(recipe::card_role(state, who, b))))
+            })
         } else {
             // Tutor stages on top (drawn next turn); a dig goes to hand now. Primary
             // key is the objective (P(cast by cutoff)); ties break on the last-ditch

@@ -433,6 +433,188 @@ pub fn deterministic_cast_turn(state: &SimState, who: PlayerId, max_turn: u32) -
     }
 }
 
+// ── Concrete deterministic-line emission ─────────────────────────────────────
+//
+// `deterministic_cast_turn` says *when* a guaranteed line lands; this emits *what*
+// it is, as an ordered, object-bound step list, so the strategy can FOLLOW the
+// solved line instead of re-deriving assembly with a local priority list (the seam
+// the missing Personal-Tutor step fell through). The line is recomputed from the
+// current state every window; the strategy executes the first currently-legal step,
+// so the engine's state advance + re-emission sequences the multi-turn line (one
+// land drop per turn, play-then-crack a fetch, cast the tutor then draw Doomsday).
+
+/// One concrete action of the deterministic line, bound to the object it acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineStep {
+    /// Make the once-per-turn land drop with this land (untapped black / fetch / tapland).
+    PlayLand(ObjId),
+    /// Activate a fetch already in play (engine picks the black target).
+    CrackFetch(ObjId),
+    /// Cast Lotus Petal (mana cost 0) — afterwards a one-shot black source.
+    CastPetal(ObjId),
+    /// Cast Dark Ritual (1 black seed → 3 black).
+    CastRitual(ObjId),
+    /// Cast the payoff tutor (Personal Tutor) → Doomsday on top of the library.
+    CastTutor(ObjId),
+    /// Cast Doomsday.
+    CastDoomsday(ObjId),
+}
+
+/// The ordered, object-bound deterministic line that lands Doomsday on `turn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetLine {
+    pub turn: u32,
+    pub steps: Vec<LineStep>,
+}
+
+/// Concrete black-mana sources, partitioned exactly like `project` (same IR
+/// predicates) but retaining object ids so the line can name them.
+#[derive(Default)]
+struct SourceIds {
+    renew_inplay: Vec<ObjId>,  // renewable black in play (taps; online now)
+    inplay_fetch: Vec<ObjId>,  // fetch in play → crack to a renewable black land
+    hand_untapped: Vec<ObjId>, // black untapped land in hand (land drop, online when played)
+    hand_fetch: Vec<ObjId>,    // fetch in hand (land drop → crack → untapped black)
+    hand_tapped: Vec<ObjId>,   // black tapland in hand (land drop, online next turn)
+    petals_inplay: Vec<ObjId>, // one-shot pool already in play (spent at Doomsday's cost)
+    petals_hand: Vec<ObjId>,   // Lotus Petal in hand (cast 0 → pool)
+    rituals: Vec<ObjId>,       // Dark Ritual in hand
+}
+
+fn source_ids(state: &SimState, who: PlayerId) -> SourceIds {
+    let mut s = SourceIds::default();
+    let fetch_target = library_has_black_target(state, who);
+    for perm in state.permanents_of(who) {
+        if perm.bf().is_some_and(|bf| bf.tapped) {
+            continue;
+        }
+        let Some(def) = state.def_of(perm.id) else { continue };
+        if oneshot_produces_color(def, Color::Black) {
+            s.petals_inplay.push(perm.id);
+        } else if renewable_produces_color(def, Color::Black) {
+            s.renew_inplay.push(perm.id);
+        } else if is_fetch(def) && fetch_target {
+            s.inplay_fetch.push(perm.id);
+        }
+    }
+    for card in state.hand_of(who) {
+        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+        if !def.is_land() && def.mana_cost().trim() == "0" {
+            // Free one-shot black artifact (Lotus Petal). Free renewable artifacts
+            // (black moxen) aren't modelled as a step here — if one is ever needed
+            // the line falls short and the strategy falls back; these lists don't run them.
+            if oneshot_produces_color(def, Color::Black) {
+                s.petals_hand.push(card.id);
+            }
+        } else if def.is_land() {
+            if is_fetch(def) && fetch_target {
+                s.hand_fetch.push(card.id);
+            } else if produces_black(def) {
+                if def.enters_tapped() {
+                    s.hand_tapped.push(card.id);
+                } else {
+                    s.hand_untapped.push(card.id);
+                }
+            }
+        } else if is_black_ritual(def) {
+            s.rituals.push(card.id);
+        }
+    }
+    s
+}
+
+/// The payoff tutor (Personal Tutor) in hand that can reach a Doomsday in the
+/// library — the object to actually cast for the tutor line.
+fn payoff_tutor_id(state: &SimState, who: PlayerId) -> Option<ObjId> {
+    let dd_in_lib: Vec<_> = state
+        .library_of(who)
+        .filter(|c| c.catalog_key == DOOMSDAY)
+        .map(|c| c.id)
+        .collect();
+    if dd_in_lib.is_empty() {
+        return None;
+    }
+    state.hand_of(who).find_map(|card| {
+        let def = state.catalog.get(&card.catalog_key)?;
+        let filter = def.library_top_tutor()?;
+        let reaches = dd_in_lib.iter().any(|&id| obj_matches(filter, id, state));
+        (reaches && single_colored_pip(def.mana_cost()).is_some()).then_some(card.id)
+    })
+}
+
+/// Emit the guaranteed line that lands Doomsday by `max_turn` as ordered,
+/// object-bound steps — or `None` when no such line exists (the same condition as
+/// [`deterministic_cast_turn`]). The strategy follows this verbatim instead of
+/// re-deriving assembly; minimal in consumables (a petal/ritual is emitted only
+/// when renewable black can't reach BBB by the cast turn), so a dig never spends a
+/// resource the line needs.
+pub fn deterministic_line(state: &SimState, who: PlayerId, max_turn: u32) -> Option<DetLine> {
+    let turn = deterministic_cast_turn(state, who, max_turn)?;
+    let s = source_ids(state, who);
+    let dd = state
+        .hand_of(who)
+        .find(|o| o.catalog_key == DOOMSDAY)
+        .map(|o| o.id);
+    let land_drop = state.player(who).lands_played_this_turn < 1;
+
+    // Renewable black online by the cast turn: in-play renewables + in-play fetches
+    // (each cracks into a renewable land) + hand lands brought online by then
+    // (untapped/fetch the turn they're played, taplands need an earlier slot).
+    let inplay_renew = (s.renew_inplay.len() + s.inplay_fetch.len()) as u32;
+    let hand_untapped = (s.hand_untapped.len() + s.hand_fetch.len()) as u32;
+    let renew_online = inplay_renew
+        + online_lands(hand_untapped, s.hand_tapped.len() as u32, land_drop, turn);
+
+    // Consumables only cover what renewable black can't reach by the cast turn.
+    let need_after_lands = 3u32.saturating_sub(renew_online);
+    let petals_avail = (s.petals_inplay.len() + s.petals_hand.len()) as u32;
+    let petals_used = petals_avail.min(need_after_lands);
+    let need_after_petals = need_after_lands - petals_used;
+    // A ritual converts a 1-black seed into 3, so a single one covers any residual
+    // (≤3 black goal) as long as some other source seeds its `B`.
+    let ritual_used = need_after_petals > 0 && !s.rituals.is_empty();
+
+    let mut steps = Vec::new();
+    // 1. Tutor first: it must resolve a turn before Doomsday is drawn.
+    if dd.is_none() {
+        if let Some(tid) = payoff_tutor_id(state, who) {
+            steps.push(LineStep::CastTutor(tid));
+        }
+    }
+    // 2. Land development: crack in-play fetches, then make land drops (untapped /
+    //    hand-fetch first so they're usable the turn played, then taplands).
+    for &f in &s.inplay_fetch {
+        steps.push(LineStep::CrackFetch(f));
+    }
+    for &l in &s.hand_untapped {
+        steps.push(LineStep::PlayLand(l));
+    }
+    for &f in &s.hand_fetch {
+        steps.push(LineStep::PlayLand(f)); // crack is emitted once it's in play (re-emit)
+    }
+    for &l in &s.hand_tapped {
+        steps.push(LineStep::PlayLand(l));
+    }
+    // 3. Consumables, only as many as the bundle needs AND only once we hold the payoff:
+    //    casting a ritual/petal for mana with no Doomsday in hand wastes it (mana empties
+    //    at end of step). On the tutor line they wait until Doomsday has been drawn.
+    if dd.is_some() {
+        let hand_petals_used = (petals_used as usize).saturating_sub(s.petals_inplay.len());
+        for &p in s.petals_hand.iter().take(hand_petals_used) {
+            steps.push(LineStep::CastPetal(p));
+        }
+        if ritual_used {
+            steps.push(LineStep::CastRitual(s.rituals[0]));
+        }
+    }
+    // 4. Cast Doomsday (once held — for the tutor line it's drawn first).
+    if let Some(d) = dd {
+        steps.push(LineStep::CastDoomsday(d));
+    }
+
+    Some(DetLine { turn, steps })
+}
+
 /// The missing ingredients: which single producer kind, if added, flips an
 /// otherwise-insufficient mana position to sufficient. Recomputed, not authored
 /// — this is the "sufficient cards" set. (Assumes Doomsday itself is in hand.)
