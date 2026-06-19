@@ -865,8 +865,14 @@ pub fn e_ttd(state: &SimState, who: PlayerId, max_turn: u32) -> f64 {
     let mana_turn = bbb_turn(&c, max_turn, c.pool)
         .map(|t| t as f64)
         .unwrap_or_else(|| 1.0 + expected_draws_to_out(library, mana_outs));
-    let payoff_turn = if payoff_in_hand(state, who) {
-        1.0
+    let payoff_turn = if state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY) {
+        1.0 // the payoff itself is in hand — castable as soon as the mana is up
+    } else if payoff_tutor_pip(state, who).is_some() {
+        // A tutor for the payoff in hand is ONE TURN SLOWER than the payoff itself:
+        // cast the tutor (it stages the payoff), then draw it next turn. Without this
+        // a tutor-in-hand was scored as a turn-1 payoff, so staging a redundant tutor
+        // looked faster than staging Doomsday — the tutor→tutor loop.
+        2.0
     } else {
         1.0 + expected_draws_to_out(library, payoff_outs)
     };

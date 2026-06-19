@@ -619,8 +619,8 @@ impl Strategy for DDGoldfishStrategy {
                 let kind = if is_fetch { "fetch" } else { "dig/tutor" };
                 self.dlog(format!("DIFF {} T{}: principled={} heuristic={} from [{}]",
                     kind, state.current_turn,
-                    principled.map(|i| Self::nm(state, i)).unwrap_or_default(),
-                    heur.map(|i| Self::nm(state, i)).unwrap_or_default(),
+                    principled.map(|i| DDGoldfishStrategy::nm(state, i)).unwrap_or_default(),
+                    heur.map(|i| DDGoldfishStrategy::nm(state, i)).unwrap_or_default(),
                     names(state, choices)));
             }
         }
