@@ -1630,8 +1630,20 @@ mod tests {
     /// both the blue source and a black source); the `true`/`false` gap bounds that
     /// over-count.
     fn analytical_cast_by_pt(c: [i64; 9], turn: i64, correct_petal: bool) -> f64 {
+        // Opening hand only (7 cards, no draws): validates the solver's opening-hand
+        // deterministic formula.
+        analytical_cast_by_pt_seen(c, turn, correct_petal, 7)
+    }
+
+    /// Ground truth with DRAWS: `hsize` = cards SEEN by the cast turn (on the play,
+    /// `7 + (turn - 1)` — the "opening 9-10"). An idealised ceiling — it asks whether
+    /// a deterministic line exists among the cards seen, with optimal play (the mana is
+    /// still land-drop-scheduled by `schedule_cast_by`; the tutor line is allowed from
+    /// turn 2, slightly optimistic on a late-drawn tutor). Excludes stochastic cantrip
+    /// digging, so it's the deterministic-given-draws ceiling, not the absolute one.
+    fn analytical_cast_by_pt_seen(c: [i64; 9], turn: i64, correct_petal: bool, hsize: i64) -> f64 {
         let [dd, ub, sw, tl, ritual, petal, il, pt, other] = c;
-        let (total, hsize) = (60i64, 7i64);
+        let total = 60i64;
         let denom = choose(total, hsize);
         let mut p = 0.0;
         for d in 0..=dd.min(hsize) {
@@ -2078,6 +2090,45 @@ mod tests {
                 assert!(
                     (emp[turn] - correct).abs() < (emp[turn] - mirror).abs(),
                     "turn {turn}: solver is closer to the double-use model than the honest one"
+                );
+            }
+        }
+    }
+
+    /// INTUITION HARNESS (run: `cargo test -p dd-goldfish ground_truth -- --ignored --nocapture`).
+    /// Prints, per deck and per turn, the deterministic-given-draws CEILING (the
+    /// PT-aware hypergeometric over the cards seen by turn T = 7 + (T-1), idealised
+    /// optimal play, no mulligan) next to the actual STRATEGY rate with KEEP7 (no
+    /// mulligan — apples to apples) and with the real mulligan. The ceiling excludes
+    /// stochastic cantrip digging, so a strategy ABOVE it is getting real value from
+    /// cantrips; a strategy BELOW it is leaving deterministic lines uncast.
+    #[test]
+    #[ignore = "intuition harness; prints ground-truth vs strategy, run with --ignored --nocapture"]
+    fn ground_truth_vs_strategy() {
+        let catalog = build_catalog();
+        let decks = [
+            ("waste(0pt)", canonical_tempo_dd()),
+            ("1pt", canonical_tempo_dd_pt()),
+            ("4pt", fast_pt_doomsday()),
+        ];
+        for (name, deck) in decks {
+            let counts = categorize_pt(&deck, &catalog);
+            std::env::set_var("KEEP7", "1");
+            let k7 = crate::run_goldfish_asap(&deck, 2_000, crate::DEFAULT_PROTECTION, 6, 4);
+            std::env::remove_var("KEEP7");
+            println!("\n=== {name} === (open-7 deterministic floor; strategy keeps every 7)");
+            for t in 1..=4i64 {
+                // EXACT opening-7 deterministic rate (no draws) — the floor a kept 7 is
+                // already worth. The strategy keeps the same 7 and then DRAWS + cantrips,
+                // so `keep7` should sit ABOVE this; `keep7 − open7` is the value of play.
+                let open7 = analytical_cast_by_pt_seen(counts, t, true, 7);
+                // For reference: the deterministic-given-draws ceiling (cards seen by T).
+                let seen = 7 + (t - 1);
+                let ceil = analytical_cast_by_pt_seen(counts, t, true, seen);
+                let k = k7.cast_by(t as u8);
+                println!(
+                    "  T{t}: open7(det)={open7:.3}   strategy keep7={k:.3} ({:+.3} from play)   [draws-ceiling(seen {seen})={ceil:.3}]",
+                    k - open7
                 );
             }
         }
