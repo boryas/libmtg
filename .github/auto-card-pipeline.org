@@ -1,0 +1,91 @@
+#+TITLE: Auto-card pipeline — operational contract (Path A)
+#+STARTUP: content
+
+The contract the "missing card" automation follows. The *how-to-implement* and the
+*FINISH vs PROPOSE decision* live in [[file:../.claude/commands/add-card.md][.claude/commands/add-card.md]] — this file is only the
+*operational* layer: how a run consumes an issue, what it emits, and the guardrails it
+must never cross. Implements Path A (recompile + redeploy); runtime data-cards (Path B,
+serde the IR) are deferred.
+
+* Status (2026-06-16): issue-filing only
+
+The *front half* is live: the goldfish web frontend (~dd-goldfish.html~) detects
+unimplemented cards and files pre-filled ~missing-card~ issues — no API key, no
+secret. The *back half* (claude-code-action auto-implementer) is DORMANT pending an
+Anthropic API account; ~.github/workflows/auto-card.yml~ is parked on
+~workflow_dispatch~ so filed issues don't spawn failing runs. Everything below
+describes the back half for when it's switched on. Until then, issues are worked by
+hand following [[file:../.claude/commands/add-card.md][add-card.md]].
+
+* Scope
+
+Automate the cards the goldfish flags as missing, *only* when they can be implemented
+faithfully with primitives that exist today. Correctness is never traded for throughput.
+The trust boundary is the branch: the bot writes only to ~quarantine~; ~main~ is reached
+only by a human-reviewed promotion PR.
+
+* Input: a ~missing-card~ issue
+
+One card per issue, labeled ~missing-card~. Body carries (filled from the Scryfall MCP at
+file time):
+- card name (exact)
+- Oracle text, mana cost, types, P/T
+- source decklist URL that surfaced it
+- failure mode: ~✗ not in catalog~ vs ~~ in catalog but inert~ (from ~warn_unimplemented_cards~)
+
+Dedup by card name: skip if an open issue or PR already covers it.
+
+* The run (claude-code-action)
+
+1. Check out the ~quarantine~ branch; create ~card/<slug>~ from it.
+2. Follow [[file:../.claude/commands/add-card.md][add-card.md]] end to end, *including its FINISH vs PROPOSE gate*.
+3. Classify, then emit one of the two outputs below.
+
+* Output A — FINISH (card is Tier-1)
+
+- Implement per the playbook; ~cargo build && cargo test~ must be green.
+- Open a **ready** PR, base ~quarantine~, label ~auto-card~.
+- CI green is required to merge. Auto-merge into ~quarantine~ is permitted on green
+  (the branch is untrusted by design); auto-merge into ~main~ is *never* permitted.
+
+* Output B — PROPOSE (card is "scary" / Tier-2 / uncertain)
+
+- Do **not** write card code.
+- Open a **draft** PR, base ~quarantine~, label ~needs-primitive~, body =
+  clause-by-clause analysis: which clause blocks, which of the four primitive categories
+  it needs, the generality the primitive should live at, and the blocking signal word.
+- Leave it as a draft — it is a human design decision, not a merge candidate.
+
+* Invariants (never cross these)
+
+- Never push to, or open a PR against, ~main~. ~main~ receives only reviewed
+  ~quarantine -> main~ promotion PRs.
+- Never auto-merge into ~main~. ~quarantine~ auto-merge only on green CI.
+- Never relax the no-hacks ratchet "because it's quarantine." Quarantine lowers the bar
+  for *landing in staging*, not for *correctness*. A hack that builds + passes goldfish is
+  exactly the silent-corruption case, and batch promotion review is *less* likely to catch
+  it than a focused PR review.
+- If ~cargo test~ fails and can only be made green by being more specific than the Oracle
+  text → downgrade to PROPOSE. Never force a pass.
+- One card per issue / per PR; per-card commits preserved (revert a bad card cleanly).
+
+* Trigger
+
+- Live path: ~on: issues~ (labeled ~missing-card~) — fires in seconds.
+- Fallback only: a scheduled sweep to catch dropped events. GitHub ~schedule:~ cron is
+  5-min-minimum and frequently delayed/dropped, so it is the garbage-collector, never the
+  primary trigger.
+
+* Promotion
+
+Periodically a human opens a ~quarantine -> main~ PR — this is where real review
+concentrates (batch, not per-card). Preserve per-card commits so a bad card is a clean
+~git revert~, not surgery on the shared ~all_cards()~ vec.
+
+* Prerequisites (yours to provision — not done by this spec)
+
+- ~ANTHROPIC_API_KEY~ repo secret for claude-code-action.
+- A ~quarantine~ branch with protection: CI green required before merge.
+- The workflow YAML (~.github/workflows/auto-card.yml~) — Path A step 3, not yet written.
+- Deploy + the goldfish wasm frontend (Path A step 4) — downstream; the frontend
+  (mirroring the ~pilegen~ cdylib) does not exist yet.

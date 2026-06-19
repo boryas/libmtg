@@ -1,0 +1,100 @@
+# Auto-card pipeline — Path A, step 3.
+#
+# Implements the contract in .github/auto-card-pipeline.org:
+#   a `missing-card` issue -> claude-code-action -> a PR into `quarantine`
+#   (ready if the card is FINISH-able, draft+needs-primitive if it's PROPOSE).
+#
+# Prerequisites you must provision (the workflow can't do these for you):
+#   - repo secret  ANTHROPIC_API_KEY  (sk-ant-...)
+#   - a `quarantine` branch, with branch protection requiring CI green to merge
+#   - claude-code-action installed on the repo (GitHub App), per its setup docs
+#
+# Decision logic + how-to live in the two files the prompt points Claude at; this
+# YAML is only the trigger + permissions + tool wiring.
+
+name: auto-card
+
+# DORMANT — the auto-implementer needs an Anthropic API key, which isn't set up
+# yet. For now the loop stops at *filing* `missing-card` issues (the goldfish web
+# frontend does that with no API and no secret). Keeping this file as the ready
+# recipe for "later, hook up the full API thing."
+#
+# To activate: add the ANTHROPIC_API_KEY repo secret + a `quarantine` branch with
+# CI-green protection, then replace the `workflow_dispatch` trigger below with the
+# commented `issues` trigger.
+on:
+  workflow_dispatch: {}
+  # issues:
+  #   types: [opened, labeled]
+
+# One run per issue; a re-label doesn't spawn a duplicate.
+concurrency:
+  group: auto-card-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  implement-card:
+    # Belt-and-suspenders with `label_trigger`: only spin up the runner when the
+    # `missing-card` label is present (either applied now, or already on `opened`).
+    if: >-
+      github.event.label.name == 'missing-card' ||
+      contains(github.event.issue.labels.*.name, 'missing-card')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write # required: used to fetch the GitHub OIDC token
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the bot can branch off `quarantine`
+
+      # cargo build/test run inside the Claude step via Bash, so the toolchain
+      # must already be on PATH. Cache keeps the FINISH path inside the latency
+      # budget after the first run.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: "missing-card"
+          base_branch: "quarantine"
+          branch_prefix: "card/"
+          # Opus for the gate judgment; generous turn budget for build+test loops.
+          claude_args: >-
+            --model claude-opus-4-8
+            --max-turns 40
+            --allowedTools "Bash,Read,Edit,Write,Grep,Glob"
+          prompt: |
+            You are the automated "missing card" implementer for the mtg-engine simulator.
+
+            Read these two files FIRST and follow them exactly:
+              - .github/auto-card-pipeline.org  — the operational contract (inputs, outputs, invariants)
+              - .claude/commands/add-card.md    — the implementation playbook AND the FINISH vs PROPOSE gate
+
+            The triggering issue (labeled `missing-card`) names ONE card and contains its
+            Scryfall Oracle text, mana cost, types, and the failure mode. Take the card name
+            from the issue title.
+
+            Procedure:
+            1. Confirm no open PR already implements this card (`gh pr list`). If one exists,
+               comment on the issue linking it and stop.
+            2. Run the add-card.md step-0 triage and classify the card with the FINISH vs
+               PROPOSE gate.
+            3. FINISH: implement the card per the playbook on a branch off `quarantine`. Run
+               `cargo build` and `cargo test` — both must pass with NO hacks. Then open a
+               READY pull request into `quarantine`, labeled `auto-card`, summarizing what you
+               added and the behavioral test you wrote.
+            4. PROPOSE (scary / needs a primitive that doesn't exist / a player decision with
+               no strategy callback / uncertain / would require being more specific than the
+               Oracle text): do NOT write card code. Open a DRAFT pull request into
+               `quarantine`, labeled `needs-primitive`, whose body is the clause-by-clause
+               analysis the contract requires — which clause blocks, which of the four
+               primitive categories it needs, the generality the primitive should live at, and
+               the blocking signal word.
+
+            Hard invariants (from the contract): never target `main`; never auto-merge into
+            `main`; never relax the no-hacks ratchet because it's quarantine; if tests can only
+            be made green by being more specific than the Oracle text, downgrade to PROPOSE.

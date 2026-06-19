@@ -2,6 +2,9 @@
 name = "mtg-engine"
 version = "0.1.0"
 edition = "2021"
+description = "A generic, reusable rules engine for Magic: The Gathering"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/boryas/libmtg"
 
 [lib]
 crate-type = ["rlib"]
