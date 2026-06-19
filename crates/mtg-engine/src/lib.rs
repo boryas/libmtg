@@ -1501,6 +1501,11 @@ pub struct PlayerState {
     no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     pub library_order: std::collections::VecDeque<ObjId>,
+    /// How many top cards the controller legitimately KNOWS (front-down), since the
+    /// last shuffle: set by reveal/tutor-to-top/scry/ordering, decremented on draw,
+    /// reset to 0 on shuffle. 0 in a fresh (shuffled) opening hand — so reading the
+    /// known top is not hidden information. Conservative: never claims more than known.
+    pub known_top_len: usize,
     /// This player's decision policy (composed `Player { state, strategy }`). `None`
     /// until installed at sim init. The engine reaches it only via
     /// `SimState::with_strategy` (which falls back to `AlwaysPass`), so a
@@ -1521,6 +1526,7 @@ impl PlayerState {
             life_lost_this_turn: 0,
             no_max_hand_size: false,
             library_order: std::collections::VecDeque::new(),
+            known_top_len: 0,
             strategy: None,
         }
     }
@@ -1801,6 +1807,7 @@ impl SimState {
         let id = self.player_id(who);
         if let Some(ps) = self.objects.get_mut(&id).and_then(|o| o.player_state_mut()) {
             ps.library_order.make_contiguous().shuffle(&mut *self.rng);
+            ps.known_top_len = 0; // a shuffle scrambles the known prefix
         }
     }
 
@@ -2591,7 +2598,9 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
         }
         GameEvent::Draw { controller, .. } => {
             let controller = *controller;
-            let top_id = state.player_mut(controller).library_order.pop_front();
+            let ps = state.player_mut(controller);
+            let top_id = ps.library_order.pop_front();
+            ps.known_top_len = ps.known_top_len.saturating_sub(1); // top card left for hand
             if let Some(card_id) = top_id {
                 state.set_card_zone(card_id, Zone::Hand { known: false });
             }

@@ -528,6 +528,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             for &id in &bottom {
                 lib.push_back(id);
             }
+            // The kept cards on top were looked at and ordered by the controller.
+            state.player_mut(who).known_top_len = keep.len();
             ExecResult::Ok
         }
 
@@ -542,6 +544,9 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                     change_zone(id, ZoneId::Graveyard, state, t, who);
                 }
             }
+            // Surveil reorders/removes the top; conservatively forget the known prefix
+            // (under-claim is safe — it can only cost a recognition, never cheat).
+            state.player_mut(who).known_top_len = 0;
             ExecResult::Ok
         }
 
@@ -564,6 +569,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             let lib = &mut state.player_mut(who).library_order;
             for _ in 0..top.len().min(lib.len()) { lib.pop_front(); }
             for &id in final_order.iter().rev() { lib.push_front(id); }
+            // The controller looked at and ordered all of these — the top is known.
+            state.player_mut(who).known_top_len = final_order.len();
             ExecResult::Ok
         }
 
@@ -619,6 +626,9 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                         lib.push_front(id);
                     }
                 }
+                // We now KNOW the cards we just placed on top (a preceding shuffle, if
+                // any, already cleared the rest), so the top `found.len()` is known.
+                state.player_mut(who).known_top_len = found.len();
             }
             ExecResult::Ok
         }
@@ -789,6 +799,9 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                         lib.push_front(id);
                     }
                 }
+                // We chose exactly these cards for the top, so they're known. (Brainstorm
+                // already drew off any prior known prefix, so the rest below is unknown.)
+                state.player_mut(who).known_top_len = chosen.len();
             }
             let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
             for id in remaining {

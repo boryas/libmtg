@@ -151,12 +151,34 @@ fn library_has_black_target(state: &SimState, who: PlayerId) -> bool {
     library_has_target_color(state, who, Color::Black)
 }
 
+/// Depth (0-based, 0 = next draw) of Doomsday within the KNOWN top of the library,
+/// if it's there. Reads only `known_top_len` cards — legitimately known to the
+/// controller (set by our own tutor / scry / ordering, reset on shuffle), and 0 in a
+/// fresh opening hand, so this is not hidden information.
+fn payoff_known_depth(state: &SimState, who: PlayerId) -> Option<u32> {
+    let known = state.player(who).known_top_len;
+    state
+        .library_of(who)
+        .take(known)
+        .position(|c| c.catalog_key == DOOMSDAY)
+        .map(|p| p as u32)
+}
+
 fn project(state: &SimState, who: PlayerId) -> Caps {
+    project_inner(state, who, true)
+}
+
+/// Like [`project`], but `count_fetches=false` EXCLUDES fetchlands from the mana
+/// capabilities. Used for a line that must not shuffle — e.g. when a known card is
+/// staged on top of the library, cracking a fetch would scatter it, so that mana is
+/// not available to that line.
+fn project_inner(state: &SimState, who: PlayerId, count_fetches: bool) -> Caps {
     let mut c = Caps {
         land_drop: state.player(who).lands_played_this_turn < 1,
         ..Default::default()
     };
     let fetch_target = library_has_black_target(state, who);
+    let use_fetch = |def: &CardDef| count_fetches && is_fetch(def) && fetch_target;
 
     // In play: classify each untapped black source by what its cost consumes —
     // one-shot (sac → pool) vs renewable (tap, or a fetch that becomes a land).
@@ -167,7 +189,7 @@ fn project(state: &SimState, who: PlayerId) -> Caps {
         let Some(def) = state.def_of(perm.id) else { continue };
         if oneshot_produces_color(def, Color::Black) {
             c.pool += 1;
-        } else if renewable_produces_color(def, Color::Black) || (is_fetch(def) && fetch_target) {
+        } else if renewable_produces_color(def, Color::Black) || use_fetch(def) {
             c.renew_inplay += 1;
         }
     }
@@ -183,7 +205,7 @@ fn project(state: &SimState, who: PlayerId) -> Caps {
                 c.renew_inplay += 1;
             }
         } else if def.is_land() {
-            if is_fetch(def) && fetch_target {
+            if use_fetch(def) {
                 c.untapped_lands += 1;
             } else if produces_black(def) {
                 // Enters-tapped honesty: a tapland makes no mana the turn it's
@@ -334,7 +356,13 @@ fn payoff_tutor_pip(state: &SimState, who: PlayerId) -> Option<Color> {
 /// a later demand. The one-shot pool is deliberately EXCLUDED here: a pool token
 /// paying the pip is consumed, so it's charged against BBB in `deterministic_cast_turn`,
 /// not double-counted as a standing source.
-fn renew_color_turn(state: &SimState, who: PlayerId, color: Color, max_turn: u32) -> Option<u32> {
+fn renew_color_turn(
+    state: &SimState,
+    who: PlayerId,
+    color: Color,
+    max_turn: u32,
+    extra: &[&str],
+) -> Option<u32> {
     let land_drop = state.player(who).lands_played_this_turn < 1;
     let fetch_target = library_has_target_color(state, who, color);
     // A renewable colour source already in play → online right now (turn 1).
@@ -347,12 +375,14 @@ fn renew_color_turn(state: &SimState, who: PlayerId, color: Color, max_turn: u32
     if inplay {
         return Some(1);
     }
-    // Otherwise the earliest turn a renewable colour tap-land in hand comes online.
+    // Otherwise the earliest turn a renewable colour tap-land in hand — plus any
+    // hypothetically-acquired `extra` cards (e.g. a fetch target under evaluation) —
+    // comes online. Threading `extra` here is what lets the model see that a fetched
+    // Underground Sea pays a {U} pip while a Swamp does not.
     let (mut untapped, mut tapped) = (0u32, 0u32);
-    for card in state.hand_of(who) {
-        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+    let mut count = |def: &CardDef| {
         if !def.is_land() {
-            continue;
+            return;
         }
         if is_fetch(def) && fetch_target {
             untapped += 1;
@@ -362,6 +392,16 @@ fn renew_color_turn(state: &SimState, who: PlayerId, color: Color, max_turn: u32
             } else {
                 untapped += 1;
             }
+        }
+    };
+    for card in state.hand_of(who) {
+        if let Some(def) = state.catalog.get(&card.catalog_key) {
+            count(def);
+        }
+    }
+    for &key in extra {
+        if let Some(def) = state.catalog.get(key) {
+            count(def);
         }
     }
     (1..=max_turn).find(|&t| online_lands(untapped, tapped, land_drop, t) >= 1)
@@ -398,11 +438,45 @@ pub fn sufficient(state: &SimState, who: PlayerId) -> bool {
 ///       turn 2. No petal special-case — it's the sac cost consuming the object.
 ///   This is honest: the drawn card is one the player placed, not a deck peek.
 pub fn deterministic_cast_turn(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
-    let c = project(state, who);
-    let has_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    deterministic_cast_turn_ex(state, who, &[], max_turn)
+}
+
+/// [`deterministic_cast_turn`] with `extra` cards hypothetically acquired into hand
+/// (a dig / fetch target under evaluation). `extra` is folded into the mana caps AND
+/// threaded into the pip check, so e.g. a fetched Underground Sea is recognised as
+/// paying a tutor's {U} pip (a Swamp is not) — the colour the fetch-target choice
+/// turns on.
+fn deterministic_cast_turn_ex(
+    state: &SimState,
+    who: PlayerId,
+    extra: &[&str],
+    max_turn: u32,
+) -> Option<u32> {
+    let mut c = project(state, who);
+    let mut has_dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    for &key in extra {
+        if let Some(def) = state.catalog.get(key) {
+            fold_known_card(&mut c, &mut has_dd, def, key);
+        }
+    }
 
     // Direct: DD in hand, earliest turn BBB is up with the full pool.
     let direct = if has_dd { bbb_turn(&c, max_turn, c.pool) } else { None };
+
+    // Staged: Doomsday is on the KNOWN top of the library (we tutored / ordered it
+    // there) at depth `d` → drawn on relative turn `d + 2`, then cast once BBB is up.
+    // The mana must NOT shuffle (cracking a fetch would scatter the staged top), so
+    // BBB is reckoned over non-fetch capabilities. Known-top is 0 in a fresh opening
+    // hand, so this never fires for a mulligan (no hidden-info / hypergeometric leak).
+    let staged = match payoff_known_depth(state, who) {
+        Some(d) if !has_dd => {
+            let nf = project_inner(state, who, false);
+            bbb_turn(&nf, max_turn, nf.pool)
+                .map(|b| b.max(d + 2))
+                .filter(|&t| t <= max_turn)
+        }
+        _ => None,
+    };
 
     let tutor = payoff_tutor_pip(state, who).and_then(|pip| {
         let mut best: Option<u32> = None;
@@ -413,7 +487,7 @@ pub fn deterministic_cast_turn(state: &SimState, who: PlayerId, max_turn: u32) -
         };
         // Pay the pip with a RENEWABLE source: pool intact, but the pip (hence the
         // draw) is bounded by when that source comes online.
-        if let Some(s) = renew_color_turn(state, who, pip, max_turn) {
+        if let Some(s) = renew_color_turn(state, who, pip, max_turn, extra) {
             if let Some(b) = bbb_turn(&c, max_turn, c.pool) {
                 consider((s + 1).max(b));
             }
@@ -427,10 +501,7 @@ pub fn deterministic_cast_turn(state: &SimState, who: PlayerId, max_turn: u32) -
         best
     });
 
-    match (direct, tutor) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
+    [direct, tutor, staged].into_iter().flatten().min()
 }
 
 // ── Concrete deterministic-line emission ─────────────────────────────────────
@@ -557,11 +628,18 @@ pub fn deterministic_line(state: &SimState, who: PlayerId, max_turn: u32) -> Opt
         .map(|o| o.id);
     let land_drop = state.player(who).lands_played_this_turn < 1;
 
+    // Doomsday staged on the known top (we tutored it there): don't tutor again, and
+    // don't crack/play a fetch — a shuffle would scatter the staged top. Develop only
+    // non-shuffle mana and draw it. Mirrors det-cast-turn's non-fetch reckoning.
+    let staged = dd.is_none() && payoff_known_depth(state, who).is_some();
+    let inplay_fetch: &[ObjId] = if staged { &[] } else { s.inplay_fetch.as_slice() };
+    let hand_fetch: &[ObjId] = if staged { &[] } else { s.hand_fetch.as_slice() };
+
     // Renewable black online by the cast turn: in-play renewables + in-play fetches
     // (each cracks into a renewable land) + hand lands brought online by then
     // (untapped/fetch the turn they're played, taplands need an earlier slot).
-    let inplay_renew = (s.renew_inplay.len() + s.inplay_fetch.len()) as u32;
-    let hand_untapped = (s.hand_untapped.len() + s.hand_fetch.len()) as u32;
+    let inplay_renew = (s.renew_inplay.len() + inplay_fetch.len()) as u32;
+    let hand_untapped = (s.hand_untapped.len() + hand_fetch.len()) as u32;
     let renew_online = inplay_renew
         + online_lands(hand_untapped, s.hand_tapped.len() as u32, land_drop, turn);
 
@@ -575,37 +653,39 @@ pub fn deterministic_line(state: &SimState, who: PlayerId, max_turn: u32) -> Opt
     let ritual_used = need_after_petals > 0 && !s.rituals.is_empty();
 
     let mut steps = Vec::new();
-    // 1. Tutor first: it must resolve a turn before Doomsday is drawn.
-    if dd.is_none() {
+    // 1. Tutor first: it must resolve a turn before Doomsday is drawn. Skip it when
+    //    Doomsday is already staged on the known top (it will simply be drawn).
+    if dd.is_none() && !staged {
         if let Some(tid) = payoff_tutor_id(state, who) {
             steps.push(LineStep::CastTutor(tid));
         }
     }
     // 2. Land development: crack in-play fetches, then make land drops (untapped /
-    //    hand-fetch first so they're usable the turn played, then taplands).
-    for &f in &s.inplay_fetch {
+    //    hand-fetch first so they're usable the turn played, then taplands). Fetches
+    //    are skipped while a card is staged on top (they would shuffle it away).
+    for &f in inplay_fetch {
         steps.push(LineStep::CrackFetch(f));
     }
     for &l in &s.hand_untapped {
         steps.push(LineStep::PlayLand(l));
     }
-    for &f in &s.hand_fetch {
+    for &f in hand_fetch {
         steps.push(LineStep::PlayLand(f)); // crack is emitted once it's in play (re-emit)
     }
     for &l in &s.hand_tapped {
         steps.push(LineStep::PlayLand(l));
     }
-    // 3. Consumables, only as many as the bundle needs AND only once we hold the payoff:
-    //    casting a ritual/petal for mana with no Doomsday in hand wastes it (mana empties
-    //    at end of step). On the tutor line they wait until Doomsday has been drawn.
-    if dd.is_some() {
-        let hand_petals_used = (petals_used as usize).saturating_sub(s.petals_inplay.len());
-        for &p in s.petals_hand.iter().take(hand_petals_used) {
-            steps.push(LineStep::CastPetal(p));
-        }
-        if ritual_used {
-            steps.push(LineStep::CastRitual(s.rituals[0]));
-        }
+    // 3a. Deploy petals. A Lotus Petal in play is an UNSPENT mana source — it's
+    //     sacrificed only when mana is actually needed — so deploying it never wastes
+    //     it, and it can pay the tutor's pip (the {U} for Personal Tutor) just as well
+    //     as it seeds BBB. So petals are not gated on holding the payoff.
+    for &p in &s.petals_hand {
+        steps.push(LineStep::CastPetal(p));
+    }
+    // 3b. A ritual, by contrast, DOES empty if unused (its mana drains at end of step),
+    //     so only cast one with Doomsday in hand to spend it on.
+    if dd.is_some() && ritual_used {
+        steps.push(LineStep::CastRitual(s.rituals[0]));
     }
     // 4. Cast Doomsday (once held — for the tutor line it's drawn first).
     if let Some(d) = dd {
@@ -854,20 +934,37 @@ fn deterministic_cast_turn_full(
     let mut prefix_line = None;
     for t in 1..=max_turn {
         let seen = if immediate { t as usize } else { t.saturating_sub(1) as usize };
-        let drawn = seen.min(known_top.len());
         let mut c = base;
-        let mut has_dd = base_dd;
-        for &key in &known_top[..drawn] {
-            if let Some(def) = state.catalog.get(key) {
-                fold_known_card(&mut c, &mut has_dd, def, key);
+        // Earliest turn Doomsday is in HAND: already held (turn 1); a Doomsday drawn off
+        // the prefix (its draw turn); or — a turn LATER — a payoff tutor drawn off the
+        // prefix, since it must be cast (paying its pip) to stage Doomsday, which is then
+        // drawn the next turn. That +1 is exactly why staging Doomsday is strictly faster
+        // than staging a tutor for it — it falls out of the turn count, no special rule.
+        let mut payoff_by: Option<u32> = if base_dd { Some(1) } else { None };
+        for (i, &key) in known_top.iter().take(seen).enumerate() {
+            let Some(def) = state.catalog.get(key) else { continue };
+            let draw_turn = i as u32 + if immediate { 1 } else { 2 };
+            if key == DOOMSDAY {
+                payoff_by = Some(payoff_by.map_or(draw_turn, |p| p.min(draw_turn)));
+            } else if let Some(pip) = def.library_top_tutor().and(single_colored_pip(def.mana_cost())) {
+                // The tutor is cast the turn it's drawn, so its pip must be online by then
+                // (a renewable source — conservative, so we never over-claim a guaranteed
+                // line). Doomsday is then staged and drawn the following turn.
+                if renew_color_turn(state, who, pip, draw_turn, extra_hand).is_some_and(|s| s <= draw_turn) {
+                    let dd_turn = draw_turn + 1;
+                    payoff_by = Some(payoff_by.map_or(dd_turn, |p| p.min(dd_turn)));
+                }
+            } else {
+                let mut dummy = false;
+                fold_known_card(&mut c, &mut dummy, def, key);
             }
         }
-        if has_dd && bbb_on_turn(&c, t, c.pool) {
+        if payoff_by.is_some_and(|p| p <= t) && bbb_on_turn(&c, t, c.pool) {
             prefix_line = Some(t);
             break;
         }
     }
-    match (deterministic_cast_turn(state, who, max_turn), prefix_line) {
+    match (deterministic_cast_turn_ex(state, who, extra_hand, max_turn), prefix_line) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
@@ -1654,6 +1751,46 @@ mod tests {
             &["Island"],
         );
         assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
+    }
+
+    // ── Fast tutor lines: a turn-1 Personal Tutor that stages Doomsday for a turn-2
+    //    cast, powered by petals / rituals / lands. These are the class of T2 kills a
+    //    high-Personal-Tutor build is supposed to add. ──
+
+    #[test]
+    fn petal_petal_ritual_tutor_is_t2() {
+        // T1: petal→{U}, cast Personal Tutor (Doomsday to top). T2: draw it,
+        // petal→{B}, Dark Ritual → BBB, cast Doomsday.
+        let s = setup(
+            &[],
+            &["Lotus Petal", "Lotus Petal", "Dark Ritual", "Personal Tutor"],
+            &["Doomsday"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 4), Some(2));
+    }
+
+    #[test]
+    fn land_land_petal_tutor_is_t2() {
+        // T1: Underground Sea, cast Personal Tutor. T2: draw Doomsday, second Sea +
+        // first Sea + petal = BBB, cast.
+        let s = setup(
+            &[],
+            &["Underground Sea", "Underground Sea", "Lotus Petal", "Personal Tutor"],
+            &["Doomsday"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 4), Some(2));
+    }
+
+    #[test]
+    fn land_land_land_petal_tutor_is_t2_not_t3() {
+        // The petal makes this T2 (two Seas online by T2 + petal = BBB), NOT the
+        // non-minimal three-lands-by-T3 line. A minimal-line solver must find the 2.
+        let s = setup(
+            &[],
+            &["Underground Sea", "Underground Sea", "Underground Sea", "Lotus Petal", "Personal Tutor"],
+            &["Doomsday"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 4), Some(2));
     }
 
     #[test]

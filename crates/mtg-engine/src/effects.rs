@@ -117,6 +117,7 @@ pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
                 }
             }
         }
+        state.player_mut(who).known_top_len = 0; // reorders the top — forget conservatively
     }))
 }
 
@@ -155,6 +156,7 @@ pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
                 card.set_zone(Zone::Hand { known: false });
             }
         }
+        state.player_mut(who).known_top_len = 0; // mixes known/unknown — forget conservatively
     }))
 }
 

@@ -162,6 +162,17 @@ impl DDGoldfishStrategy {
         }
     }
 
+    /// E[TTD] if `id` were acquired now (staged on top / drawn to hand) — the same
+    /// objective as `candidate_p` but in TURNS, which (unlike a probability) does NOT
+    /// saturate. This is the tie-break that separates two by-cutoff lines: a fetched Sea
+    /// pays a tutor's pip sooner than a Swamp, and staging Doomsday is a turn faster than
+    /// staging a tutor for it (the chained-tutor +1 in `deterministic_cast_turn_full`).
+    fn candidate_ttd(&self, state: &SimState, id: ObjId, to_top: bool) -> f64 {
+        let who = self.player_id;
+        let key = state.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+        recipe::e_ttd_with_known_top(state, who, &[key.as_str()], !to_top, self.cutoff)
+    }
+
     /// Whether `id` fills an outstanding requirement of the plan: the payoff (until one
     /// is secured), any black-mana source, or a cantrip while we still lack a
     /// deterministic line by the cutoff (so digging is still needed). Solver-derived
@@ -227,6 +238,21 @@ fn keep_rank(state: &SimState, who: PlayerId, id: ObjId) -> u8 {
         _ => 1,               // relevant: payoff / tutor / ritual / petal / land / blue source
     }
 }
+
+/// Acquire-target dominance (the tutor analog of `land_priority` for fetches): the
+/// payoff itself beats a tutor for it — staging Doomsday skips the tutor's extra cast.
+/// Used only as the LAST tie-break, when both P(cast) and min-ttd are equal (tight
+/// mana, where neither line is deterministic and the stochastic estimate can't see the
+/// payoff-arrival delay). Without it the tie falls to the last candidate, which can be
+/// a redundant tutor → tutor→tutor loop. Higher = acquire first.
+fn payoff_rank(state: &SimState, who: PlayerId, id: ObjId) -> u8 {
+    match recipe::card_role(state, who, id) {
+        CardRole::Payoff => 2,
+        CardRole::PayoffTutor => 1,
+        _ => 0,
+    }
+}
+
 
 /// The legal `LandDrop` whose role is in `want`, chosen by `land_priority`.
 fn best_land_drop(state: &SimState, who: PlayerId, legal: &[LegalAction], want: &[CardRole]) -> Option<LegalAction> {
@@ -449,7 +475,13 @@ impl Strategy for DDGoldfishStrategy {
             1 => 0.38,
             _ => 0.20,
         };
-        let mull = mulligans_taken < 3 && p < threshold; // always keep at 4 cards
+        // KEEP7 experiment: always keep the opening 7 to remove all mulligan dynamics
+        // and compare pure gameplay speed apples-to-apples.
+        let mull = if std::env::var("KEEP7").is_ok() {
+            false
+        } else {
+            mulligans_taken < 3 && p < threshold // always keep at 4 cards
+        };
         if !mull {
             // Calibration probe: the kept hand's predicted P(cast by cutoff), to be
             // compared against the realized outcome (see `run_goldfish_calibration`).
@@ -556,18 +588,28 @@ impl Strategy for DDGoldfishStrategy {
                 self.candidate_p(state, a, false)
                     .partial_cmp(&self.candidate_p(state, b, false))
                     .unwrap_or(Ordering::Equal)
+                    // Tie-break on min-ttd (lower = faster): separates a Sea (pays the pip
+                    // sooner) from a same-priority Swamp where P(cast) saturates equal.
+                    .then_with(|| self.candidate_ttd(state, b, false)
+                        .partial_cmp(&self.candidate_ttd(state, a, false)).unwrap_or(Ordering::Equal))
                     .then_with(|| land_priority(recipe::card_role(state, who, a))
                         .cmp(&land_priority(recipe::card_role(state, who, b))))
             })
         } else {
-            // Tutor stages on top (drawn next turn); a dig goes to hand now. Primary
-            // key is the objective (P(cast by cutoff)); ties break on the last-ditch
-            // keep-rank (prefer keeping a cantrip).
+            // Tutor stages on top (drawn next turn); a dig goes to hand now. Primary key
+            // is the objective P(cast by cutoff); the min-ttd tie-break then separates the
+            // by-cutoff lines that probability saturates equal — staging Doomsday (payoff
+            // next turn) beats staging a tutor for it (payoff a turn later), for free.
             let to_top = src_def.map_or(false, |d| d.library_top_tutor().is_some());
             choices.iter().copied().max_by(|&a, &b| {
                 self.candidate_p(state, a, to_top)
                     .partial_cmp(&self.candidate_p(state, b, to_top))
                     .unwrap_or(Ordering::Equal)
+                    .then_with(|| self.candidate_ttd(state, b, to_top)
+                        .partial_cmp(&self.candidate_ttd(state, a, to_top)).unwrap_or(Ordering::Equal))
+                    // Last resort (tight mana, both lines stochastic): the payoff beats a
+                    // tutor for it, so we never loop tutor→tutor.
+                    .then_with(|| payoff_rank(state, who, a).cmp(&payoff_rank(state, who, b)))
                     .then_with(|| keep_rank(state, who, a).cmp(&keep_rank(state, who, b)))
             })
         };
@@ -736,4 +778,54 @@ impl Strategy for AggroMullStrategy {
     fn plan_gap(&self, s: &SimState) -> TargetGap { self.inner.plan_gap(s) }
     fn card_fills(&self, c: ObjId, g: &TargetGap, s: &SimState) -> f64 { self.inner.card_fills(c, g, s) }
     fn drain_decisions(&mut self) -> Vec<String> { self.inner.drain_decisions() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mtg_engine::{build_catalog, PlayerState, Zone};
+
+    /// Personal Tutor's filter is "a sorcery", and a Doomsday deck also runs other
+    /// sorceries (Thoughtseize, Edge of Autumn). The strategy MUST stage Doomsday (the
+    /// payoff) — staging a brick on top wastes the whole tutor and the draw.
+    #[test]
+    fn personal_tutor_stages_doomsday_not_another_sorcery() {
+        let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s.catalog = build_catalog();
+        // Three blue/black sources in play so the staged-Doomsday line is castable.
+        for _ in 0..3 {
+            s.place_card(PlayerId::Us, "Underground Sea", Zone::Battlefield);
+        }
+        let pt = s.place_card(PlayerId::Us, "Personal Tutor", Zone::Graveyard);
+        let dd = s.place_card(PlayerId::Us, "Doomsday", Zone::Library);
+        let th = s.place_card(PlayerId::Us, "Thoughtseize", Zone::Library);
+        let edge = s.place_card(PlayerId::Us, "Edge of Autumn", Zone::Library);
+
+        let mut strat = DDGoldfishStrategy::new(4);
+        let pick = strat.choose_for_effect(pt, &[dd, th, edge], &s);
+        assert_eq!(pick, Some(dd), "Personal Tutor must stage Doomsday, not a brick sorcery");
+    }
+
+    /// With a 4-Personal-Tutor build, PT's candidates often include BOTH Doomsday and
+    /// another Personal Tutor. With tight mana (no deterministic line), the stochastic
+    /// model scores staging either as "1 useful card" — a tie — so a naive `max_by`
+    /// could stage the redundant tutor (looping tutor→tutor, never casting). The payoff
+    /// must dominate: staging Doomsday skips the tutor's extra cast.
+    #[test]
+    fn personal_tutor_stages_doomsday_over_a_redundant_tutor() {
+        let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s.catalog = build_catalog();
+        // One untapped Sea: enough to cast a tutor, NOT enough for a deterministic BBB
+        // line — so staging DD vs another PT ties on the stochastic estimate.
+        s.place_card(PlayerId::Us, "Underground Sea", Zone::Battlefield);
+        let pt = s.place_card(PlayerId::Us, "Personal Tutor", Zone::Graveyard);
+        let dd = s.place_card(PlayerId::Us, "Doomsday", Zone::Library);
+        let other_pt = s.place_card(PlayerId::Us, "Personal Tutor", Zone::Library);
+
+        let mut strat = DDGoldfishStrategy::new(4);
+        // Doomsday FIRST, the tutor LAST — the order that made a bare `max_by` pick the
+        // tutor (it returns the last of equal elements).
+        let pick = strat.choose_for_effect(pt, &[dd, other_pt], &s);
+        assert_eq!(pick, Some(dd), "must stage the payoff, never loop on a redundant tutor");
+    }
 }
