@@ -2134,6 +2134,37 @@ mod tests {
         }
     }
 
+    /// INTUITION: how the DETERMINISTIC cast rate moves with Personal-Tutor count,
+    /// holding the rest fixed (PT ↔ a brick). Pure combinatorics, no sim — directly
+    /// tests "more PTs should raise deterministic T2-3 the most".
+    /// Run: `cargo test -p dd-goldfish pt_deterministic_curve -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "intuition: deterministic cast rate vs PT count"]
+    fn pt_deterministic_curve() {
+        let base = categorize_pt(&fast_pt_doomsday(), &build_catalog());
+        let [dd, ub, sw, tl, ritual, petal, il, pt0, other0] = base;
+        println!("\n-- deterministic OPENING-7 (no draws) --");
+        println!("PT   T1     T2     T3     T4");
+        for k in 0..=pt0.min(4) {
+            let counts = [dd, ub, sw, tl, ritual, petal, il, k, other0 + (pt0 - k)];
+            print!("{k} ");
+            for t in 1..=4 {
+                print!("  {:.3}", analytical_cast_by_pt_seen(counts, t, true, 7));
+            }
+            println!();
+        }
+        println!("\n-- deterministic WITH NATURAL DRAWS (seen = 7 + T-1) --");
+        println!("PT   T1     T2     T3     T4");
+        for k in 0..=pt0.min(4) {
+            let counts = [dd, ub, sw, tl, ritual, petal, il, k, other0 + (pt0 - k)];
+            print!("{k} ");
+            for t in 1..=4i64 {
+                print!("  {:.3}", analytical_cast_by_pt_seen(counts, t, true, 7 + (t - 1)));
+            }
+            println!();
+        }
+    }
+
     fn setup(bf: &[&str], hand: &[&str], library: &[&str]) -> SimState {
         let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
         s.catalog = build_catalog();
