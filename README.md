@@ -1,7 +1,6 @@
 # libmtg
 
-A generic, reusable rules engine for Magic: The Gathering, plus simulation apps
-built on top of it.
+A generic, reusable rules engine for Magic: The Gathering.
 
 This repository is a Cargo workspace. The headline crate is **`libmtg-engine`** —
 a standalone engine with a public state/decision API (no game-specific strategy,
@@ -13,7 +12,7 @@ namespace.
 
 | Crate | What it is |
 |-------|------------|
-| [`libmtg-engine`](crates/libmtg-engine) | The reusable engine: cards, zones, mana, the stack, replacement/trigger/continuous infrastructure, and a public API (`SimState`, `Strategy`, `Objective`, `run_game`) for driving game state and decisions. Card behavior is data in a small IR. Depends on none of the others. |
+| [`libmtg-engine`](crates/libmtg-engine) | The generic engine: cards, zones, mana, the stack, replacement/trigger/continuous infrastructure, and a public API (`SimState`, `Strategy`, `Objective`, `run_game`) for driving game state and decisions. Card behavior is data in a small IR. Depends on none of the others. |
 | [`libmtg-decklist`](crates/libmtg-decklist) | Portable text/URL decklists, independent of the engine. The text parser is wasm-safe; a native-only `fetch` feature resolves Moxfield / MTGGoldfish URLs with an on-disk cache. |
 | [`libmtg-doomsday`](apps/libmtg-doomsday) | The Doomsday deck: strategy, planner, and objective content, plus the apps — a Monte-Carlo goldfish simulator (`dd-goldfish` CLI + web) and a pile-scenario builder (web). |
 | [`libmtg`](crates/libmtg) | Umbrella crate that re-exports the three above as `libmtg::engine`, `libmtg::decklist`, and `libmtg::doomsday`. |
@@ -39,9 +38,6 @@ are supplied by the caller through the `Strategy` and `Objective` traits. (See
   studying or posting specific lines.
 
 ## Using it in your own project
-
-You don't need crates.io — point Cargo at this repo via a git dependency. There
-are two entry points:
 
 **Just the engine** (leanest — pulls only `rand`, `serde`, `serde_json`):
 
@@ -100,6 +96,8 @@ wasm-pack build apps/libmtg-doomsday --release --target web --no-default-feature
 `ureq`) that doesn't build for wasm. The pages load the generated
 `pkg/libmtg_doomsday.js`; serve `apps/libmtg-doomsday/web/` over HTTP to run them
 locally.
+
+Currently served at bur.io/doomsday/
 
 ## License
 
