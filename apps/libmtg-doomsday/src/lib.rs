@@ -35,10 +35,10 @@ pub use strategy::{dd_should_mulligan, DoomsdayStrategy, GenericOppStrategy, Mat
 
 // The goldfish app's public API, used by the `dd-goldfish` bin and the wasm frontend.
 pub use goldfish::{
-    dd_goldfish_evaluator, run_goldfish, run_goldfish_asap, run_goldfish_audit_det,
-    run_goldfish_baseline_aggro, run_goldfish_calibration, run_goldfish_compare,
-    sample_doomsday_deck, DDGoldfishStrategy, GoldfishStats, DEFAULT_CUTOFF,
-    DEFAULT_PROTECTION,
+    dd_goldfish_evaluator, run_goldfish, run_goldfish_asap, run_goldfish_asap_mode,
+    run_goldfish_audit_det, run_goldfish_baseline_aggro, run_goldfish_calibration,
+    run_goldfish_compare, sample_doomsday_deck, DDGoldfishStrategy, GoldfishStats, MullMode,
+    DEFAULT_CUTOFF, DEFAULT_PROTECTION,
 };
 
 #[cfg(test)]

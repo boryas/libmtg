@@ -27,6 +27,10 @@ pub mod recipe;
 /// [`strategy::DDGoldfishStrategy`].
 pub mod strategy;
 
+/// Pluggable opening-hand mulligan policies for the goldfish pilot.
+pub mod mull;
+
+pub use mull::{should_mulligan, HandSignals, MullMode};
 pub use strategy::{DDGoldfishStrategy, DEFAULT_CUTOFF};
 
 /// v1 "protection layers": disruption the Doomsday player holds to protect the
@@ -241,9 +245,10 @@ pub fn run_goldfish(
     )
 }
 
-/// Run `games` goldfish simulations driving the aggressive cast-ASAP
-/// [`DDGoldfishStrategy`], which follows the `recipe` solver to combo by `cutoff`.
-/// The headline `P(cast by cutoff)` is `stats.cast_by(cutoff)`.
+/// Run `games` goldfish simulations driving the cast-ASAP [`DDGoldfishStrategy`]
+/// (which follows the `recipe` solver to combo by `cutoff`) under the default
+/// ([`MullMode::Realistic`]) mulligan. The headline `P(cast by cutoff)` is
+/// `stats.cast_by(cutoff)`.
 pub fn run_goldfish_asap(
     deck: &[(String, i32, String)],
     games: u32,
@@ -251,13 +256,26 @@ pub fn run_goldfish_asap(
     max_turns: u8,
     cutoff: u32,
 ) -> GoldfishStats {
+    run_goldfish_asap_mode(deck, games, protection, max_turns, cutoff, MullMode::default())
+}
+
+/// Like [`run_goldfish_asap`], but with an explicit opening-hand [`MullMode`]
+/// (Keep7 / Realistic / Aggressive) — the goldfish web/CLI mulligan selector.
+pub fn run_goldfish_asap_mode(
+    deck: &[(String, i32, String)],
+    games: u32,
+    protection: &[&str],
+    max_turns: u8,
+    cutoff: u32,
+    mode: MullMode,
+) -> GoldfishStats {
     run_goldfish_inner(
         deck,
         games,
         protection,
         max_turns,
         cutoff.min(u8::MAX as u32) as u8,
-        move || Box::new(DDGoldfishStrategy::new(cutoff)),
+        move || Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, mode)),
         dd_goldfish_evaluator(),
     )
 }

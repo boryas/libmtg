@@ -26,6 +26,10 @@
     button:disabled { opacity: 0.5; cursor: wait; }
     .panel { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 0.9rem 1rem; }
     .muted { color: #888; font-size: 0.85rem; }
+    .mode-desc { font-size: 0.78rem; color: #9aa; line-height: 1.45; margin-top: 0.35rem;
+      padding: 0.45rem 0.6rem; background: #111a2e; border: 1px solid #0f3460; border-radius: 4px; }
+    .mode-desc b { color: #c8c8d4; }
+    .mode-desc code { background: #0c1322; padding: 0 3px; border-radius: 3px; color: #9fd0ee; }
     .summary { display: flex; flex-wrap: wrap; gap: 1.2rem; margin-bottom: 0.5rem; }
     .stat { font-size: 0.85rem; }
     .stat b { color: #5dade2; font-size: 1.1rem; }
@@ -83,16 +87,24 @@
 
       <p><b>The objective.</b> Everything is scored by <b>P(cast Doomsday by the cut-off
         turn)</b>. The cut-off is the turn past which a slow combo is assumed dead (raced /
-        Wastelanded). A slow hand is therefore nearly worthless, so the strategy plays&mdash;and
-        mulligans&mdash;aggressively for speed.</p>
+        Wastelanded). A slow hand is therefore nearly worthless, so the pilot plays for speed.</p>
 
-      <p><b>How the pilot decides.</b> A backward solver estimates, for any state,
+      <p><b>How the pilot decides (gameplay).</b> A backward solver estimates, for any state,
         <b>P(cast by cut-off)</b> (<code>g</code>) from a hypergeometric model: deterministic
         mana assembly, plus drawing into the missing piece, with cantrips counted as extra
         card "looks." If a <b>guaranteed (no-draw) line</b> lands by the cut-off it
         <i>settles</i> and executes it; otherwise it <i>gambles</i> &mdash; develops a black
-        source and digs (and rips a fetch when even the best case is too slow). The mulligan
-        keeps a hand only if its <code>g</code> clears a threshold.</p>
+        source and digs (and rips a fetch when even the best case is too slow).</p>
+
+      <p><b>How the pilot mulligans.</b> Selectable, because the headline rate shifts a lot with
+        how hard you ship hands:
+        <b>Realistic</b> (default) keeps a hand with real mana <i>and</i> a concrete plan to cast
+        Doomsday (a guaranteed line; or DD + a black source + a castable cantrip; or a Tamiyo
+        deploy; or two castable cantrips off a black source), and ships no-mana / flooded /
+        do-nothing hands &mdash; an explicit, inspectable rule that does <i>not</i> consult
+        <code>g</code>. <b>Keep 7</b> never mulligans (raw deck speed). <b>Aggressive</b> re-draws
+        any hand below a high <code>g</code> threshold (0.55 / 0.38 / 0.20 by mulligan) &mdash;
+        fast but it ships almost every imperfect seven and so flattens deck differences.</p>
 
       <p class="caveats"><b>Structural caveats (true for any deck).</b></p>
       <ul class="caveats">
@@ -106,7 +118,10 @@
           single-resource; the cantrip terms are approximate).</li>
         <li><b>Cantrip "looks" are a heuristic.</b> Non-additive and time-capped, with no true
           modeling of chained cantrips.</li>
-        <li><b>The mulligan bar is a tuned heuristic</b>, and only optimal <i>given</i> <code>g</code>.</li>
+        <li><b>Mulligan modes change the result.</b> The headline rate is reported <i>for the
+          selected mode</i>; comparing a deck across modes (Keep 7 → Realistic → Aggressive) is the
+          honest read. Only the Aggressive mode consults <code>g</code>; Realistic is a pure
+          card-shape rule.</li>
         <li>The per-hand predicted P is the model's <i>own estimate</i> of <code>g</code>; the
           <b>headline % is the measured simulation rate</b> &mdash; the honest number, free of that bias.</li>
       </ul>
@@ -117,11 +132,13 @@
     <div>
       <label for="deck">Decklist (paste Moxfield / MTGGoldfish / Arena text export)</label>
       <textarea id="deck" spellcheck="false"></textarea>
-      <label for="strategy">Pilot</label>
-      <select id="strategy">
-        <option value="asap" selected>Aggressive &mdash; cast Doomsday ASAP (solver)</option>
-        <option value="baseline">Baseline &mdash; develop &amp; protect</option>
+      <label for="mull">Mulligan mode <span class="muted">(how the pilot decides to keep)</span></label>
+      <select id="mull">
+        <option value="realistic" selected>Realistic &mdash; keep a real plan</option>
+        <option value="keep7">Keep 7 &mdash; never mulligan</option>
+        <option value="aggressive">Aggressive &mdash; race bar</option>
       </select>
+      <div id="mull-desc" class="mode-desc"></div>
       <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
       <input type="number" id="cutoff" value="4" min="1" max="10">
       <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
@@ -141,11 +158,27 @@
     // `?v=` cache-busts the glue + wasm together on each deploy (the files have stable
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
-    import init, { run_goldfish_web, run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260619-libmtg';
-    const WASM_VER = '20260619-libmtg';
+    import init, { run_goldfish_asap_web, missing_cards_web }
+      from '../pkg/libmtg_doomsday.js?v=20260620-mullmodes';
+    const WASM_VER = '20260620-mullmodes';
 
     const REPO = 'boryas/libmtg';
+
+    // Precise per-mode descriptions, shown live under the selector so the user knows
+    // exactly what they're getting. Kept in sync with `goldfish::mull::MullMode`.
+    const MULL_DESC = {
+      realistic: `<b>Realistic.</b> Emulates a thoughtful pilot: keeps a hand only if it has
+        real mana <i>and</i> an actual plan to cast Doomsday &mdash; a guaranteed (no-draw) line by
+        the cut-off; or Doomsday in hand + a black source + a castable cantrip to find the rest; or a
+        Tamiyo deploy (Tamiyo + a blue land); or two castable cantrips off a black source. Mulligans
+        no-mana, flooded (&ge;4 lands), or do-nothing hands. The honest default &mdash; it exposes
+        deck-speed differences instead of fanatically digging.`,
+      keep7: `<b>Keep 7.</b> Never mulligans &mdash; always keeps the opening seven. Pure raw
+        deck speed with no mulligan dynamics at all; the lower-bound baseline for comparing decks.`,
+      aggressive: `<b>Aggressive.</b> Re-draws any hand below a high <code>P(cast by cut-off)</code>
+        bar (0.55 at 7 cards, loosening to 0.38 at 6, 0.20 at 5). Optimal-ish but fanatical: it ships
+        almost every imperfect seven, which <i>flattens</i> the differences between decks.`,
+    };
 
     // Default deck: the sample Doomsday list (so the page works out of the box).
     const SAMPLE = `3 Underground Sea
@@ -281,7 +314,7 @@
     }
 
     function renderStats(s, opts) {
-      const { strategy, cutoff } = opts;
+      const { mull, cutoff } = opts;
       const successes = s.games - s.fails;
       const turns = Object.keys(s.cast_turn).map(Number).sort((a, b) => a - b);
       const maxT = cutoff; // sim is capped at the cut-off, so that's the last turn
@@ -305,8 +338,8 @@
       const protRows = Object.keys(s.protection).map(Number).sort((a, b) => a - b).map(p =>
         `<tr><td>${p} layer${p === 1 ? '' : 's'}</td><td>${bar(s.protection[p] / successes, 'prot')}</td></tr>`);
 
-      const pilot = strategy === 'asap'
-        ? 'Aggressive (cast Doomsday ASAP)' : 'Baseline (develop &amp; protect)';
+      const pilot = 'cast-ASAP solver &middot; ' +
+        ({ realistic: 'Realistic mull', keep7: 'Keep-7', aggressive: 'Aggressive mull' }[mull] || mull);
 
       // ASAP-only rich stats (the strategy emits the per-game STATS line).
       const hasRich = s.mull_count && Object.keys(s.mull_count).length > 0;
@@ -361,14 +394,12 @@
     async function run() {
       const deck = $('deck').value;
       const games = $('games').valueAsNumber || 2000;
-      const strategy = $('strategy').value;
+      const mull = $('mull').value;
       const cutoff = $('cutoff').valueAsNumber || 4;
       // The objective is P(cast by the cut-off), so there's no reason to simulate
       // past it: the turn cap is just the cut-off.
       const turns = cutoff;
-      const sim = (n) => strategy === 'asap'
-        ? run_goldfish_asap_web(deck, n, turns, cutoff)
-        : run_goldfish_web(deck, n, turns);
+      const sim = (n) => run_goldfish_asap_web(deck, n, turns, cutoff, mull);
       const btn = $('run'), prog = $('progress'), fill = $('progress-fill'), plabel = $('progress-label');
       btn.disabled = true; btn.textContent = 'Simulating…';
       prog.hidden = false; fill.style.width = '0'; plabel.textContent = '';
@@ -389,7 +420,7 @@
           plabel.textContent = `simulating… ${done.toLocaleString()} / ${games.toLocaleString()} games`;
           await new Promise(r => setTimeout(r, 0));
         }
-        renderStats(agg, { strategy, cutoff });
+        renderStats(agg, { mull, cutoff });
       } finally {
         prog.hidden = true; plabel.textContent = '';
         btn.disabled = false; btn.textContent = 'Goldfish it';
@@ -398,6 +429,11 @@
 
     // The title badge opens the methodology panel (and scrolls to it).
     $('methodology-toggle').addEventListener('click', () => { $('methodology').open = true; });
+
+    // Live mulligan-mode description so the user sees exactly what each mode does.
+    const syncMullDesc = () => { $('mull-desc').innerHTML = MULL_DESC[$('mull').value] || ''; };
+    $('mull').addEventListener('change', syncMullDesc);
+    syncMullDesc();
 
     try {
       await init(`../pkg/libmtg_doomsday_bg.wasm?v=${WASM_VER}`);

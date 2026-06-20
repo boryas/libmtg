@@ -1150,6 +1150,17 @@ impl CardDef {
         })
     }
 
+    /// True if the card replaces itself via a hand-source activated ability that draws
+    /// or digs — a cycling-style free cantrip (e.g. Street Wraith's "discard self, pay
+    /// 2 life: draw"). Complements [`digs_on_resolve`] (cast-to-dig cantrips like
+    /// Ponder); read structurally from the ability IR, no card names.
+    pub fn has_cycling_draw(&self) -> bool {
+        self.abilities().iter().any(|a| {
+            matches!(a.source_zone, SourceZone::Hand)
+                && a.ir_body.as_ref().map_or(false, body_digs)
+        })
+    }
+
     /// How many cards this card's on-resolve effect lets you SEE for selection — the
     /// "looks" of a cantrip (Ponder 4, Brainstorm 3, Consider 2, …), read structurally
     /// from the IR (no name table). 0 for non-spells / non-diggers. Multi-mode takes

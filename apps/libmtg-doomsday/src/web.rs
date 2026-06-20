@@ -22,7 +22,7 @@ use libmtg_engine::{
 #[cfg(target_arch = "wasm32")]
 use libmtg_decklist::Decklist;
 #[cfg(target_arch = "wasm32")]
-use crate::{generate_scenario, run_goldfish, run_goldfish_asap, DEFAULT_PROTECTION};
+use crate::{generate_scenario, run_goldfish_asap_mode, MullMode, DEFAULT_PROTECTION};
 
 #[cfg(target_arch = "wasm32")]
 fn cards(list: &[(&str, i32)]) -> Vec<(String, i32, String)> {
@@ -207,25 +207,22 @@ pub fn decode_snapshot(token: &str) -> Result<String, JsValue> {
 
 // ── goldfish frontend (dd-goldfish.html) ────────────────────────────────────
 
-/// Goldfish a pasted text decklist with the baseline `DoomsdayStrategy`.
-/// Returns `GoldfishStats` as JSON.
+/// Goldfish a pasted text decklist with the cast-ASAP `DDGoldfishStrategy` (follows
+/// the recipe solver to combo by `cutoff`) under the selected `mull_mode`
+/// (`keep7` / `realistic` / `aggressive`). Returns `GoldfishStats` as JSON; the
+/// headline `P(cast by cutoff)` is read off the cast-turn CDF client-side.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn run_goldfish_web(deck_text: &str, games: u32, max_turns: u8) -> String {
+pub fn run_goldfish_asap_web(
+    deck_text: &str,
+    games: u32,
+    max_turns: u8,
+    cutoff: u32,
+    mull_mode: &str,
+) -> String {
     let deck = Decklist::parse_text(deck_text).to_engine_deck();
-    let stats = run_goldfish(&deck, games, DEFAULT_PROTECTION, max_turns);
-    serde_json::to_string(&stats).unwrap()
-}
-
-/// Goldfish a pasted text decklist with the aggressive cast-ASAP
-/// `DDGoldfishStrategy`, which follows the recipe solver to combo by `cutoff`.
-/// Returns `GoldfishStats` as JSON; the headline `P(cast by cutoff)` is read
-/// off the cast-turn CDF client-side.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub fn run_goldfish_asap_web(deck_text: &str, games: u32, max_turns: u8, cutoff: u32) -> String {
-    let deck = Decklist::parse_text(deck_text).to_engine_deck();
-    let stats = run_goldfish_asap(&deck, games, DEFAULT_PROTECTION, max_turns, cutoff);
+    let mode = MullMode::from_str_or_default(mull_mode);
+    let stats = run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, max_turns, cutoff, mode);
     serde_json::to_string(&stats).unwrap()
 }
 

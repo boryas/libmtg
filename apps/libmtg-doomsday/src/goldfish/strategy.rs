@@ -38,6 +38,8 @@ pub struct DDGoldfishStrategy {
     player_id: PlayerId,
     /// "Cast by this turn" objective (1-based). Drives mulligans + cantrip choices.
     cutoff: u32,
+    /// Opening-hand discipline (Keep7 / Realistic / Aggressive).
+    mull_mode: super::mull::MullMode,
     /// Set by `order_top_library` (Ponder) when the solver wants to shuffle; consumed
     /// by the immediately-following `MayDo`(shuffle) `resolve_choice`.
     pending_shuffle: bool,
@@ -49,10 +51,17 @@ pub struct DDGoldfishStrategy {
 }
 
 impl DDGoldfishStrategy {
+    /// Cast-ASAP pilot with the default ([`MullMode::Realistic`]) mulligan.
     pub fn new(cutoff: u32) -> Self {
+        Self::with_mull_mode(cutoff, super::mull::MullMode::default())
+    }
+
+    /// Cast-ASAP pilot driving an explicit mulligan mode.
+    pub fn with_mull_mode(cutoff: u32, mull_mode: super::mull::MullMode) -> Self {
         Self {
             player_id: PlayerId::Us,
             cutoff: cutoff.max(1),
+            mull_mode,
             pending_shuffle: false,
             compare: false,
             decisions: Vec::new(),
@@ -465,23 +474,9 @@ impl Strategy for DDGoldfishStrategy {
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
         let who = self.player_id;
         let p = recipe::p_cast_by(state, who, self.cutoff);
-        // Ship hands too unlikely to combo by the cutoff: for a *race*, a slow hand is
-        // nearly worthless, so demand a high P(cast by cutoff) and re-draw otherwise.
-        // The bar loosens as we mulligan (fewer cards is worth more than a dead 7).
-        // (Empirically ~optimal on the sample list at cutoff 4; the principled,
-        // per-deck version is the self-calibrated indifference curve — see below.)
-        let threshold = match mulligans_taken {
-            0 => 0.55,
-            1 => 0.38,
-            _ => 0.20,
-        };
-        // KEEP7 experiment: always keep the opening 7 to remove all mulligan dynamics
-        // and compare pure gameplay speed apples-to-apples.
-        let mull = if std::env::var("KEEP7").is_ok() {
-            false
-        } else {
-            mulligans_taken < 3 && p < threshold // always keep at 4 cards
-        };
+        // The keep/mull decision is the selected mulligan mode's (Keep7 / Realistic /
+        // Aggressive — see `super::mull`). `p` is computed only for the logging below.
+        let mull = super::mull::should_mulligan(self.mull_mode, state, who, self.cutoff, mulligans_taken);
         if !mull {
             // Calibration probe: the kept hand's predicted P(cast by cutoff), to be
             // compared against the realized outcome (see `run_goldfish_calibration`).
@@ -503,9 +498,9 @@ impl Strategy for DDGoldfishStrategy {
             if heur_mull != mull {
                 let hand: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
                 self.dlog(format!(
-                    "DIFF mulligan#{}: principled={} (P={:.2}<thr {:.2}) heuristic={} hand=[{}]",
+                    "DIFF mulligan#{}: mode={} (P={:.2}) heuristic={} hand=[{}]",
                     mulligans_taken,
-                    if mull { "MULL" } else { "KEEP" }, p, threshold,
+                    if mull { "MULL" } else { "KEEP" }, p,
                     if heur_mull { "MULL" } else { "KEEP" },
                     names(state, &hand)));
             }

@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use libmtg_doomsday::{
-    run_goldfish, run_goldfish_asap, sample_doomsday_deck, GoldfishStats, DEFAULT_CUTOFF,
-    DEFAULT_PROTECTION,
+    run_goldfish, run_goldfish_asap_mode, sample_doomsday_deck, GoldfishStats, MullMode,
+    DEFAULT_CUTOFF, DEFAULT_PROTECTION,
 };
 use libmtg_engine::{build_catalog, warn_unimplemented_cards};
 
@@ -19,6 +19,27 @@ enum StrategyKind {
     Asap,
     /// 2×2 probe: baseline gameplay + the aggressive p_cast_by mulligan.
     BaselineAggro,
+}
+
+/// Opening-hand mulligan discipline for the cast-ASAP pilot.
+#[derive(Clone, Copy, ValueEnum)]
+enum MullArg {
+    /// Never mulligan — keep the opening 7.
+    Keep7,
+    /// "Keep a real plan" player heuristic (default).
+    Realistic,
+    /// High p_cast_by bar, loosening as you mulligan.
+    Aggressive,
+}
+
+impl From<MullArg> for MullMode {
+    fn from(m: MullArg) -> Self {
+        match m {
+            MullArg::Keep7 => MullMode::Keep7,
+            MullArg::Realistic => MullMode::Realistic,
+            MullArg::Aggressive => MullMode::Aggressive,
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -37,6 +58,9 @@ struct Args {
     /// Which pilot to simulate.
     #[arg(long, value_enum, default_value_t = StrategyKind::Asap)]
     strategy: StrategyKind,
+    /// Opening-hand mulligan discipline for the cast-ASAP pilot.
+    #[arg(long, value_enum, default_value_t = MullArg::Realistic)]
+    mull_mode: MullArg,
     /// Cutoff turn for the cast-ASAP objective `P(cast by cutoff)`.
     #[arg(long, default_value_t = DEFAULT_CUTOFF)]
     cutoff: u32,
@@ -112,9 +136,9 @@ fn main() -> ExitCode {
     );
     let stats = match args.strategy {
         StrategyKind::Baseline => run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.max_turns),
-        StrategyKind::Asap => {
-            run_goldfish_asap(&deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff)
-        }
+        StrategyKind::Asap => run_goldfish_asap_mode(
+            &deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff, args.mull_mode.into(),
+        ),
         StrategyKind::BaselineAggro => libmtg_doomsday::run_goldfish_baseline_aggro(
             &deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff,
         ),
