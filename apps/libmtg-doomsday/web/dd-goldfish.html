@@ -30,6 +30,10 @@
       padding: 0.45rem 0.6rem; background: #111a2e; border: 1px solid #0f3460; border-radius: 4px; }
     .mode-desc b { color: #c8c8d4; }
     .mode-desc code { background: #0c1322; padding: 0 3px; border-radius: 3px; color: #9fd0ee; }
+    .mode-desc ol, .mode-desc ul { margin: 0.3rem 0 0.3rem 1.15rem; }
+    .mode-desc ol { padding: 0; }
+    .mode-desc li { margin: 0.12rem 0; }
+    .mode-desc .note { color: #788; display: block; margin-top: 0.35rem; }
     .summary { display: flex; flex-wrap: wrap; gap: 1.2rem; margin-bottom: 0.5rem; }
     .stat { font-size: 0.85rem; }
     .stat b { color: #5dade2; font-size: 1.1rem; }
@@ -167,17 +171,26 @@
     // Precise per-mode descriptions, shown live under the selector so the user knows
     // exactly what they're getting. Kept in sync with `goldfish::mull::MullMode`.
     const MULL_DESC = {
-      realistic: `<b>Realistic.</b> Emulates a thoughtful pilot: keeps a hand only if it has
-        real mana <i>and</i> an actual plan to cast Doomsday &mdash; a guaranteed (no-draw) line by
-        the cut-off; or Doomsday in hand + a black source + a castable cantrip to find the rest; or a
-        Tamiyo deploy (Tamiyo + a blue land); or two castable cantrips off a black source. Mulligans
-        no-mana, flooded (&ge;4 lands), or do-nothing hands. The honest default &mdash; it exposes
-        deck-speed differences instead of fanatically digging.`,
-      keep7: `<b>Keep 7.</b> Never mulligans &mdash; always keeps the opening seven. Pure raw
-        deck speed with no mulligan dynamics at all; the lower-bound baseline for comparing decks.`,
-      aggressive: `<b>Aggressive.</b> Re-draws any hand below a high <code>P(cast by cut-off)</code>
-        bar (0.55 at 7 cards, loosening to 0.38 at 6, 0.20 at 5). Optimal-ish but fanatical: it ships
-        almost every imperfect seven, which <i>flattens</i> the differences between decks.`,
+      realistic: `<b>Realistic</b> &mdash; an explicit card-shape rule (does not use <code>g</code>).
+        <b>KEEP</b> if any holds, in order; otherwise <b>MULL</b>:
+        <ol>
+          <li>a guaranteed (no-draw) Doomsday line lands by the cut-off; or</li>
+          <li>the hand has <b>&ge;1 colored land</b> and <b>&lt;4 lands total</b>, and one of:
+            <ul>
+              <li>Doomsday in hand <b>+</b> a black source <b>+</b> a castable cantrip; or</li>
+              <li>Tamiyo <b>+</b> a blue land <b>+</b> (a castable cantrip <b>or</b> a fetch); or</li>
+              <li><b>two</b> castable cantrips <b>+</b> a black source.</li>
+            </ul>
+          </li>
+        </ol>
+        <span class="note">So MULL = no colored land, 4+ lands (flood), or no plan above.
+        "Castable cantrip" = blue mana available to cast it, or a free cantrip (Street Wraith).
+        Black source / Petal count; bare Dark Ritual does not (it needs a black seed).</span>`,
+      keep7: `<b>Keep 7</b> &mdash; never mulligans; always keeps the opening seven.
+        Raw deck speed, no mulligan dynamics.`,
+      aggressive: `<b>Aggressive</b> &mdash; mulligans any hand whose solver estimate
+        <code>P(cast by cut-off)</code> is below the bar: <b>0.55</b> at 7 cards, <b>0.38</b> at 6,
+        <b>0.20</b> at 5 (always keep at 4).`,
     };
 
     // Default deck: the sample Doomsday list (so the page works out of the box).
