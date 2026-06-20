@@ -151,6 +151,19 @@
       </details>
       <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
       <input type="number" id="cutoff" value="3" min="1" max="10">
+      <details id="solver-help" class="mode-desc">
+        <summary>what the cut-off &amp; solver do</summary>
+        <div>
+          <b>Cut-off turn</b> &mdash; the deadline the combo must beat. Past it a slow Doomsday is
+          assumed dead (raced / Wastelanded), so everything is scored by <code>P(cast Doomsday by
+          the cut-off)</code>; a lower cut-off rewards faster decks.
+          <span class="note"><b>Backwards solver</b> &mdash; for any game state it works <i>backward</i>
+          from Doomsday to estimate that probability: deterministic mana assembly (lands / petals /
+          rituals / fetches) plus the odds of drawing a missing piece, with cantrips counted as extra
+          card "looks." It also drives play &mdash; <b>settle</b> a guaranteed (no-draw) line if one
+          lands by the cut-off, else <b>gamble</b>: develop a black source and dig toward it.</span>
+        </div>
+      </details>
       <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
       <input type="number" id="games" value="1000" min="1" max="50000">
       <br>
