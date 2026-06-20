@@ -35,8 +35,10 @@
     .mode-desc code { background: #0c1322; padding: 0 3px; border-radius: 3px; color: #9fd0ee; }
     .mode-desc ol, .mode-desc ul { margin: 0.3rem 0 0.3rem 1.15rem; }
     .mode-desc ol { padding: 0; }
-    .mode-desc li { margin: 0.12rem 0; }
-    .mode-desc .note { color: #788; display: block; margin-top: 0.35rem; }
+    .mode-desc li { margin: 0.18rem 0; }
+    .mode-desc p { margin: 0.4rem 0; }
+    .mode-desc p:first-child { margin-top: 0; }
+    .mode-desc .note { color: #788; }
     .summary { display: flex; flex-wrap: wrap; gap: 1.2rem; margin-bottom: 0.5rem; }
     .stat { font-size: 0.85rem; }
     .stat b { color: #5dade2; font-size: 1.1rem; }
@@ -139,29 +141,30 @@
     <div>
       <label for="deck">Decklist (paste Moxfield / MTGGoldfish / Arena text export)</label>
       <textarea id="deck" spellcheck="false"></textarea>
-      <label for="mull">Mulligan mode <span class="muted">(how the pilot decides to keep)</span></label>
+      <label for="mull">Mulligan mode</label>
       <select id="mull">
         <option value="realistic" selected>Realistic &mdash; keep a real plan</option>
         <option value="keep7">Keep 7 &mdash; never mulligan</option>
         <option value="aggressive">Aggressive &mdash; race bar</option>
       </select>
       <details id="mull-help" class="mode-desc" open>
-        <summary>how this mode keeps</summary>
+        <summary>How this mode decides</summary>
         <div id="mull-desc"></div>
       </details>
-      <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
+      <label for="cutoff">Cut-off turn <span class="muted">(combo deadline)</span></label>
       <input type="number" id="cutoff" value="3" min="1" max="10">
       <details id="solver-help" class="mode-desc">
-        <summary>what the cut-off &amp; solver do</summary>
+        <summary>The cut-off and the solver</summary>
         <div>
-          <b>Cut-off turn</b> &mdash; the deadline the combo must beat. Past it a slow Doomsday is
-          assumed dead (raced / Wastelanded), so everything is scored by <code>P(cast Doomsday by
-          the cut-off)</code>; a lower cut-off rewards faster decks.
-          <span class="note"><b>Backwards solver</b> &mdash; for any game state it works <i>backward</i>
-          from Doomsday to estimate that probability: deterministic mana assembly (lands / petals /
-          rituals / fetches) plus the odds of drawing a missing piece, with cantrips counted as extra
-          card "looks." It also drives play &mdash; <b>settle</b> a guaranteed (no-draw) line if one
-          lands by the cut-off, else <b>gamble</b>: develop a black source and dig toward it.</span>
+          <p><b>Cut-off turn.</b> The deadline for the combo. A Doomsday cast after it is treated as
+          too slow to matter, since by then the opponent has raced you or destroyed your mana. Every
+          result is scored as <code>P(cast Doomsday by the cut-off)</code>, so a lower cut-off
+          rewards faster decks.</p>
+          <p class="note"><b>Backwards solver.</b> For any game state, it reasons backward from
+          Doomsday to estimate that probability: the mana it can assemble for certain, plus the
+          chance of drawing a missing piece, counting each cantrip as a few extra cards seen. The
+          same estimate guides play &mdash; it runs a guaranteed line when one finishes by the
+          cut-off, and otherwise develops a black source and digs toward the combo.</p>
         </div>
       </details>
       <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
@@ -190,26 +193,29 @@
     // Precise per-mode descriptions, shown live under the selector so the user knows
     // exactly what they're getting. Kept in sync with `goldfish::mull::MullMode`.
     const MULL_DESC = {
-      realistic: `<b>Realistic</b> &mdash; an explicit card-shape rule (does not use <code>g</code>).
-        <b>KEEP</b> if any holds, in order; otherwise <b>MULL</b>:
+      realistic: `<p>A fixed rule that reads the cards in hand. It never uses the solver's
+        probability. Keep the hand if any of the following is true:</p>
         <ol>
-          <li>a guaranteed (no-draw) Doomsday line lands by the cut-off; or</li>
-          <li>the hand has <b>&ge;1 colored land</b> and <b>&lt;4 lands total</b>, and one of:
+          <li>It can cast Doomsday by the cut-off with no draws &mdash; a guaranteed line.</li>
+          <li>It has at least one colored land, fewer than four lands in total, and one of these
+            plans:
             <ul>
-              <li>Doomsday in hand <b>+</b> a black source <b>+</b> a castable cantrip; or</li>
-              <li>Tamiyo <b>+</b> a blue land <b>+</b> (a castable cantrip <b>or</b> a fetch); or</li>
-              <li><b>two</b> castable cantrips <b>+</b> a black source.</li>
+              <li>Doomsday, a black source, and a castable cantrip to find the rest;</li>
+              <li>Tamiyo, a blue land to cast it, and either a castable cantrip or a fetch;</li>
+              <li>two castable cantrips and a black source.</li>
             </ul>
           </li>
         </ol>
-        <span class="note">So MULL = no colored land, 4+ lands (flood), or no plan above.
-        "Castable cantrip" = blue mana available to cast it, or a free cantrip (Street Wraith).
-        Black source / Petal count; bare Dark Ritual does not (it needs a black seed).</span>`,
-      keep7: `<b>Keep 7</b> &mdash; never mulligans; always keeps the opening seven.
-        Raw deck speed, no mulligan dynamics.`,
-      aggressive: `<b>Aggressive</b> &mdash; mulligans any hand whose solver estimate
-        <code>P(cast by cut-off)</code> is below the bar: <b>0.55</b> at 7 cards, <b>0.38</b> at 6,
-        <b>0.20</b> at 5 (always keep at 4).`,
+        <p>Otherwise, mulligan. So the hands it ships are those with no colored land, four or more
+        lands, or no plan above.</p>
+        <p class="note">A cantrip is <i>castable</i> when you can make blue to cast it, or when it
+        draws for free (Street Wraith). A black source is a black land or a Lotus Petal; a Dark
+        Ritual on its own does not count, because it needs black mana to cast.</p>`,
+      keep7: `<p>Never mulligans &mdash; it always keeps the opening seven. This shows the deck's
+        raw speed, with no mulligan decisions mixed in.</p>`,
+      aggressive: `<p>Mulligans whenever the solver's estimate of <code>P(cast by the cut-off)</code>
+        falls below a threshold: 0.55 on seven cards, 0.38 on six, and 0.20 on five. It always keeps
+        at four cards.</p>`,
     };
 
     // Default deck: the sample Doomsday list (so the page works out of the box).
