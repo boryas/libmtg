@@ -144,7 +144,7 @@
       </select>
       <div id="mull-desc" class="mode-desc"></div>
       <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
-      <input type="number" id="cutoff" value="4" min="1" max="10">
+      <input type="number" id="cutoff" value="3" min="1" max="10">
       <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
       <input type="number" id="games" value="1000" min="1" max="50000">
       <br>
@@ -408,7 +408,7 @@
       const deck = $('deck').value;
       const games = $('games').valueAsNumber || 2000;
       const mull = $('mull').value;
-      const cutoff = $('cutoff').valueAsNumber || 4;
+      const cutoff = $('cutoff').valueAsNumber || 3;
       // The objective is P(cast by the cut-off), so there's no reason to simulate
       // past it: the turn cap is just the cut-off.
       const turns = cutoff;
