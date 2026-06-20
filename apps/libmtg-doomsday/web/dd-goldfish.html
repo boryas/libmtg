@@ -28,6 +28,9 @@
     .muted { color: #888; font-size: 0.85rem; }
     .mode-desc { font-size: 0.78rem; color: #9aa; line-height: 1.45; margin-top: 0.35rem;
       padding: 0.45rem 0.6rem; background: #111a2e; border: 1px solid #0f3460; border-radius: 4px; }
+    .mode-desc > summary { cursor: pointer; color: #9fd0ee; font-size: 0.78rem;
+      list-style-position: inside; }
+    .mode-desc[open] > summary { margin-bottom: 0.4rem; }
     .mode-desc b { color: #c8c8d4; }
     .mode-desc code { background: #0c1322; padding: 0 3px; border-radius: 3px; color: #9fd0ee; }
     .mode-desc ol, .mode-desc ul { margin: 0.3rem 0 0.3rem 1.15rem; }
@@ -142,7 +145,10 @@
         <option value="keep7">Keep 7 &mdash; never mulligan</option>
         <option value="aggressive">Aggressive &mdash; race bar</option>
       </select>
-      <div id="mull-desc" class="mode-desc"></div>
+      <details id="mull-help" class="mode-desc" open>
+        <summary>how this mode keeps</summary>
+        <div id="mull-desc"></div>
+      </details>
       <label for="cutoff">Cut-off turn <span class="muted">(combo-by target)</span></label>
       <input type="number" id="cutoff" value="3" min="1" max="10">
       <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
