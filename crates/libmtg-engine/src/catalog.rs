@@ -897,6 +897,27 @@ fn body_cards_seen(action: &crate::ir::action::Action) -> u32 {
     }
 }
 
+/// Cards a resolve-body actually DRAWS — the sum of `Draw` counts only (Brainstorm 3,
+/// Ponder 1, Consider 1). Unlike `body_cards_seen` it ignores scry/surveil/look/order,
+/// because some effects key off cards *drawn* (e.g. Tamiyo's transform). Branches take
+/// the max; non-literal counts contribute 0.
+fn body_cards_drawn(action: &crate::ir::action::Action) -> u32 {
+    use crate::ir::action::Action;
+    use crate::ir::expr::Expr;
+    let n = |e: &Expr| if let Expr::Num(v) = e { (*v).max(0) as u32 } else { 0 };
+    match action {
+        Action::Draw { n: c, .. } => n(c),
+        Action::Sequence(actions) => actions.iter().map(body_cards_drawn).sum(),
+        Action::IfThen { then, else_, .. } => {
+            body_cards_drawn(then).max(else_.as_ref().map_or(0, |e| body_cards_drawn(e)))
+        }
+        Action::MayDo { action, .. } => body_cards_drawn(action),
+        Action::ForEach { body, .. } => body_cards_drawn(body),
+        Action::Choose { options, .. } => options.iter().map(|o| body_cards_drawn(&o.action)).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// True if a resolve-body can shuffle the library (Ponder's `MayDo(Shuffle)`).
 fn body_shuffles(action: &crate::ir::action::Action) -> bool {
     use crate::ir::action::Action;
@@ -1170,6 +1191,19 @@ impl CardDef {
         self.abilities.iter().find_map(|a| match &a.kind {
             AbilityKind::OnResolve { modes } => {
                 Some(modes.iter().map(|m| body_cards_seen(&m.body)).max().unwrap_or(0))
+            }
+            _ => None,
+        }).unwrap_or(0)
+    }
+
+    /// How many cards this card DRAWS on resolve (Brainstorm 3, Ponder/Consider 1) —
+    /// distinct from `cards_seen_on_resolve`, which also counts scry/surveil/look. Used
+    /// for triggers that key off cards drawn, e.g. Tamiyo, Inquisitive Student's flip.
+    pub fn cards_drawn_on_resolve(&self) -> u32 {
+        use crate::ir::ability::AbilityKind;
+        self.abilities.iter().find_map(|a| match &a.kind {
+            AbilityKind::OnResolve { modes } => {
+                Some(modes.iter().map(|m| body_cards_drawn(&m.body)).max().unwrap_or(0))
             }
             _ => None,
         }).unwrap_or(0)

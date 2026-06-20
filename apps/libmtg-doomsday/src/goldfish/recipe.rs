@@ -1451,10 +1451,111 @@ pub fn min_ttd(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
     deterministic_cast_turn_with_known(state, who, &seq, false, max_turn)
 }
 
+const TAMIYO: &str = "Tamiyo, Inquisitive Student";
+
+/// Earliest turn (1-based, on the play) by which the hand can DETERMINISTICALLY flip
+/// Tamiyo, Inquisitive Student — a separate "plan" the mulligan can recognize even though
+/// the pilot never plays it out. The flip triggers on drawing your **3rd card in a turn**
+/// while she's in play (`catalog::tamiyo_check`). Only the draw COUNT matters, not card
+/// identity, so the natural draw step and free cyclers (Street Wraith) count toward it and
+/// no random draw is relied upon. `None` if Tamiyo isn't in hand or no flip lands by
+/// `max_turn`.
+///
+/// Mana model (on the play, one land drop per turn, blue lands played first): a blue land
+/// gives renewable {U} every turn it is online — untapped lands the same turn, taplands the
+/// next; a fetch is treated as an untapped blue source; Lotus Petal is a one-shot {U}.
+/// Each cast-to-draw cantrip costs one blue pip (Brainstorm draws 3, Ponder/Consider 1);
+/// free cyclers cost no mana.
+///
+/// METHOD NOTE: unlike [`deterministic_cast_turn`], this is NOT a principled backward
+/// plan-builder over the resource model — it forward-counts draws against a hard-coded
+/// blue-mana/turn model (the assumptions above). That shortcut is acceptable because the
+/// pilot never *executes* the Tamiyo plan (it always races Doomsday); the mulligan only
+/// needs to know the plan exists and roughly how fast, not produce a playable line. If we
+/// ever wanted to play Tamiyo out, this would have to be rebuilt the DD way. Known
+/// imprecisions: a fetch is assumed to reach a blue source, and Lion's Eye Diamond's
+/// hand-discard cost is ignored (it reads as a one-shot {U}).
+pub fn tamiyo_flip_turn(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
+    if !state.hand_of(who).any(|c| c.catalog_key == TAMIYO) {
+        return None;
+    }
+    let (mut fast_blue, mut tap_blue, mut petals, mut free_draws) = (0u32, 0u32, 0u32, 0u32);
+    let mut cantrip_draws: Vec<u32> = Vec::new();
+    for card in state.hand_of(who) {
+        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+        if def.is_land() {
+            if is_fetch(def) {
+                fast_blue += 1; // a fetch finds an untapped blue dual (assumed available)
+            } else if renewable_produces_color(def, Color::Blue) {
+                if def.enters_tapped() { tap_blue += 1; } else { fast_blue += 1; }
+            }
+        } else if oneshot_produces_color(def, Color::Blue) {
+            petals += 1; // Lotus Petal: one-shot {U}
+        } else if def.cards_drawn_on_resolve() > 0 {
+            cantrip_draws.push(def.cards_drawn_on_resolve()); // a {U} cast-to-draw cantrip
+        }
+        if def.has_cycling_draw() { free_draws += 1; } // Street Wraith: a free draw
+    }
+    cantrip_draws.sort_unstable_by(|a, b| b.cmp(a)); // biggest draw (Brainstorm) first
+
+    // Renewable blue from lands available on turn t (untapped count from t, taplands from t-1).
+    let land_blue = |t: u32| fast_blue.min(t) + tap_blue.min(t.saturating_sub(1));
+    // Earliest turn we can pay {U} for Tamiyo — off a land if one is online, else a petal.
+    let deploy = (1..=max_turn).find(|&t| land_blue(t) >= 1 || petals >= 1)?;
+    let deploy_off_land = land_blue(deploy) >= 1;
+    // A petal is permanently spent on deploy when no land is available to cast her.
+    let petal_pool = petals.saturating_sub(if deploy_off_land { 0 } else { 1 });
+
+    for f in deploy..=max_turn {
+        let natural = if f >= 2 { 1 } else { 0 }; // on the play: no turn-1 draw step
+        // Tamiyo's land pip is consumed only on the turn she is deployed; afterward the
+        // land untaps free for cantrips.
+        let land_pip = if f == deploy && deploy_off_land { 1 } else { 0 };
+        let blue = land_blue(f).saturating_sub(land_pip) + petal_pool;
+        let paid: u32 = cantrip_draws.iter().take(blue as usize).sum();
+        if natural + paid + free_draws >= 3 {
+            return Some(f);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use libmtg_engine::{build_catalog, PlayerState, Zone};
+
+    /// Build an opening-hand state (hand in hand, the rest of the sample deck in library)
+    /// and return the earliest deterministic Tamiyo-flip turn.
+    fn flip_turn(hand: &[&str]) -> Option<u32> {
+        let names: Vec<String> = crate::sample_doomsday_deck().iter()
+            .flat_map(|(n, q, _)| std::iter::repeat(n.clone()).take((*q).max(0) as usize))
+            .collect();
+        let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s.catalog = build_catalog();
+        let mut rest = names.clone();
+        for &h in hand { if let Some(p) = rest.iter().position(|n| n == h) { rest.remove(p); } }
+        for &h in hand { s.place_card(PlayerId::Us, h, Zone::Hand { known: false }); }
+        for n in &rest { s.place_card(PlayerId::Us, n, Zone::Library); }
+        tamiyo_flip_turn(&s, PlayerId::Us, 4)
+    }
+
+    #[test]
+    fn tamiyo_flip_turn_recognizes_fast_lines() {
+        let t = "Tamiyo, Inquisitive Student";
+        // No Tamiyo in hand → no flip plan.
+        assert_eq!(flip_turn(&["Island", "Brainstorm", "Ponder", "Swamp", "Doomsday", "Daze", "Consider"]), None);
+        // Tamiyo + one blue land + Brainstorm → T2: draw step (1) + Brainstorm (3) = 4.
+        assert_eq!(flip_turn(&[t, "Island", "Brainstorm", "Swamp", "Daze", "Force of Will", "Thoughtseize"]), Some(2));
+        // Tamiyo + one blue land + a single 1-draw cantrip → no fast flip (reaches only 2).
+        assert_eq!(flip_turn(&[t, "Island", "Ponder", "Swamp", "Daze", "Force of Will", "Thoughtseize"]), None);
+        // Tamiyo + blue land + Ponder + Street Wraith → T2: step (1) + Ponder (1) + free (1) = 3.
+        assert_eq!(flip_turn(&[t, "Island", "Ponder", "Street Wraith", "Daze", "Force of Will", "Thoughtseize"]), Some(2));
+        // Tamiyo + blue land + Lotus Petal + Brainstorm → T1: Tamiyo off land, Brainstorm off petal, draws 3.
+        assert_eq!(flip_turn(&[t, "Island", "Lotus Petal", "Brainstorm", "Daze", "Force of Will", "Thoughtseize"]), Some(1));
+        // Tamiyo + two blue lands + two 1-draw cantrips → T2: step (1) + 1 + 1 = 3.
+        assert_eq!(flip_turn(&[t, "Island", "Underground Sea", "Ponder", "Consider", "Force of Will", "Daze"]), Some(2));
+    }
 
     /// PROBE (cantrip-aware `g` sanity): a hand with HALF the combo + cantrips to find
     /// the rest must score high; cantrips ALONE (no combo half) must score low — the
