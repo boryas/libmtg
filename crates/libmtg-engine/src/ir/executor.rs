@@ -1869,6 +1869,10 @@ pub(crate) fn match_event_pattern(
             Some(e)
         }
 
+        EventPattern::Or(ps) => ps
+            .iter()
+            .find_map(|p| match_event_pattern(p, event, env, state)),
+
         // Stage-3+ patterns — not wired yet.
         EventPattern::DamageDealt { .. }
         | EventPattern::Blocks { .. }
@@ -2047,7 +2051,7 @@ fn enumerate_kind_all_players(state: &SimState, kind: ZoneKindSel) -> Vec<ObjId>
     out
 }
 
-fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
+pub(crate) fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
     match (kind, o.zone()) {
         (ZoneKindSel::Stack, Some(Zone::Stack)) => true,
         (ZoneKindSel::Hand, Some(Zone::Hand { .. })) => true,

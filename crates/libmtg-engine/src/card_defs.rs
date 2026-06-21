@@ -1219,7 +1219,11 @@ fn engineered_explosives() -> CardDef {
 }
 
 fn grafdiggers_cage() -> CardDef {
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, ActionKind, EventPattern};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+
+    let mut card = CardDef::new(
         "Grafdigger's Cage",
         CardKind::Artifact(ArtifactData {
             mana_cost: "1".to_string(),
@@ -1228,41 +1232,68 @@ fn grafdiggers_cage() -> CardDef {
         vec![],
         Some(40),
         vec![], CardLayout::Normal, None,
-        vec![],  // no trigger_defs
-        vec![],  // no replacements (prohibition handles ETB blocking)
-        // (a): prohibition blocks ZoneChange from GY/library to BF for creature cards
-        vec![ProhibitionDef {
-            check: Arc::new(|event, _source_id, _controller, state| {
-                if let GameEvent::ZoneChange {
-                    id, from: ZoneId::Graveyard | ZoneId::Library, to: ZoneId::Battlefield, ..
-                } = event {
-                    let key = state.objects.get(id).map(|o| o.catalog_key.as_str()).unwrap_or("");
-                    state.catalog.get(key).map_or(false, |d| d.is_creature())
-                } else {
-                    false
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
-        // (b): static CE: "Players can't cast spells from graveyards or libraries."
-        // Sets castable = false on all cards in graveyard/library zones.
-        vec![Arc::new(move |source_id, controller| ContinuousInstance {
-            source_id,
-            controller,
-            layer: ContinuousLayer::L3TextEffects,
-            reads: vec![],
-            writes: vec![],
-            timestamp: 0,
-            filter: Arc::new(move |id, _ctr, state| {
-                state.objects.get(&id).map_or(false, |o| {
-                    o.in_zone(Zone::Graveyard) || o.in_zone(Zone::Library)
-                })
-            }),
-            modifier: Arc::new(|def, _state| { def.castable = false; }),
-            expiry: Expiry::WhileSourceOnBattlefield,
+        vec![], // no trigger_defs
+        vec![], // no replacements
+        vec![], // "creatures can't ETB from GY/library" is now an IR Prohibition (below)
+        vec![], // "can't cast from GY/library" is now an IR Restriction (below)
+    );
 
-        })],
-    )
+    // (a) "Creatures can't enter the battlefield from graveyards or libraries."
+    // An IR Prohibition consulted in the event pipeline (fire_event Stage 1): it
+    // matches a ZoneChange to the battlefield whose source zone is GY *or* library,
+    // for a creature card, and suppresses it (CR 614.17 "can't"). `active_zone`
+    // Battlefield gates it to while the Cage is in play; the `Or` keeps the two
+    // source zones as one CR ability.
+    let creature_obj = || Filter(Expr::Contains(
+        Box::new(Expr::TypeLit(CardType::Creature)),
+        Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+    ));
+    let cant_etb = Ability {
+        kind: AbilityKind::Prohibition {
+            matches: EventPattern::Or(vec![
+                EventPattern::ZoneChange {
+                    obj_filter: creature_obj(),
+                    from: ZoneKindSel::Graveyard,
+                    to: ZoneKindSel::Battlefield,
+                    actor_filter: None,
+                },
+                EventPattern::ZoneChange {
+                    obj_filter: creature_obj(),
+                    from: ZoneKindSel::Library,
+                    to: ZoneKindSel::Battlefield,
+                    actor_filter: None,
+                },
+            ]),
+            active_zone: Some(ZoneKindSel::Battlefield),
+        },
+        text: Some("Creatures can't enter the battlefield from graveyards or libraries."),
+    };
+
+    // (b) "Players can't cast spells from graveyards or libraries."
+    // An action-Restriction consulted at legal-cast enumeration (AND-NOT over
+    // castable → "can't beats can", CR 101.2). Zone-scoped subject: any card whose
+    // current zone is GY or library — so a Dauthi exile-cast (exile ≠ GY/library)
+    // falls out naturally, while flashback (GY) is correctly forbidden.
+    let zone_of_it = || Expr::ZoneOf(Box::new(Expr::Ctx(Ctx::It)));
+    let cant_cast = Ability {
+        kind: AbilityKind::Restriction {
+            action: ActionKind::Cast,
+            subject: Filter(Expr::Or(
+                Box::new(Expr::Eq(
+                    Box::new(zone_of_it()),
+                    Box::new(Expr::ZoneLit(ZoneId::Graveyard)),
+                )),
+                Box::new(Expr::Eq(
+                    Box::new(zone_of_it()),
+                    Box::new(Expr::ZoneLit(ZoneId::Library)),
+                )),
+            )),
+        },
+        text: Some("Players can't cast spells from graveyards or libraries."),
+    };
+
+    card.abilities = vec![cant_etb, cant_cast];
+    card
 }
 
 // ── Instants ──────────────────────────────────────────────────────────────────
@@ -4947,6 +4978,9 @@ fn cant_be_countered_self() -> crate::ir::ability::Ability {
                     Box::new(Expr::Ctx(Ctx::Source)),
                 )),
             },
+            // No zone gate: `It == Source` already pins this to the one spell on the
+            // stack being countered (`counter_one` only fires on stack items).
+            active_zone: None,
         },
         text: Some("This spell can't be countered."),
     }

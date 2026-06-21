@@ -41,8 +41,19 @@ pub enum AbilityKind {
         body: ReplacementBody,
     },
     /// "[x] can't [y]." Prevents matching events from occurring at all.
+    /// Consulted in `fire_event` Stage 1; a match suppresses the event (CR 614.17
+    /// "can't" beats replacements / 101.2 "can't beats can").
+    ///
+    /// `active_zone` gates the *source* by zone, for prohibitions whose relevance
+    /// depends on where their source sits: `Some(Battlefield)` for a static permanent
+    /// prohibition (Grafdigger's Cage stops functioning once it leaves play). `None`
+    /// when the pattern is self-gating — a self-scoping `It == Source` (Emrakul's "this
+    /// spell can't be countered") already pins relevance to the one spell on the stack
+    /// being countered, so no zone check is needed (and a Stack check would be wrong
+    /// for callers that fake a stack spell without a `StackSpell` role).
     Prohibition {
         matches: EventPattern,
+        active_zone: Option<crate::ir::expr::ZoneKindSel>,
     },
     /// Action-restriction (CR's "restriction" — 508.1d/509.1c pair restrictions with
     /// requirements; CR 601/602.5): the controller of a `subject` object can't take
@@ -213,6 +224,13 @@ pub enum EventPattern {
 
     /// Conjunction — all of these patterns must match simultaneously.
     And(Vec<EventPattern>),
+
+    /// Disjunction — matches if any sub-pattern matches; the first match's
+    /// bindings are returned. Used where one rules ability ranges over
+    /// alternative events, e.g. Grafdigger's "from graveyards *or* libraries"
+    /// (one `ZoneChange` per source zone) — keeps it a single CR ability rather
+    /// than splitting into two.
+    Or(Vec<EventPattern>),
 }
 
 /// How a replacement effect changes the event.

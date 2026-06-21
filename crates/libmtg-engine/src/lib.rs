@@ -2452,13 +2452,18 @@ pub(crate) fn fire_event(
             card_def.prohibition_defs.iter().any(|pdef| {
                 (pdef.active_when)(*id, state) && (pdef.check)(&event, *id, obj.controller, state)
             })
-            // IR prohibitions: `AbilityKind::Prohibition { matches }` — the event
-            // pipeline's single "can't" mechanism (CR 101.2). The pattern matches the
-            // proposed event; a match suppresses it. Self-scoping (e.g. `It == Source`)
-            // gates relevance; an explicit armed-zone gate is added when a static
-            // battlefield prohibition (Null Rod) needs it.
+            // IR prohibitions: `AbilityKind::Prohibition { matches, active_zone }` —
+            // the event pipeline's single "can't" mechanism (CR 101.2). The pattern
+            // matches the proposed event; a match suppresses it. `active_zone`, when
+            // `Some`, gates the source by zone (Battlefield for static permanents like
+            // Grafdigger's), so the prohibition stops functioning once its source
+            // leaves that zone; `None` leaves a self-scoping pattern (`It == Source`)
+            // to narrow relevance on its own.
             || card_def.abilities.iter().any(|ab| {
-                if let crate::ir::ability::AbilityKind::Prohibition { matches } = &ab.kind {
+                if let crate::ir::ability::AbilityKind::Prohibition { matches, active_zone } = &ab.kind {
+                    if let Some(z) = active_zone {
+                        if !crate::ir::executor::obj_in_kind(obj, z.clone()) { return false; }
+                    }
                     let env = crate::ir::executor::BindEnv::new()
                         .with_source(*id)
                         .with_controller(obj.controller);

@@ -4770,25 +4770,61 @@
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        // Enter Grafdigger's Cage via change_zone (fires ETB → static CE installed).
-        let cage_id = state.alloc_id();
-        let cage_def = catalog_card("Grafdigger's Cage");
-        state.objects.insert(cage_id, GameObject {
-            id: cage_id,
-            catalog_key: "Grafdigger's Cage".to_string(),
-            owner: PlayerId::Opp,
-            controller: PlayerId::Opp,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::Hand { known: false },
-        });
+        // Grafdigger's Cage on the battlefield (controlled by Opp).
+        enter_cage(&mut state, PlayerId::Opp);
 
-        state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
-        change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
+        // Helper: drop a Dark Ritual into `role` and return its id.
+        let mut put = |state: &mut SimState, role: ObjectRole| -> ObjId {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Dark Ritual".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                is_token: false,
+                materialized: None,
+                counters: HashMap::new(),
+                ci_timestamp: 0,
+                role,
+            });
+            id
+        };
+        let gy_id = put(&mut state, ObjectRole::Graveyard);
+        let lib_id = put(&mut state, ObjectRole::Library);
+        let exile_id = put(&mut state, ObjectRole::Exile { on_adventure: false });
+        recompute(&mut state);
 
-        // Place a card in graveyard.
+        // "Players can't cast spells from graveyards or libraries." — an action-
+        // Restriction (CR 101.2 "can't beats can"), consulted at legal-cast
+        // enumeration, *not* the castable flag (GY/library cards already default to
+        // castable=false by zone, so that flag can't distinguish Cage's effect).
+        assert!(
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
+            "Cage should restrict casting from the graveyard"
+        );
+        assert!(
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, lib_id),
+            "Cage should restrict casting from the library"
+        );
+        // Exile ≠ GY/library: the zone-scoped subject simply doesn't match, so a
+        // Dauthi-style exile cast is *not* forbidden by Cage.
+        assert!(
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, exile_id),
+            "Cage must not restrict casting from exile"
+        );
+    }
+
+    #[test]
+    fn test_grafdiggers_cage_restriction_removed_on_ltb() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let cage_id = enter_cage(&mut state, PlayerId::Us);
+
+        // A card in the graveyard.
         let gy_id = state.alloc_id();
         state.objects.insert(gy_id, GameObject {
             id: gy_id,
@@ -4801,71 +4837,24 @@
             ci_timestamp: 0,
             role: ObjectRole::Graveyard,
         });
-
         recompute(&mut state);
 
-        // Cage's static CE should set castable=false on graveyard cards.
+        // While Cage is on the battlefield, the cast-Restriction is active.
         assert!(
-            !state.def_of(gy_id).map_or(true, |d| d.castable),
-            "Cage should prevent casting from graveyard (castable=false)"
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
+            "GY card should be cast-restricted while Cage is on the battlefield"
         );
 
-        // A card in exile should NOT be blocked by Cage (Cage only blocks GY/library).
-        let exile_id = state.alloc_id();
-        state.objects.insert(exile_id, GameObject {
-            id: exile_id,
-            catalog_key: "Dark Ritual".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::Exile { on_adventure: false },
-        });
-        recompute(&mut state);
-
-        // Exile cards default to castable=false (zone default), but Cage should NOT
-        // be the reason — if a Dauthi CE set castable=true, Cage wouldn't override it.
-        // Here we just verify Cage doesn't affect exile zone beyond the zone default.
-        assert!(
-            !state.def_of(exile_id).map_or(true, |d| d.castable),
-            "Exile card defaults to not castable (zone default, not Cage)"
-        );
-    }
-
-    #[test]
-    fn test_grafdiggers_cage_ci_removed_on_ltb() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-
-        // Enter Cage then remove it.
-        let cage_id = state.alloc_id();
-        let cage_def = catalog_card("Grafdigger's Cage");
-        state.objects.insert(cage_id, GameObject {
-            id: cage_id,
-            catalog_key: "Grafdigger's Cage".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::Hand { known: false },
-        });
-
-        state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
-        change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
-        recompute(&mut state);
-
-        // Destroy Cage.
+        // Cage leaves the battlefield → `action_restricted` walks BF sources only,
+        // so the restriction lifts (no lingering continuous effect to clean up).
         change_zone(cage_id, ZoneId::Graveyard, &mut state, 2, PlayerId::Us);
-
-        // No CI with source == cage_id should remain.
-        let ci_count = state.continuous_instances.iter()
-            .filter(|ci| ci.source_id == cage_id)
-            .count();
-        assert_eq!(ci_count, 0, "Cage CI should be removed when Cage leaves the battlefield");
+        recompute(&mut state);
+        assert!(
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
+            "Cast-Restriction should lift once Cage leaves the battlefield"
+        );
     }
 
     /// Helper: put Cage on the battlefield for `who` and return its id.
