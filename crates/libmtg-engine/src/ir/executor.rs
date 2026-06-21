@@ -760,11 +760,15 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
-        Action::CreateToken { who, spec, n } => {
+        Action::CreateToken { who, spec, n, bind_as } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(n, state, env)) as usize;
+            let mut last = None;
             for _ in 0..n {
-                crate::do_create_token(spec.name, who, state, t);
+                last = Some(crate::do_create_token(spec.name, who, state, t));
+            }
+            if let (Some(name), Some(id)) = (bind_as, last) {
+                env.bindings.insert(name, Value::Obj(id));
             }
             ExecResult::Ok
         }

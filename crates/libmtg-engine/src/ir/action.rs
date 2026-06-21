@@ -343,6 +343,10 @@ pub enum Action {
         who: Who,
         spec: TokenSpec,
         n: Expr,
+        /// Bind the (last) created token's id to this name, so a following action
+        /// can reference it — e.g. living weapon: `CreateToken{bind_as:"tok"}` then
+        /// `Attach{ what: Source, to: Var("tok") }`.
+        bind_as: Option<&'static str>,
     },
 
     // ── mana production ──────────────────────────────────────────────────

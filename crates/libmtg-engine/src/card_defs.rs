@@ -3215,6 +3215,7 @@ fn orcish_bowmasters() -> CardDef {
                     keywords: vec![],
                 },
                 n: Expr::Num(1),
+                bind_as: None,
             }),
             else_: None,
         },
@@ -4449,8 +4450,11 @@ fn cori_steel_cutter() -> CardDef {
 /// "{3}: Return this Equipment to its owner's hand."
 /// "Equip {5}"
 fn batterskull() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, TokenSpec, Who as IrWho};
     use crate::ir::ce::CEMod;
-    use crate::ir::expr::Expr;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut card = CardDef::new(
         "Batterskull",
         CardKind::Artifact(ArtifactData {
@@ -4491,37 +4495,59 @@ fn batterskull() -> CardDef {
         }),
         vec![], None,
         vec![], CardLayout::Normal, None,
-        // Living weapon ETB: create a Phyrexian Germ token, then attach this to it.
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, _state, pending| {
-                if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-                    if *id == source_id && *ctlr == controller {
-                        pending.push(TriggerContext {
-                            source_name: "Batterskull (living weapon)".into(),
-                            controller,
-                            target_spec: TargetSpec::None,
-                            effect: Effect(Arc::new(move |state, t, _targets| {
-                                let token_id = do_create_token("Phyrexian Germ", controller, state, t);
-                                do_attach(state, controller, source_id, token_id);
-                            })),
-                        });
-                    }
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
+        vec![], // living-weapon ETB is now an IR Triggered ability (below)
         vec![], vec![],
         vec![], // static CE now IR (card.abilities below)
     );
+    // Living weapon: "When this Equipment enters, create a 0/0 black Phyrexian Germ
+    // creature token, then attach this to it." CreateToken binds the new token so the
+    // following Attach can reference it.
+    let living_weapon = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone {
+                    obj_filter: ir_self(),
+                    zone_kind: ZoneKindSel::Battlefield,
+                },
+                condition: None,
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sequence(vec![
+                Action::CreateToken {
+                    who: IrWho::You,
+                    spec: TokenSpec {
+                        name: "Phyrexian Germ",
+                        types: vec![CardType::Creature],
+                        subtypes: vec!["Phyrexian", "Germ"],
+                        colors: vec![Color::Black],
+                        power: Some(0),
+                        toughness: Some(0),
+                        keywords: vec![],
+                    },
+                    n: Expr::Num(1),
+                    bind_as: Some("germ"),
+                },
+                Action::Attach {
+                    what: Expr::Ctx(Ctx::Source),
+                    to: Expr::Ctx(Ctx::Var("germ")),
+                },
+            ]),
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Living weapon (When this Equipment enters, create a 0/0 black Phyrexian Germ creature token, then attach this to it.)"),
+    };
     // Equipped creature gets +4/+4 and has vigilance and lifelink.
-    card.abilities = vec![equipped_creature_ce(
-        vec![
-            CEMod::PumpPT(Expr::Num(4), Expr::Num(4)),
-            CEMod::AddKeyword(Keyword::Vigilance),
-            CEMod::AddKeyword(Keyword::Lifelink),
-        ],
-        "Equipped creature gets +4/+4 and has vigilance and lifelink.",
-    )];
+    card.abilities = vec![
+        living_weapon,
+        equipped_creature_ce(
+            vec![
+                CEMod::PumpPT(Expr::Num(4), Expr::Num(4)),
+                CEMod::AddKeyword(Keyword::Vigilance),
+                CEMod::AddKeyword(Keyword::Lifelink),
+            ],
+            "Equipped creature gets +4/+4 and has vigilance and lifelink.",
+        ),
+    ];
     card
 }
 
