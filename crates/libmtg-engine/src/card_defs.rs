@@ -1278,7 +1278,6 @@ fn grafdiggers_cage() -> CardDef {
     let cant_cast = Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Cast,
-            mana_exempt: false,
             subject: Filter(Expr::Or(
                 Box::new(Expr::Eq(
                     Box::new(zone_of_it()),
@@ -3476,7 +3475,6 @@ fn lavinia_azorius_renegade() -> CardDef {
     let cant_cast = Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Cast,
-            mana_exempt: false,
             subject: Filter(Expr::And(
                 Box::new(Expr::Not(Box::new(Expr::Eq(
                     Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
@@ -3923,10 +3921,10 @@ fn disruptor_flute() -> CardDef {
     // Both ongoing clauses scope to "a card whose name == the name this Flute
     // chose" — `Eq(Name(It), ChosenName(Source))`, evaluated per candidate with
     // the Flute bound as Source.
-    let names_match = || Filter(Expr::Eq(
+    let name_matches = || Expr::Eq(
         Box::new(Expr::Name(Box::new(Expr::Ctx(Ctx::It)))),
         Box::new(Expr::ChosenName(Box::new(Expr::Ctx(Ctx::Source)))),
-    ));
+    );
 
     card.abilities = vec![
         // "Spells with the chosen name cost {3} more to cast." A casting-cost
@@ -3934,19 +3932,23 @@ fn disruptor_flute() -> CardDef {
         Ability {
             kind: AbilityKind::Static {
                 mods: vec![CEMod::CastingCostPlus(Expr::Num(3))],
-                scope: Some(names_match()),
+                scope: Some(Filter(name_matches())),
                 condition: None,
             },
             text: Some("Spells with the chosen name cost {3} more to cast."),
         },
         // "Activated abilities of sources with the chosen name can't be activated
-        // unless they're mana abilities." An action-Restriction (mana_exempt) over
-        // the named card, consulted at activation-legality.
+        // unless they're mana abilities." An action-Restriction over the named card;
+        // the "unless they're mana abilities" rider (CR 605.1a) is a subject clause
+        // `Not(activating_mana_ability)` — the engine binds that bool while the mana
+        // sub-loop is consulting — not a flag on the variant.
         Ability {
             kind: AbilityKind::Restriction {
                 action: ActionKind::Activate,
-                mana_exempt: true,
-                subject: names_match(),
+                subject: Filter(Expr::And(
+                    Box::new(name_matches()),
+                    Box::new(Expr::Not(Box::new(Expr::Ctx(Ctx::Var("activating_mana_ability"))))),
+                )),
             },
             text: Some("Activated abilities of sources with the chosen name can't be activated unless they're mana abilities."),
         },
@@ -3982,7 +3984,6 @@ fn karn_the_great_creator() -> CardDef {
     card.abilities = vec![Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Activate,
-            mana_exempt: false,
             subject: Filter(Expr::And(
                 Box::new(Expr::Contains(
                     Box::new(Expr::TypeLit(CardType::Artifact)),
@@ -5495,8 +5496,9 @@ fn prismatic_ending() -> CardDef {
 // ── Null Rod ─────────────────────────────────────────────────────────────────
 
 /// Null Rod — {2} Artifact. "Activated abilities of artifacts can't be activated."
-/// An action-Restriction (Activate, mana_exempt=false) over artifacts — symmetric,
-/// and it covers mana abilities too (shuts off Moxen). CR 101.2 "can't beats can".
+/// An action-Restriction (Activate) over artifacts — symmetric, and its subject has
+/// no mana-ability exemption, so it covers mana abilities too (shuts off Moxen).
+/// CR 101.2 "can't beats can".
 fn null_rod() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, ActionKind};
     use crate::ir::context::Ctx;
@@ -5519,7 +5521,6 @@ fn null_rod() -> CardDef {
     card.abilities = vec![Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Activate,
-            mana_exempt: false,
             subject: Filter(Expr::Contains(
                 Box::new(Expr::TypeLit(CardType::Artifact)),
                 Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),

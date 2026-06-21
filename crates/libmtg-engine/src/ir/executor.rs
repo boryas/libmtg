@@ -1627,12 +1627,13 @@ pub(crate) fn matches(
 /// beats can" order-independent. The action analogue of the event `Prohibition` walk
 /// in `fire_event` Stage 1.
 ///
-/// Use this for casts and **non-mana** activated abilities — every matching
-/// restriction applies. The mana sub-loop uses [`mana_ability_restricted`], which
-/// honors the CR "unless they're mana abilities" exemption (`mana_exempt`). Which
-/// of the two a caller uses follows from the ability's CR-605.1a classification
-/// (mana abilities live in `mana_abilities()`, non-mana in `abilities()`) — there
-/// is no mana-ness tag to pass.
+/// Use this for casts and **non-mana** activated abilities — the subject is
+/// evaluated with `activating_mana_ability = false`. The mana sub-loop uses
+/// [`mana_ability_restricted`] (binds `true`). Which of the two a caller uses
+/// follows from the ability's CR-605.1a classification (mana abilities live in
+/// `mana_abilities()`, non-mana in `abilities()`) — there is no mana-ness tag to
+/// pass, and a restriction's "unless they're mana abilities" rider is a clause in
+/// its own `subject`.
 pub(crate) fn action_restricted(
     state: &SimState,
     kind: crate::ir::ability::ActionKind,
@@ -1642,15 +1643,18 @@ pub(crate) fn action_restricted(
 }
 
 /// Is activating a **mana ability** (CR 605.1a) of `subject_id` forbidden? Like
-/// [`action_restricted`] for `Activate`, but skips `mana_exempt` restrictions
-/// (Pithing Needle / Disruptor Flute "… can't be activated unless they're mana
-/// abilities"). Null Rod / Karn are not `mana_exempt`, so they still bite here.
+/// [`action_restricted`] for `Activate`, but binds `activating_mana_ability = true`
+/// — so a restriction whose subject excludes mana abilities (Pithing Needle /
+/// Disruptor Flute "… unless they're mana abilities") won't match, while Null Rod /
+/// Karn (subjects with no such clause) still bite here.
 pub(crate) fn mana_ability_restricted(state: &SimState, subject_id: ObjId) -> bool {
     restriction_hits(state, crate::ir::ability::ActionKind::Activate, subject_id, true)
 }
 
-/// Shared walk for the two restriction queries. `for_mana_ability` skips
-/// `mana_exempt` restrictions (they don't forbid mana abilities).
+/// Shared walk for the two restriction queries. `for_mana_ability` is bound into
+/// the subject's eval env as `activating_mana_ability` (CR 605.1a), so a "… unless
+/// they're mana abilities" rider is expressed as a subject clause rather than a
+/// flag on the variant — see `AbilityKind::Restriction`.
 fn restriction_hits(
     state: &SimState,
     kind: crate::ir::ability::ActionKind,
@@ -1664,11 +1668,12 @@ fn restriction_hits(
         }
         state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
             card_def.abilities.iter().any(|ab| {
-                if let AbilityKind::Restriction { action, subject, mana_exempt } = &ab.kind {
-                    *action == kind
-                        && !(for_mana_ability && *mana_exempt)
-                        && {
-                        let env = BindEnv::new().with_source(*id).with_controller(obj.controller);
+                if let AbilityKind::Restriction { action, subject } = &ab.kind {
+                    *action == kind && {
+                        let env = BindEnv::new()
+                            .with_source(*id)
+                            .with_controller(obj.controller)
+                            .with_var("activating_mana_ability", Value::Bool(for_mana_ability));
                         matches(subject, subject_id, state, &env)
                     }
                 } else {

@@ -4476,7 +4476,8 @@
         // Flute names "Wasteland". Its non-mana ability is restricted, but — per
         // "unless they're mana abilities" — its mana ability is *not*. An unnamed
         // card (Underground Sea) is unaffected. Modeled as an action-Restriction
-        // with mana_exempt=true (not the materialized activatable flag).
+        // whose subject excludes mana abilities (a `Not(activating_mana_ability)`
+        // clause), not the materialized activatable flag.
         let mut state = make_state();
         state.catalog = test_catalog();
         etb_flute(&mut state, PlayerId::Us, "Wasteland");

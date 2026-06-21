@@ -63,17 +63,13 @@ pub enum AbilityKind {
     /// distinct from `Prohibition`, which suppresses a fired *event* in the pipeline.
     /// `subject` is evaluated with the candidate object as `Ctx::It` and the
     /// restriction's source/controller bound (so "opponent's" = `Controller(It) ≠
-    /// Ctx::Controller`).
+    /// Ctx::Controller`). For `Activate`, the bool var `activating_mana_ability` is
+    /// also bound (true while the mana sub-loop is the caller — CR 605.1a), so the
+    /// "… unless they're mana abilities" rider (Pithing Needle, Disruptor Flute) is
+    /// just a subject clause `Not(Ctx::Var("activating_mana_ability"))` — no flag.
     Restriction {
         action: ActionKind,
         subject: Filter,
-        /// CR "… unless they're mana abilities". Only meaningful for
-        /// `ActionKind::Activate`: when `true`, the restriction does not apply to
-        /// mana abilities (Pithing Needle, Disruptor Flute — name a card, shut off
-        /// its non-mana abilities); when `false`, it applies to every activated
-        /// ability including mana (Null Rod, Karn — shut off artifact mana too).
-        /// Ignored for `Cast`.
-        mana_exempt: bool,
     },
     /// Continuous effect: while source is active, apply these CE mods.
     Static {
