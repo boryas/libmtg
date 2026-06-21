@@ -238,6 +238,7 @@ fn all_cards() -> Vec<CardDef> {
         force_of_negation(),
         force_of_will(),
         dark_ritual(),
+        cabal_ritual(),
         fatal_push(),
         snuff_out(),
         swords_to_plowshares(),
@@ -1522,6 +1523,56 @@ fn dark_ritual() -> CardDef {
             }],
         },
         text: Some("Add {B}{B}{B}."),
+    }];
+    card
+}
+
+/// Add {B}{B}{B}. Threshold — Add {B}{B}{B}{B}{B} instead if seven or more cards are
+/// in your graveyard. Cost is {1}{B}, so below threshold it nets only +1 (vs Dark
+/// Ritual's +2). (Threshold is near-impossible comboing by T2–3 in the goldfish, but
+/// modeled for fidelity in grindier lines.)
+fn cabal_ritual() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, ManaSpec, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
+    let mut card = simple("Cabal Ritual", CardKind::Instant(SpellData {
+        mana_cost: "1B".to_string(),
+        modes: None,
+        ..Default::default()
+    }), parse_colors("B", false, false), None);
+
+    // Threshold: 7+ cards in your graveyard (count ALL graveyard objects).
+    let threshold = Expr::Ge(
+        Box::new(Expr::Count(Box::new(Expr::AllObjects {
+            zone: ZoneSel::Scoped {
+                zone_kind: ZoneKindSel::Graveyard,
+                owner: Box::new(Expr::Ctx(Ctx::Controller)),
+            },
+            bind: "cr_gy",
+            filter: Box::new(Expr::Bool(true)),
+        }))),
+        Box::new(Expr::Num(7)),
+    );
+    let add_black = |n: usize| Action::AddMana {
+        who: IrWho::You,
+        count: Expr::Num(n as i64),
+        spec: ManaSpec::Fixed(vec![Color::Black; n]),
+    };
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::IfThen {
+                    cond: threshold,
+                    then: Box::new(add_black(5)),
+                    else_: Some(Box::new(add_black(3))),
+                },
+            }],
+        },
+        text: Some(
+            "Add {B}{B}{B}. Threshold — Add {B}{B}{B}{B}{B} instead if seven or more cards are in your graveyard.",
+        ),
     }];
     card
 }
