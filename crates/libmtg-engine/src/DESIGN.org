@@ -799,6 +799,25 @@ with a ~choice_spec~), retiring its ~ability_factory~ closure *and* its haste CE
   nothing if the creature already left. Two activated-ability tests + the delayed-sac test pass
   unchanged. CE-closure count 3 → 2 (remaining: kaito, hexing_squelcher). 439 green.
 
+*** 2026-06-21 — IR Ward + IR CE-ability-granting; Hexing Squelcher fully on IR
+The one card that needed real new capability rather than a swap — Ward isn't an engine
+keyword, so two reusable subsystems were built first (committed standalone, then the card):
+- *IR Ward*: ~Expr::ChosenTargets(spell)~ (the spell's targets, so a trigger can ask
+  "targets me?" via ~Contains(Source, ChosenTargets(triggered_obj))~) + ~Action::Ward{cost}~
+  (bridges to ~ward_pay_or_counter~, reading triggered_obj/triggered_actor from the trigger
+  env) + ~ir_ward(cost)~ (a self-scoping Triggered ability — works printed *or* granted).
+- *IR CE-ability-granting*: ~CardDef.granted_abilities: Vec<Ability>~ (declarative analog of
+  ~granted_trigger_defs~), ~CEMod::GrantAbility~ wired into ~cemod_to_modifier~ (L6), and a
+  ~fire_triggers~ Part 5 over materialized defs. The per-ability firing was extracted into
+  ~fire_ir_triggered~, shared by Part 4 (printed) and Part 5 (granted).
+Hexing Squelcher then becomes four IR abilities, all closures retired: self-ward (~ir_ward~),
+"this spell can't be countered" (~cant_be_countered_self~), "spells you control can't be
+countered" (~Prohibition~ on ~SpellBeingCountered~, ~Controller(It)==Controller~, active_zone
+BF), and "other creatures you control have ward" (~Static{GrantAbility(ir_ward)}~). The two
+ward-grant tests now use a vanilla other-creature so the granted ward is unambiguous; the
+"enters later" test asserts ~granted_abilities~ (was ~granted_trigger_defs~). CE-closure count
+2 → 1 (remaining: kaito). 442 green.
+
 * Known seams
 
 *Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less

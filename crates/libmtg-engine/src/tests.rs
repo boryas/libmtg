@@ -5263,46 +5263,26 @@
         assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Graveyard));
     }
 
-    /// "Other creatures you control have Ward—Pay 2 life."
-    /// When an opponent's spell targets another creature Us controls, the granted Ward trigger fires.
+    /// "Other creatures you control have Ward—Pay 2 life." A vanilla creature (no
+    /// self-ward) receives the granted Ward, which fires when an opponent targets it.
+    /// (`opp_spell_targeting` / `ward_cost_pay2` live in §46b below.)
     #[test]
     fn test_hexing_squelcher_grants_ward_to_other_creature() {
         let mut state = make_state();
         state.catalog = test_catalog();
 
         enter_hexing_squelcher(&mut state, PlayerId::Us);
-        // A second creature for Us (the one that should receive the granted Ward).
-        let other_creature_id = enter_hexing_squelcher(&mut state, PlayerId::Us);
-
+        let other_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
         recompute(&mut state);
 
-        // Opponent's spell targeting our other creature.
-        let spell_id = state.alloc_id();
-        state.objects.insert(spell_id, GameObject {
-            id: spell_id,
-            catalog_key: "Brainstorm".to_string(),
-            owner: PlayerId::Opp,
-            controller: PlayerId::Opp,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState {
-                effect: None,
-                chosen_targets: vec![other_creature_id],
-                is_back_face: false,
-                costs_paid_ctx: CostsPaidCtx::default(),
-            }),
-        });
-
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, other_id);
         fire_event(
             GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
             &mut state, 1, PlayerId::Opp,
         );
-
         assert!(
-            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Hexing Squelcher (Ward grant)"),
-            "Ward trigger should fire for other creature targeted by opponent spell"
+            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Grizzly Bears"),
+            "granted Ward should fire for the other creature targeted by an opponent's spell"
         );
     }
 
@@ -5313,90 +5293,48 @@
         state.catalog = test_catalog();
 
         enter_hexing_squelcher(&mut state, PlayerId::Us);
-        let other_creature_id = enter_hexing_squelcher(&mut state, PlayerId::Us);
-
+        let other_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
         recompute(&mut state);
 
-        // Us's own spell targeting our creature — Ward should NOT fire.
-        let spell_id = state.alloc_id();
-        state.objects.insert(spell_id, GameObject {
-            id: spell_id,
-            catalog_key: "Brainstorm".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState {
-                effect: None,
-                chosen_targets: vec![other_creature_id],
-                is_back_face: false,
-                costs_paid_ctx: CostsPaidCtx::default(),
-            }),
-        });
-
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Us, other_id); // Us's own spell
         fire_event(
             GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
             &mut state, 1, PlayerId::Us,
         );
-
         assert!(
-            !state.pending_triggers.iter().any(|ctx| ctx.source_name == "Hexing Squelcher (Ward grant)"),
-            "Granted Ward should not fire for controller's own spells"
+            !state.pending_triggers.iter().any(|ctx| ctx.source_name == "Grizzly Bears"),
+            "granted Ward should not fire for the controller's own spell"
         );
     }
 
-    /// Granted Ward applies to creatures that enter the battlefield AFTER Hexing Squelcher.
-    /// recompute() runs after every fire_event ZoneChange, so new arrivals pick up the CE.
+    /// Granted Ward applies to creatures that enter AFTER Hexing Squelcher: recompute
+    /// (which fire_event runs each tick) lands the IR ability on `granted_abilities`.
     #[test]
     fn test_hexing_squelcher_ward_grant_applies_to_creature_that_enters_later() {
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        // Squelcher enters first.
         enter_hexing_squelcher(&mut state, PlayerId::Us);
         recompute(&mut state);
 
-        // A new creature arrives later (simulates a real ETB via fire_event; here we add
-        // directly then call recompute, which is what fire_event does at each top-level tick).
-        let late_creature_id = enter_hexing_squelcher(&mut state, PlayerId::Us);
+        // A new creature arrives later.
+        let late_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
         recompute(&mut state);
 
-        // Verify the late creature's materialized def has the granted trigger.
-        let mat = state.def_of(late_creature_id).expect("materialized def present");
+        let mat = state.def_of(late_id).expect("materialized def present");
         assert!(
-            !mat.granted_trigger_defs.is_empty(),
-            "late-arriving creature should have Ward trigger in granted_trigger_defs after recompute"
+            !mat.granted_abilities.is_empty(),
+            "late-arriving creature should carry the granted Ward in granted_abilities"
         );
 
-        // Opponent's spell targeting the late creature: Ward should fire.
-        let spell_id = state.alloc_id();
-        state.objects.insert(spell_id, GameObject {
-            id: spell_id,
-            catalog_key: "Brainstorm".to_string(),
-            owner: PlayerId::Opp,
-            controller: PlayerId::Opp,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState {
-                effect: None,
-                chosen_targets: vec![late_creature_id],
-                is_back_face: false,
-                costs_paid_ctx: CostsPaidCtx::default(),
-            }),
-        });
-
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, late_id);
         fire_event(
             GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
             &mut state, 1, PlayerId::Opp,
         );
-
         assert!(
-            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Hexing Squelcher (Ward grant)"),
-            "Ward trigger should fire for late-arriving creature targeted by opponent spell"
+            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Grizzly Bears"),
+            "granted Ward should fire for the late-arriving creature targeted by an opponent"
         );
     }
 

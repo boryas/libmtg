@@ -235,7 +235,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card             | Cost   | Notes                                                                          |
 |------------------+--------+--------------------------------------------------------------------------------|
-| Hexing Squelcher | 2 life | ~ward_pay_or_counter~; also grants Ward to other creatures via L6 CE           |
+| Hexing Squelcher | 2 life | IR ~ir_ward~ (self) + ~Static{GrantAbility(ir_ward)}~ (other creatures); ~Action::Ward~ → ~ward_pay_or_counter~ |
 
 * Replacement Effects (CR 614.1)
 
@@ -254,7 +254,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 |------------------+-------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------|
 | Emrakul          | Self only                                             | ~ProhibitionDef~ on ~SpellBeingCountered~                                                                                          |
 | Long Goodbye     | Self only                                             | Same                                                                                                                               |
-| Hexing Squelcher | Self (stack) + all controller's spells (BF)           | Two ~ProhibitionDef~ entries                                                                                                       |
+| Hexing Squelcher | Self (stack) + all controller's spells (BF)           | ~cant_be_countered_self~ + IR ~Prohibition~ on ~SpellBeingCountered~ (Controller(It)==Controller, active_zone BF)                   |
 | Mistrise Village | Next spell this turn                                  | IR ~Action::GrantCEToNextSpellCast~ + ~CEMod::Uncounterable~ → ~LatentSpellMod~ → CI pushes ~ProhibitionDef~ onto the spell        |
 
 ** "Can't enter the battlefield"
@@ -302,7 +302,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Karn, the Great Creator    | Suppress all abilities on opponent artifacts                                                                           |
 | Null Rod                   | Suppress all activated abilities on all artifacts (both players)                                                       |
 | Lavinia                    | ~castable = false~ on opponent noncreature spells                                                                      |
-| Hexing Squelcher           | Grants Ward trigger to other creatures via ~granted_trigger_defs~                                                      |
+| Hexing Squelcher           | Grants Ward to other creatures via IR ~CEMod::GrantAbility~ → ~granted_abilities~                                      |
 | Sneak Attack               | Grants Haste to sneaked creature (IR ~ApplyCE{AddKeyword(Haste)}~, EndOfTurn)                                          |
 | Cori-Steel Cutter          | Grants Trample + Haste to equipped creature via ~bf.attached_to~ filter                                                |
 | Mistrise Village           | IR ~Action::GrantCEToNextSpellCast~ with ~CEMod::Uncounterable~ — latent mod applies CE to the next spell cast that turn |
@@ -413,7 +413,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Delve          | Murktide Regent                       | ~data.delve = true~                                                        |
 | Storm          | Flusterstorm                          | Self-cast trigger creates ~StackAbility~ copies                             |
 | Replicate      | Consign to Memory                     | ~Action::Replicate(ManaCost)~ (in ~CostBody::Ir~ additional cost)          |
-| Ward           | Hexing Squelcher                      | ~ward_pay_or_counter~ helper                                               |
+| Ward           | Hexing Squelcher                      | IR ~ir_ward~ (Triggered + ~Action::Ward~ → ~ward_pay_or_counter~)          |
 | Protection     | Emrakul                               | ~protection_from: vec![obj_pred_colored_spell()]~                          |
 | Annihilator 6  | Emrakul                               | Stored as keyword; *not functionally modeled*                              |
 | Cycling        | Street Wraith, Edge of Autumn         | Street Wraith: hand ~AbilityDef~; Edge: *strategy-only*                    |
@@ -606,7 +606,7 @@ Artifact subtype ~"Equipment"~ is stored in ~ArtifactData.subtypes~ and matched 
 | Card              | Pattern                                                   | Why unusual                                                                                       |
 |-------------------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------|
 | Urza's Saga       | Artifact not Enchantment Land Saga; chapter III faked as a sacrifice-self *activated* ability | Saga system absent: no lore counters, no chapter triggers (CR 715), no SBA-driven sac when lore-count > final chapter. The current stub is the wrong shape — sac is automatic per CR 715.4, not paid by the controller as activation cost. **Do not use as a model for cost migration.** Replace once saga machinery lands. |
-| Hexing Squelcher  | Ward grant via ~granted_trigger_defs~ in L6 modifier      | Verbose but correct                                                                               |
+| Hexing Squelcher  | Ward (~ir_ward~) granted to other creatures via ~CEMod::GrantAbility~ | First card to exercise IR Ward + IR CE-ability-granting (~granted_abilities~ + fire_triggers Part 5) |
 | Mistrise Village  | IR ~Action::GrantCEToNextSpellCast~ — latent, not a recompute-time CE | CR 611.2f spell-mod pattern: CE only exists once the qualifying spell is on the stack |
 | Painter's Servant | IR ~Static{AddColor(ChosenColor(Source))}~; ETB stores the color | ~ChosenColor~ reads ~etb_choice~ at recompute, so no closure CE                            |
 

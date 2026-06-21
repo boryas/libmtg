@@ -3655,115 +3655,82 @@ fn phelia_exuberant_shepherd() -> CardDef {
     card
 }
 
-/// {1}{R}, 2/2 Goblin Sorcerer.
-/// "This spell can't be countered." — ProhibitionDef active while on stack.
-/// "Ward—Pay 2 life." — TriggerCheckFn on SpellCast, checks spell's chosen_targets.
-/// "Spells you control can't be countered." — ProhibitionDef active while on battlefield.
-/// "Other creatures you control have Ward—Pay 2 life." — second TriggerCheckFn (approximation;
-///   see TODO below for the true CE-layer-6 implementation).
+/// {1}{R}, 2/2 Goblin Sorcerer. All four clauses on IR:
+/// - "This spell can't be countered." — `cant_be_countered_self` (Prohibition, on stack).
+/// - "Spells you control can't be countered." — Prohibition (on battlefield).
+/// - "Ward—Pay 2 life." — `ir_ward` (Triggered).
+/// - "Other creatures you control have Ward—Pay 2 life." — Static `GrantAbility(ir_ward)`.
 fn hexing_squelcher() -> CardDef {
-    let data = CreatureData::new("1R", 2, 2);
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::ce::CEMod;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+
+    // Ward—Pay 2 life (CR 702.21): the targeting opponent pays 2 life.
+    let ward_cost = || Action::PayLife { who: IrWho::You, amount: Expr::Num(2) };
+
+    let mut card = CardDef::new(
         "Hexing Squelcher",
-        CardKind::Creature(data),
+        CardKind::Creature(CreatureData::new("1R", 2, 2)),
         parse_colors("R", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        // Ward—Pay 2 life: fires when an opponent's spell targets this permanent.
-        vec![TriggerDef { check: Arc::new(|event, source_id, controller, state, pending| {
-            if let GameEvent::SpellCast { caster, card_id, .. } = event {
-                if *caster == controller { return; }
-                let is_targeted = state.objects.get(card_id)
-                    .and_then(|o| o.spell())
-                    .map_or(false, |s| s.chosen_targets.contains(&source_id));
-                if is_targeted {
-                    let spell_id = *card_id;
-                    let targeting_caster = *caster;
-                    pending.push(TriggerContext {
-                        source_name: "Hexing Squelcher (Ward)".into(),
-                        controller,
-                        target_spec: TargetSpec::None,
-                        effect: Effect(Arc::new(move |state, t, _| {
-                            ward_pay_or_counter(
-                                source_id,
-                                &crate::ir::action::Action::PayLife { who: crate::ir::action::Who::You, amount: crate::ir::expr::Expr::Num(2) },
-                                spell_id,
-                                targeting_caster,
-                                controller,
-                                state,
-                                t,
-                            );
-                        })),
-                    });
-                }
-            }
-        }), active_when: tp_on_battlefield() }],
+        vec![], // ward is now an IR Triggered ability (below)
         vec![],
-        vec![
-            // "Spells you control can't be countered." (while on battlefield)
-            ProhibitionDef {
-                check: Arc::new(|event, _source_id, controller, _state| {
-                    matches!(event, GameEvent::SpellBeingCountered { caster, .. } if *caster == controller)
-                }),
-                active_when: tp_on_battlefield(),
-            },
-            // "This spell can't be countered." (while on stack)
-            ProhibitionDef {
-                check: Arc::new(|event, source_id, _controller, _state| {
-                    matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
-                }),
-                active_when: tp_on_stack(),
-            },
-        ],
-        // "Other creatures you control have Ward—Pay 2 life."
-        // L6 CE: while Hexing Squelcher is on the battlefield, push a Ward trigger into each
-        // other creature controlled by the same player via granted_trigger_defs.
-        vec![Arc::new(move |source_id, controller| ContinuousInstance {
-            source_id,
-            controller,
-            layer: ContinuousLayer::L6AbilityEffects,
-            reads: vec![],
-            writes: vec![CeWrites::Abilities],
-            timestamp: 0, // assigned at ETB via ci_timestamp
-            filter: Arc::new(move |id, ctr, _| ctr == controller && id != source_id),
-            modifier: Arc::new(|def, _state| {
-                if matches!(def.kind, CardKind::Creature(_)) {
-                    def.granted_trigger_defs.push(Arc::new(
-                        |event, source_id, controller, state, pending| {
-                            if let GameEvent::SpellCast { caster, card_id, .. } = event {
-                                if *caster == controller { return; }
-                                let is_targeted = state.objects.get(card_id)
-                                    .and_then(|o| o.spell())
-                                    .map_or(false, |s| s.chosen_targets.contains(&source_id));
-                                if is_targeted {
-                                    let spell_id = *card_id;
-                                    let targeting_caster = *caster;
-                                    pending.push(TriggerContext {
-                                        source_name: "Hexing Squelcher (Ward grant)".into(),
-                                        controller,
-                                        target_spec: TargetSpec::None,
-                                        effect: Effect(Arc::new(move |state, t, _| {
-                                            ward_pay_or_counter(
-                                                source_id,
-                                                &crate::ir::action::Action::PayLife { who: crate::ir::action::Who::You, amount: crate::ir::expr::Expr::Num(2) },
-                                                spell_id,
-                                                targeting_caster,
-                                                controller,
-                                                state,
-                                                t,
-                                            );
-                                        })),
-                                    });
-                                }
-                            }
-                        },
-                    ));
-                }
-            }),
-            expiry: Expiry::WhileSourceOnBattlefield,
+        vec![], // "can't be countered" clauses are now IR Prohibitions (below)
+        vec![], // "other creatures have ward" is now an IR Static GrantAbility (below)
+    );
 
-        })],
-    )
+    // Scope for the grant: other creatures Hexing Squelcher's controller controls.
+    let other_creatures_you_control = Filter(Expr::And(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+            Box::new(Expr::Ctx(Ctx::Controller)),
+        )),
+        Box::new(Expr::And(
+            Box::new(Expr::Not(Box::new(Expr::Eq(
+                Box::new(Expr::Ctx(Ctx::It)),
+                Box::new(Expr::Ctx(Ctx::Source)),
+            )))),
+            Box::new(Expr::Contains(
+                Box::new(Expr::TypeLit(CardType::Creature)),
+                Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+            )),
+        )),
+    ));
+
+    card.abilities = vec![
+        // "Ward—Pay 2 life." (on itself)
+        ir_ward(ward_cost()),
+        // "This spell can't be countered." (while a spell on the stack)
+        cant_be_countered_self(),
+        // "Spells you control can't be countered." (while on the battlefield). A
+        // Prohibition suppressing a counter of any spell whose controller is this
+        // permanent's controller (`Controller(It) == Ctx::Controller`).
+        Ability {
+            kind: AbilityKind::Prohibition {
+                matches: EventPattern::SpellBeingCountered {
+                    spell_filter: Filter(Expr::Eq(
+                        Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )),
+                },
+                active_zone: Some(ZoneKindSel::Battlefield),
+            },
+            text: Some("Spells you control can't be countered."),
+        },
+        // "Other creatures you control have Ward—Pay 2 life."
+        Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::GrantAbility(Box::new(ir_ward(ward_cost())))],
+                scope: Some(other_creatures_you_control),
+                condition: None,
+            },
+            text: Some("Other creatures you control have Ward—Pay 2 life."),
+        },
+    ];
+    card
 }
 
 // ── DFCs / split cards ────────────────────────────────────────────────────────
@@ -5000,9 +4967,6 @@ fn griselbrand() -> CardDef {
 /// both directly (self-ward) and when granted to another permanent via
 /// `CEMod::GrantAbility` (then `Source` is the grantee). The pay-or-counter
 /// decision runs in `Action::Ward` → `ward_pay_or_counter`.
-// Transient: exercised by tests now; its first card consumer (Hexing Squelcher)
-// lands in the immediately-following commit, which drops this allow.
-#[allow(dead_code)]
 pub(crate) fn ir_ward(cost: crate::ir::action::Action) -> crate::ir::ability::Ability {
     use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
     use crate::ir::action::Action;
