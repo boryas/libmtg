@@ -4375,8 +4375,12 @@ fn equipped_creature_ce(mods: Vec<crate::ir::ce::CEMod>, text: &'static str) -> 
 }
 
 fn cori_steel_cutter() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, TokenSpec, Who as IrWho};
     use crate::ir::ce::CEMod;
-    use crate::ir::expr::Expr;
+    use crate::ir::context::Ctx;
+    use crate::ir::event_log::Window;
+    use crate::ir::expr::{EventFilter, Expr, ZoneKindSel};
     let mut card = CardDef::new(
         "Cori-Steel Cutter",
         CardKind::Artifact(ArtifactData {
@@ -4404,43 +4408,78 @@ fn cori_steel_cutter() -> CardDef {
         parse_colors("R", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        // Flurry: whenever controller casts their second spell each turn, create Monk + may attach.
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, state, pending| {
-                if let GameEvent::SpellCast { caster, .. } = event {
-                    if *caster != controller { return; }
-                    // spells_cast_this_turn is incremented AFTER SpellCast fires,
-                    // so == 1 means the first spell was counted and this is the second.
-                    if state.player(controller).spells_cast_this_turn != 1 { return; }
-                    pending.push(TriggerContext {
-                        source_name: "Cori-Steel Cutter (flurry)".into(),
-                        controller,
-                        target_spec: TargetSpec::None,
-                        effect: Effect(Arc::new(move |state, t, _targets| {
-                            let token_id = do_create_token("Monk Token", controller, state, t);
-                            // "You may attach this Equipment to it."
-                            let choice = state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::MayAttach, st));
-                            if matches!(choice, ChoiceResult::Bool(true)) {
-                                do_attach(state, controller, source_id, token_id);
-                            }
-                        })),
-                    });
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
+        vec![], // flurry is now an IR Triggered ability (below)
         vec![], vec![],
         vec![], // static CE now IR (card.abilities below)
     );
+
+    // Flurry: "Whenever you cast your second spell each turn, create a 1/1 Monk
+    // token; you may attach this to it." "Second spell this turn" is an event-log
+    // count, not a counter field: the just-cast spell is already logged (fire_event
+    // Stage 3b) before triggers dispatch, so this is the 2nd iff the controller's
+    // SpellCast count this turn == 2.
+    let is_my_second_spell = Expr::And(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Ctx(Ctx::Var("triggered_actor"))),
+            Box::new(Expr::Ctx(Ctx::Controller)),
+        )),
+        Box::new(Expr::Eq(
+            Box::new(Expr::EventCount {
+                window: Window::ThisTurn,
+                filter: Box::new(EventFilter::SpellCast {
+                    caster: Some(Box::new(Expr::Ctx(Ctx::Controller))),
+                }),
+            }),
+            Box::new(Expr::Num(2)),
+        )),
+    );
+    let flurry = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::SpellCast { spell_filter: ir_any() },
+                condition: Some(is_my_second_spell),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sequence(vec![
+                Action::CreateToken {
+                    who: IrWho::You,
+                    spec: TokenSpec {
+                        name: "Monk Token",
+                        types: vec![CardType::Creature],
+                        subtypes: vec!["Monk"],
+                        colors: vec![Color::Red],
+                        power: Some(1),
+                        toughness: Some(1),
+                        keywords: vec![],
+                    },
+                    n: Expr::Num(1),
+                    bind_as: Some("monk"),
+                },
+                // "You may attach Cori-Steel Cutter to it."
+                Action::MayDo {
+                    who: IrWho::You,
+                    action: Box::new(Action::Attach {
+                        what: Expr::Ctx(Ctx::Source),
+                        to: Expr::Ctx(Ctx::Var("monk")),
+                    }),
+                },
+            ]),
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Whenever you cast your second spell each turn, create a 1/1 red Monk creature token, then you may attach Cori-Steel Cutter to it."),
+    };
     // Equipped creature gets +1/+1 and has trample and haste.
-    card.abilities = vec![equipped_creature_ce(
-        vec![
-            CEMod::PumpPT(Expr::Num(1), Expr::Num(1)),
-            CEMod::AddKeyword(Keyword::Trample),
-            CEMod::AddKeyword(Keyword::Haste),
-        ],
-        "Equipped creature gets +1/+1 and has trample and haste.",
-    )];
+    card.abilities = vec![
+        flurry,
+        equipped_creature_ce(
+            vec![
+                CEMod::PumpPT(Expr::Num(1), Expr::Num(1)),
+                CEMod::AddKeyword(Keyword::Trample),
+                CEMod::AddKeyword(Keyword::Haste),
+            ],
+            "Equipped creature gets +1/+1 and has trample and haste.",
+        ),
+    ];
     card
 }
 

@@ -7885,118 +7885,64 @@
         }
     }
 
-    #[test]
-    fn test_cori_flurry_second_spell() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-
-        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-
-        // Simulate second spell: first spell already counted.
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 1;
-
-        let spell_id = {
-            let id = state.alloc_id();
-            state.objects.insert(id, GameObject {
+    /// Cast a spell for `who`: put it on the stack and fire SpellCast (which logs
+    /// it to the event log), then resolve any triggers. Cori's flurry counts the
+    /// controller's logged SpellCast events this turn, so real casts drive it.
+    fn cori_cast_spell(state: &mut SimState, who: PlayerId) {
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
             id,
             catalog_key: "Ponder".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
+            owner: who,
+            controller: who,
             is_token: false,
             materialized: None,
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
         });
-            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-            id
-        };
+        state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+        fire_event(GameEvent::SpellCast { caster: who, card_id: id, mana_spent: true }, state, 1, who);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(state, 1, &[]); }
+    }
 
-        fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
-            &mut state, 1, PlayerId::Us,
-        );
-        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+    fn cori_monk_count(state: &SimState) -> usize {
+        state.permanents_of(PlayerId::Us).filter(|c| c.catalog_key == "Monk Token").count()
+    }
 
-        // A Monk Token should now exist on the battlefield.
-        let monk_count = state.permanents_of(PlayerId::Us)
-            .filter(|c| c.catalog_key == "Monk Token")
-            .count();
-        assert_eq!(monk_count, 1, "flurry should create exactly one Monk Token");
+    #[test]
+    fn test_cori_flurry_second_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+
+        cori_cast_spell(&mut state, PlayerId::Us); // 1st — no flurry
+        assert_eq!(cori_monk_count(&state), 0, "no flurry on the first spell");
+        cori_cast_spell(&mut state, PlayerId::Us); // 2nd — flurry fires
+        assert_eq!(cori_monk_count(&state), 1, "flurry creates exactly one Monk on the second spell");
     }
 
     #[test]
     fn test_cori_flurry_not_first_spell() {
         let mut state = make_state();
         state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 0;
-
-        let spell_id = {
-            let id = state.alloc_id();
-            state.objects.insert(id, GameObject {
-            id,
-            catalog_key: "Ponder".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-        });
-            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-            id
-        };
-
-        fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
-            &mut state, 1, PlayerId::Us,
-        );
-        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
-
-        let monk_count = state.permanents_of(PlayerId::Us)
-            .filter(|c| c.catalog_key == "Monk Token")
-            .count();
-        assert_eq!(monk_count, 0, "flurry should NOT trigger on first spell");
+        cori_cast_spell(&mut state, PlayerId::Us);
+        assert_eq!(cori_monk_count(&state), 0, "flurry should NOT trigger on the first spell");
     }
 
     #[test]
     fn test_cori_flurry_not_third_spell() {
         let mut state = make_state();
         state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
-
-        let spell_id = {
-            let id = state.alloc_id();
-            state.objects.insert(id, GameObject {
-            id,
-            catalog_key: "Ponder".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-        });
-            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-            id
-        };
-
-        fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
-            &mut state, 1, PlayerId::Us,
-        );
-        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
-
-        let monk_count = state.permanents_of(PlayerId::Us)
-            .filter(|c| c.catalog_key == "Monk Token")
-            .count();
-        assert_eq!(monk_count, 0, "flurry should NOT trigger on third spell");
+        cori_cast_spell(&mut state, PlayerId::Us); // 1st
+        cori_cast_spell(&mut state, PlayerId::Us); // 2nd → flurry
+        cori_cast_spell(&mut state, PlayerId::Us); // 3rd → no flurry
+        // Exactly one Monk: the flurry fired only on the second spell.
+        assert_eq!(cori_monk_count(&state), 1, "flurry fires only on the second spell, not the third");
     }
 
     #[test]
