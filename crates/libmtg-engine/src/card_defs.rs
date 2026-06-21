@@ -3030,17 +3030,44 @@ fn kaito_bane_of_nightmares() -> CardDef {
 /// ETB: search your library for a creature with toughness ≤ 2, put it into your hand.
 /// CR 700.3, CR 701.19.
 fn recruiter_of_the_guard() -> CardDef {
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = CardDef::new(
         "Recruiter of the Guard",
         CardKind::Creature(CreatureData::new("2W", 1, 1)),
         parse_colors("2W", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef { check: Arc::new(recruiter_check), active_when: tp_on_battlefield() }],
-        vec![],
-        vec![],
-        vec![],
-    )
+        vec![], vec![], vec![], vec![],
+    );
+    // "When this enters, search your library for a creature card with toughness 2
+    //  or less, reveal it, put it into your hand, then shuffle."
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone {
+                    obj_filter: ir_self(),
+                    zone_kind: ZoneKindSel::Battlefield,
+                },
+                condition: None,
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Search {
+                who: IrWho::You,
+                zone: ZoneKindSel::Library,
+                filter: ir_and(ir_type(CardType::Creature), ir_toughness_le(2)),
+                count: Expr::Num(1),
+                dest: ZoneKindSel::Hand,
+                to_top: false,
+                shuffle: true,
+                bind_as: None,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Recruiter of the Guard enters, search your library for a creature card with toughness 2 or less, reveal it, put it into your hand, then shuffle."),
+    }];
+    card
 }
 
 /// Stoneforge Mystic — {1}{W} Creature — Kor Artificer 1/2.
@@ -3048,6 +3075,9 @@ fn recruiter_of_the_guard() -> CardDef {
 ///  reveal it, put it into your hand, then shuffle."
 /// "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."
 fn stoneforge_mystic() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::Action;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut data = CreatureData::new("1W", 1, 2);
     data.creature_subtypes = vec!["Kor".into(), "Artificer".into()];
     data.abilities = vec![AbilityDef {
@@ -3071,30 +3101,43 @@ fn stoneforge_mystic() -> CardDef {
         timing: ActivationTiming::Sorcery,
         ..Default::default()
     }];
-    CardDef::new(
+    let mut card = CardDef::new(
         "Stoneforge Mystic",
         CardKind::Creature(data),
         parse_colors("1W", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        // ETB trigger: search library for an Equipment card, put into hand.
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, _state, pending| {
-                if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-                    if *id == source_id && *ctlr == controller {
-                        pending.push(TriggerContext {
-                            source_name: "Stoneforge Mystic".into(),
-                            controller,
-                            target_spec: TargetSpec::None,
-                            effect: eff_fetch_search(controller, ir_subtype("Equipment"), ZoneId::Hand),
-                        });
-                    }
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
+        vec![], // ETB trigger is now an IR Triggered ability (below)
         vec![], vec![], vec![],
-    )
+    );
+    // "When this enters, search your library for an Equipment card, reveal it, put
+    //  it into your hand, then shuffle." (The {1}{W},{T} put-into-play ability is
+    //  still a legacy AbilityDef on `data` — that's the separate activated batch.)
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone {
+                    obj_filter: ir_self(),
+                    zone_kind: ZoneKindSel::Battlefield,
+                },
+                condition: None,
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Search {
+                who: crate::ir::action::Who::You,
+                zone: ZoneKindSel::Library,
+                filter: ir_subtype("Equipment"),
+                count: Expr::Num(1),
+                dest: ZoneKindSel::Hand,
+                to_top: false,
+                shuffle: true,
+                bind_as: None,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Stoneforge Mystic enters, search your library for an Equipment card, reveal it, put it into your hand, then shuffle."),
+    }];
+    card
 }
 
 /// ETB trigger + draw-trigger: deal 1 damage to any target and amass Orc 1 whenever
@@ -4235,43 +4278,44 @@ fn clue_token() -> CardDef {
 /// 1/1 white Monk creature token with prowess.
 /// Prowess: "Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn."
 fn monk_token() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
     use crate::ir::action::{Action, Expiry as IrExpiry};
     use crate::ir::ce::CEMod;
     use crate::ir::context::Ctx;
-    use crate::ir::expr::Expr;
-    CardDef::new(
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = CardDef::new(
         "Monk Token",
         CardKind::Creature(CreatureData::new("", 1, 1)),
         vec![Color::White],
         None,
         vec![], CardLayout::Normal, None,
-        // Prowess: whenever controller casts a noncreature spell, +1/+1 until EOT.
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, state, pending| {
-                if let GameEvent::SpellCast { caster, card_id, .. } = event {
-                    if *caster != controller { return; }
-                    let is_creature = state.objects.get(card_id)
-                        .and_then(|o| state.catalog.get(&o.catalog_key))
-                        .map_or(false, |d| d.types.contains(&CardType::Creature));
-                    if !is_creature {
-                        pending.push(TriggerContext {
-                            source_name: "Monk Token (prowess)".into(),
-                            controller,
-                            target_spec: TargetSpec::None,
-                            // Self-pump +1/+1 until EOT via the unified CE path.
-                            effect: eff_ir_targeted(controller, source_id, Action::ApplyCE {
-                                target: Expr::Ctx(Ctx::Source),
-                                mods: vec![CEMod::PumpPT(Expr::Num(1), Expr::Num(1))],
-                                expiry: IrExpiry::EndOfTurn,
-                            }),
-                        });
-                    }
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
-        vec![], vec![], vec![],
-    )
+        vec![], vec![], vec![], vec![],
+    );
+    // Prowess: whenever you cast a noncreature spell, +1/+1 until EOT. The spell's
+    // noncreature-ness is in the pattern's `spell_filter` (`It` = the spell); the
+    // "you cast" scope is the condition (`triggered_actor == Controller`).
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::SpellCast {
+                    spell_filter: ir_not(ir_type(CardType::Creature)),
+                },
+                condition: Some(Expr::Eq(
+                    Box::new(Expr::Ctx(Ctx::Var("triggered_actor"))),
+                    Box::new(Expr::Ctx(Ctx::Controller)),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::ApplyCE {
+                target: Expr::Ctx(Ctx::Source),
+                mods: vec![CEMod::PumpPT(Expr::Num(1), Expr::Num(1))],
+                expiry: IrExpiry::EndOfTurn,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn."),
+    }];
+    card
 }
 
 /// 0/0 black Phyrexian Germ creature token. Created by Living Weapon equipment (CR 702.92).
@@ -4684,7 +4728,8 @@ fn cryptic_coat() -> CardDef {
 /// "Delirium — As long as there are four or more card types among cards in your graveyard,
 ///  this creature gets +2/+2, has flying, and attacks each combat if able."
 fn dragons_rage_channeler() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::Action;
     use crate::ir::ce::CEMod;
     use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, Filter, ZoneKindSel, ZoneSel};
@@ -4696,27 +4741,30 @@ fn dragons_rage_channeler() -> CardDef {
         parse_colors("R", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        // Trigger: "Whenever you cast a noncreature spell, surveil 1."
-        vec![TriggerDef { check: Arc::new(|event, _source_id, controller, state, pending| {
-            if let GameEvent::SpellCast { caster, card_id, .. } = event {
-                if *caster != controller { return; }
-                let is_creature = state.objects.get(card_id)
-                    .and_then(|o| state.catalog.get(&o.catalog_key))
-                    .map_or(false, |d| d.types.contains(&CardType::Creature));
-                if !is_creature {
-                    pending.push(TriggerContext {
-                        source_name: "Dragon's Rage Channeler".into(),
-                        controller,
-                        target_spec: TargetSpec::None,
-                        effect: eff_surveil(controller, 1),
-                    });
-                }
-            }
-        }), active_when: tp_on_battlefield() }],
+        vec![], // surveil trigger is now an IR Triggered ability (below)
         vec![],  // no replacements
         vec![],  // no prohibitions
         vec![],  // delirium CE now IR (card.abilities below)
     );
+
+    // "Whenever you cast a noncreature spell, surveil 1."
+    let surveil_trigger = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::SpellCast {
+                    spell_filter: ir_not(ir_type(CardType::Creature)),
+                },
+                condition: Some(Expr::Eq(
+                    Box::new(Expr::Ctx(Ctx::Var("triggered_actor"))),
+                    Box::new(Expr::Ctx(Ctx::Controller)),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Surveil { who: crate::ir::action::Who::You, n: Expr::Num(1) },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Whenever you cast a noncreature spell, surveil 1."),
+    };
     // Delirium — as long as ≥4 card types among cards in your graveyard, DRC gets
     // +2/+2 and flying. One gated Static block: the delirium condition is a single
     // first-class gate (Decision 4) shared by both mods; scope is self.
@@ -4732,20 +4780,23 @@ fn dragons_rage_channeler() -> CardDef {
         }))))),
         Box::new(Expr::Num(4)),
     );
-    card.abilities = vec![Ability {
-        kind: AbilityKind::Static {
-            mods: vec![
-                CEMod::PumpPT(Expr::Num(2), Expr::Num(2)),
-                CEMod::AddKeyword(Keyword::Flying),
-            ],
-            scope: Some(Filter(Expr::Eq(
-                Box::new(Expr::Ctx(Ctx::It)),
-                Box::new(Expr::Ctx(Ctx::Source)),
-            ))),
-            condition: Some(delirium),
+    card.abilities = vec![
+        surveil_trigger,
+        Ability {
+            kind: AbilityKind::Static {
+                mods: vec![
+                    CEMod::PumpPT(Expr::Num(2), Expr::Num(2)),
+                    CEMod::AddKeyword(Keyword::Flying),
+                ],
+                scope: Some(Filter(Expr::Eq(
+                    Box::new(Expr::Ctx(Ctx::It)),
+                    Box::new(Expr::Ctx(Ctx::Source)),
+                ))),
+                condition: Some(delirium),
+            },
+            text: Some("Delirium — as long as there are four or more card types among cards in your graveyard, this creature gets +2/+2 and has flying."),
         },
-        text: Some("Delirium — as long as there are four or more card types among cards in your graveyard, this creature gets +2/+2 and has flying."),
-    }];
+    ];
     card
 }
 

@@ -1425,20 +1425,6 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
 
 /// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
-pub(crate) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
-    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-        if *id == source_id && *ctlr == controller {
-            let pred = ir_and(ir_type(CardType::Creature), ir_toughness_le(2));
-            pending.push(TriggerContext {
-                source_name: "Recruiter of the Guard".into(),
-                controller,
-                target_spec: TargetSpec::None,
-                effect: eff_fetch_search(controller, pred, ZoneId::Hand),
-            });
-        }
-    }
-}
-
 /// ETB trigger for Atraxa, Grand Unifier: placeholder — adds 4 cards to hand.
 /// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
 pub(crate) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
