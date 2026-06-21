@@ -154,9 +154,18 @@ pub enum Expr {
 /// specific field selectors that show up in real cards.
 #[derive(Debug, Clone)]
 pub enum EventFilter {
-    /// A spell was cast. `caster` optionally filters by the player who cast it
-    /// (resolves against the event's `caster` field).
-    SpellCast { caster: Option<Box<Expr>> },
+    /// A spell was cast. Each selector is optional (None = don't filter):
+    /// `caster` (the player), `card` (the cast object — for "this card was cast",
+    /// e.g. an evoke/warp ETB checking its own cast), and `alt_cost` (true ⇒ cast
+    /// for one of its alternative costs — evoke, warp; CR 702.74 / 118.9).
+    SpellCast {
+        caster: Option<Box<Expr>>,
+        card: Option<Box<Expr>>,
+        alt_cost: Option<bool>,
+    },
+    /// A player drew a card. `who` optionally filters by the drawing player.
+    /// `EventCount(ThisTurn, Draw{You})` is "cards you've drawn this turn".
+    Draw { who: Option<Box<Expr>> },
 }
 
 /// Which zone to scan, possibly controller-scoped.

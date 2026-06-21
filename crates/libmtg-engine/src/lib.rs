@@ -419,6 +419,10 @@ pub enum GameEvent {
         caster: PlayerId,
         card_id: ObjId,
         mana_spent: bool,
+        /// True if cast for one of its alternative costs (evoke, warp, flashback,
+        /// free-cast …) rather than its mana cost. CR 118.9 / 702.74. Distinct
+        /// from `!mana_spent` — a warp/flashback alt cost still spends mana.
+        alt_cost: bool,
     },
     /// Fired after a spell finishes resolving — its effect has been applied (or it has
     /// become a permanent), just before priority returns. The general "spell resolved"
@@ -2891,7 +2895,7 @@ fn cast_spell(
         }
         consume_latent_spell_mod(state, who, card_id);
         let back_mana_spent = mana_value(adv.mana_cost()) > 0;
-        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent }, state, t, who);
+        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent, alt_cost: false }, state, t, who);
         return Some(card_id);
     }
 
@@ -3071,7 +3075,7 @@ fn cast_spell(
         None     => mana_value(def.mana_cost()) > 0,
         Some(ac) => ac.costs.includes_mana(),
     };
-    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent }, state, t, who);
+    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent, alt_cost: alt_cost.is_some() }, state, t, who);
 
 
     Some(card_id)

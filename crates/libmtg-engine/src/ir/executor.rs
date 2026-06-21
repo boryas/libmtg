@@ -1694,16 +1694,35 @@ fn match_event(
 ) -> bool {
     use crate::ir::expr::EventFilter;
     match filter {
-        EventFilter::SpellCast { caster } => {
-            let crate::GameEvent::SpellCast { caster: c, .. } = &logged.event else {
+        EventFilter::SpellCast { caster, card, alt_cost } => {
+            let crate::GameEvent::SpellCast { caster: c, card_id, alt_cost: ac, .. } = &logged.event
+            else {
                 return false;
             };
-            match caster {
+            if let Some(expr) = caster {
+                if !matches!(eval_expr(expr, state, env), Value::Player(p) if p == *c) {
+                    return false;
+                }
+            }
+            if let Some(expr) = card {
+                if !matches!(eval_expr(expr, state, env), Value::Obj(o) if o == *card_id) {
+                    return false;
+                }
+            }
+            if let Some(want) = alt_cost {
+                if *want != *ac {
+                    return false;
+                }
+            }
+            true
+        }
+        EventFilter::Draw { who } => {
+            let crate::GameEvent::Draw { controller: drawer, .. } = &logged.event else {
+                return false;
+            };
+            match who {
                 None => true,
-                Some(expr) => match eval_expr(expr, state, env) {
-                    Value::Player(p) => p == *c,
-                    _ => false,
-                },
+                Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *drawer),
             }
         }
     }
@@ -1960,7 +1979,7 @@ pub(crate) fn match_event_pattern(
 
         EventPattern::SpellCast { spell_filter } => {
             let crate::GameEvent::SpellCast {
-                card_id, caster, mana_spent,
+                card_id, caster, mana_spent, ..
             } = event
             else {
                 return None;
@@ -2539,10 +2558,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
 fn walk_event_filter(filter: &crate::ir::expr::EventFilter, out: &mut Vec<Axis>) {
     use crate::ir::expr::EventFilter;
     match filter {
-        EventFilter::SpellCast { caster } => {
-            if let Some(e) = caster {
-                walk_reads(e, out);
-            }
+        EventFilter::SpellCast { caster, card, alt_cost: _ } => {
+            if let Some(e) = caster { walk_reads(e, out); }
+            if let Some(e) = card { walk_reads(e, out); }
+        }
+        EventFilter::Draw { who } => {
+            if let Some(e) = who { walk_reads(e, out); }
         }
     }
 }

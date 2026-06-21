@@ -1919,6 +1919,8 @@ fn flusterstorm() -> CardDef {
             window: Window::ThisTurn,
             filter: Box::new(EventFilter::SpellCast {
                 caster: Some(Box::new(Expr::Ctx(Ctx::Controller))),
+                card: None,
+                alt_cost: None,
             }),
         }),
         Box::new(Expr::Num(1)),
@@ -4428,6 +4430,8 @@ fn cori_steel_cutter() -> CardDef {
                 window: Window::ThisTurn,
                 filter: Box::new(EventFilter::SpellCast {
                     caster: Some(Box::new(Expr::Ctx(Ctx::Controller))),
+                    card: None,
+                    alt_cost: None,
                 }),
             }),
             Box::new(Expr::Num(2)),
@@ -4916,9 +4920,11 @@ fn simian_spirit_guide() -> CardDef {
 /// ETB: deals 4 damage divided as you choose among any number of target creatures
 /// and/or planeswalkers. Evoke — Exile a red card from your hand. CR 702.74, 702.4.
 fn fury() -> CardDef {
-    use crate::ir::action::Action;
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, Who as IrWho};
     use crate::ir::context::Ctx;
-    use crate::ir::expr::Expr;
+    use crate::ir::event_log::Window;
+    use crate::ir::expr::{EventFilter, Expr, ZoneKindSel};
     let mut data = CreatureData::new("3RR", 3, 3);
     data.keywords = Keywords::from_slice(&[Keyword::DoubleStrike]);
     let mut c = CardDef::new(
@@ -4927,44 +4933,60 @@ fn fury() -> CardDef {
         parse_colors("3RR", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![
-            // ETB: deal 4 damage to target creature or planeswalker.
-            etb_self_trigger("Fury", TargetSpec::ObjectInZone {
+        vec![], vec![], vec![], vec![],
+    );
+    // ETB: deal 4 damage to target creature or planeswalker.
+    let etb_damage = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: None,
+            },
+            target_spec: TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: ir_or(
-                    ir_type(CardType::Creature),
-                    ir_type(CardType::Planeswalker),
-                ),
-            }, |source_id, controller| eff_ir_targeted(controller, source_id, Action::DealDamage {
+                filter: ir_or(ir_type(CardType::Creature), ir_type(CardType::Planeswalker)),
+            },
+            body: Action::DealDamage {
                 source: Expr::Ctx(Ctx::Source),
                 target: Expr::Ctx(Ctx::Var("target")),
                 amount: Expr::Num(4),
-            })),
-            // Evoke sacrifice: if an alternate cost was used, sacrifice on ETB (CR 702.74).
-            TriggerDef {
-                check: Arc::new(|event, source_id, controller, state, pending| {
-                    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-                        if *id == source_id && *ctlr == controller
-                            && state.resolving_costs_ctx.alt_cost_index.is_some()
-                        {
-                            let sac_pred = ir_obj(source_id);
-                            pending.push(TriggerContext {
-                                source_name: "Fury (evoke)".into(),
-                                controller,
-                                target_spec: TargetSpec::None,
-                                effect: eff_sacrifice(controller, Who::Actor, sac_pred),
-                            });
-                        }
-                    }
-                }),
-                active_when: tp_on_battlefield(),
             },
-        ],
-        vec![],  // no replacements
-        vec![],  // no statics
-        vec![],  // no prohibitions
-    );
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Fury enters, it deals 4 damage to target creature or planeswalker."),
+    };
+    // Evoke (CR 702.74): "if its evoke cost was paid, sacrifice it." Read from the
+    // log — Fury's own SpellCast this turn carried `alt_cost` (the evoke alternative
+    // cost was used), which the just-resolved cast left in the event log.
+    let evoke_sacrifice = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: Some(Expr::Gt(
+                    Box::new(Expr::EventCount {
+                        window: Window::ThisTurn,
+                        filter: Box::new(EventFilter::SpellCast {
+                            caster: None,
+                            card: Some(Box::new(Expr::Ctx(Ctx::Source))),
+                            alt_cost: Some(true),
+                        }),
+                    }),
+                    Box::new(Expr::Num(0)),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sacrifice {
+                who: IrWho::You,
+                filter: ir_self(),
+                count: Expr::Num(1),
+                bind_as: None,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Fury enters, if its evoke cost was paid, sacrifice it."),
+    };
+    c.abilities = vec![etb_damage, evoke_sacrifice];
     c.alternate_costs = vec![
         AlternateCost {
             // Evoke — Exile a red card from your hand.
@@ -4996,6 +5018,11 @@ fn fury() -> CardDef {
 /// "its owner may cast this card after the current turn has ended" part is not modeled
 /// (requires a castable-from-exile flag tied to the exiled card).
 fn quantum_riddler() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, StepScope, TriggerSpec};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::event_log::Window;
+    use crate::ir::expr::{EventFilter, Expr, ZoneKindSel};
     let mut data = CreatureData::new("3UU", 4, 6);
     data.creature_subtypes = vec!["Sphinx".into()];
     data.keywords = Keywords::from_slice(&[Keyword::Flying]);
@@ -5005,49 +5032,50 @@ fn quantum_riddler() -> CardDef {
         parse_colors("3UU", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![
-            // ETB: draw a card.
-            etb_self_trigger("Quantum Riddler", TargetSpec::None,
-                |_source_id, controller| eff_draw(controller, 1)),
-            // Warp: if warp (alt) cost was used, register a delayed end-step exile.
-            TriggerDef {
-                check: Arc::new(|event, source_id, controller, state, pending| {
-                    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-                        if *id == source_id && *ctlr == controller
-                            && state.resolving_costs_ctx.alt_cost_index.is_some()
-                        {
-                            pending.push(TriggerContext {
-                                source_name: "Quantum Riddler (warp)".into(),
-                                controller,
-                                target_spec: TargetSpec::None,
-                                effect: Effect(Arc::new(move |state, _t, _targets| {
-                                    state.trigger_instances.push(TriggerInstance {
-                                        source_id,
-                                        controller,
-                                        check: Arc::new(move |event, _source_id, controller, _state, pending| {
-                                            if let GameEvent::EnteredStep { step: StepKind::End, .. } = event {
-                                                pending.push(TriggerContext {
-                                                    source_name: "Quantum Riddler (warp exile)".into(),
-                                                    controller,
-                                                    target_spec: TargetSpec::None,
-                                                    effect: Effect(Arc::new(move |state, t, _targets| {
-                                                        change_zone(source_id, ZoneId::Exile, state, t, controller);
-                                                    })),
-                                                });
-                                            }
-                                        }),
-                                        expiry: Some(Expiry::OneShot),
-                                    });
-                                })),
-                            });
-                        }
-                    }
-                }),
-                active_when: tp_on_battlefield(),
-            },
-        ],
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     );
+    // ETB: draw a card.
+    let etb_draw = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: None,
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Draw { who: IrWho::You, n: Expr::Num(1) },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Quantum Riddler enters, draw a card."),
+    };
+    // Warp: if cast for its warp (alternative) cost, exile it at the beginning of the
+    // next end step. Detected from the log — Source's own alt-cost SpellCast this turn
+    // (warp's {1}{U} spends mana, so `alt_cost`, not `!mana_spent`, is the signal).
+    let warp_exile = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: Some(Expr::Gt(
+                    Box::new(Expr::EventCount {
+                        window: Window::ThisTurn,
+                        filter: Box::new(EventFilter::SpellCast {
+                            caster: None,
+                            card: Some(Box::new(Expr::Ctx(Ctx::Source))),
+                            alt_cost: Some(true),
+                        }),
+                    }),
+                    Box::new(Expr::Num(0)),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::ScheduleDelayedTrigger {
+                fires: TriggerSpec::AtStep { step: StepKind::End, who: StepScope::EachPlayer, condition: None },
+                action: Box::new(Action::Exile { target: Expr::Ctx(Ctx::Source), bind_as: None }),
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Warp — when Quantum Riddler enters, if it was cast for its warp cost, exile it at the beginning of the next end step."),
+    };
+    c.abilities = vec![etb_draw, warp_exile];
     c.alternate_costs = vec![
         AlternateCost {
             costs: ir_pay_mana_str("1U"),

@@ -3721,6 +3721,43 @@
             "Fury ETB should deal 4 damage to its target");
     }
 
+    /// Evoke (CR 702.74): cast for its evoke cost (logged as an `alt_cost` SpellCast),
+    /// Fury sacrifices itself on ETB.
+    #[test]
+    fn test_fury_evoke_sacrifices_itself() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Fury".into(), catalog_card("Fury"));
+
+        let fury_id = add_hand_card(&mut state, PlayerId::Us, "Fury");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: fury_id, mana_spent: false, alt_cost: true,
+        });
+        change_zone(fury_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&fury_id].zone(), Some(Zone::Graveyard),
+            "Fury sacrifices itself when cast for its evoke cost");
+    }
+
+    /// A hardcast Fury (no `alt_cost`) stays on the battlefield.
+    #[test]
+    fn test_fury_hardcast_not_sacrificed() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Fury".into(), catalog_card("Fury"));
+
+        let fury_id = add_hand_card(&mut state, PlayerId::Us, "Fury");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: fury_id, mana_spent: true, alt_cost: false,
+        });
+        change_zone(fury_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&fury_id].zone(), Some(Zone::Battlefield),
+            "hardcast Fury stays on the battlefield");
+    }
+
     /// Engineered Explosives destroys each nonland permanent whose mana value
     /// equals its charge counters, read via `CountersOn(Source)` after sacrifice
     /// (IR `ForEach` + `Destroy`).
@@ -3781,43 +3818,52 @@
             "no delayed end-step trigger registered on a normal cast");
     }
 
-    /// When the spell is cast for its Warp alternative cost (alt_cost_index set),
-    /// ETB registers a delayed end-step trigger that exiles Quantum Riddler.
+    /// When cast for its Warp alternative cost, Quantum Riddler's ETB schedules a
+    /// delayed end-step exile. "Cast for warp" is read from the event log — its own
+    /// SpellCast this turn carried `alt_cost` (warp's {1}{U} spends mana, so it's the
+    /// `alt_cost` flag, not `!mana_spent`, that distinguishes warp from a hardcast).
     #[test]
     fn test_quantum_riddler_warp_registers_end_step_exile() {
         let mut state = make_state();
+        state.catalog = test_catalog();
         state.catalog.insert("Quantum Riddler".into(), catalog_card("Quantum Riddler"));
 
-        // Simulate "cast for warp cost": mark alt_cost_index before ETB fires.
-        state.resolving_costs_ctx.alt_cost_index = Some(0);
-        eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
-        let qr_id = state.objects.values()
-            .find(|o| o.catalog_key == "Quantum Riddler" && o.in_zone(Zone::Battlefield))
-            .map(|o| o.id).expect("Quantum Riddler on battlefield");
+        // Log a warp cast for Quantum Riddler, then move it to the battlefield (ETB).
+        let qr_id = add_hand_card(&mut state, PlayerId::Us, "Quantum Riddler");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: qr_id, mana_spent: true, alt_cost: true,
+        });
+        change_zone(qr_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
-        // Resolve the warp trigger — it registers a delayed end-step exile.
-        let warp_ctx = state.pending_triggers.iter()
-            .find(|ctx| ctx.source_name == "Quantum Riddler (warp)").cloned()
-            .expect("warp trigger queued when alt_cost_index is set");
-        warp_ctx.effect.call(&mut state, 1, &[]);
-        assert_eq!(state.trigger_instances.len(), 1,
-            "delayed end-step exile trigger should be registered");
+        // Resolve the ETB triggers — the warp one schedules a delayed end-step exile.
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert_eq!(state.trigger_instances.len(), 1, "warp schedules a delayed end-step exile");
         assert_eq!(state.trigger_instances[0].expiry, Some(Expiry::OneShot));
 
-        // Clear ambient pending triggers from the ETB before firing end step.
-        state.pending_triggers.clear();
-
-        // Fire end step: the delayed trigger should produce an exile trigger context.
+        // Fire end step → the delayed trigger exiles Quantum Riddler.
         fire_event(
             GameEvent::EnteredStep { step: StepKind::End, active_player: PlayerId::Us },
             &mut state, 2, PlayerId::Us,
         );
-        let exile_ctx = state.pending_triggers.iter()
-            .find(|ctx| ctx.source_name == "Quantum Riddler (warp exile)").cloned()
-            .expect("end step produces warp exile trigger");
-        exile_ctx.effect.call(&mut state, 2, &[]);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 2, &[]); }
         assert_eq!(state.objects[&qr_id].zone(), Some(Zone::Exile { on_adventure: false }),
-            "Quantum Riddler should be exiled at end step when cast for warp cost");
+            "Quantum Riddler should be exiled at end step when cast for warp");
+    }
+
+    /// And a hardcast Quantum Riddler (no `alt_cost` in the log) is NOT exiled.
+    #[test]
+    fn test_quantum_riddler_hardcast_not_exiled() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Quantum Riddler".into(), catalog_card("Quantum Riddler"));
+
+        let qr_id = add_hand_card(&mut state, PlayerId::Us, "Quantum Riddler");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: qr_id, mana_spent: true, alt_cost: false,
+        });
+        change_zone(qr_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert!(state.trigger_instances.is_empty(), "hardcast: no delayed warp exile scheduled");
     }
 
     // ── Section 61: Pre-War Formalwear (ETB reanimate + static buff) ──────────
@@ -5277,7 +5323,7 @@
 
         let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, other_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Opp,
         );
         assert!(
@@ -5298,7 +5344,7 @@
 
         let spell_id = opp_spell_targeting(&mut state, PlayerId::Us, other_id); // Us's own spell
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
         assert!(
@@ -5329,7 +5375,7 @@
 
         let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, late_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Opp,
         );
         assert!(
@@ -5388,7 +5434,7 @@
         let opp_life = state.player(PlayerId::Opp).life;
 
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Opp,
         );
         let ctx = state.pending_triggers.iter().position(|c| c.source_name == "Warded Bear")
@@ -5416,7 +5462,7 @@
 
         let spell_id = opp_spell_targeting(&mut state, PlayerId::Us, bear_id); // Us casts it
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
         assert!(!state.pending_triggers.iter().any(|c| c.source_name == "Warded Bear"),
@@ -5465,7 +5511,7 @@
         // Opponent spell targeting the vanilla creature → granted ward fires.
         let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, vanilla_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Opp,
         );
         assert!(state.pending_triggers.iter().any(|c| c.source_name == "Grizzly Bears"),
@@ -5764,12 +5810,12 @@
         // Flusterstorm cast. Storm body evaluates as EventCount(ThisTurn,
         // SpellCast caster=Us) - 1, so 3 logged → 2 copies.
         state.event_log.push(1, GameEvent::SpellCast {
-            caster: PlayerId::Us, card_id: spell_a, mana_spent: true,
+            caster: PlayerId::Us, card_id: spell_a, mana_spent: true, alt_cost: false,
         });
         state.event_log.push(1, GameEvent::SpellCast {
-            caster: PlayerId::Us, card_id: spell_b, mana_spent: true,
+            caster: PlayerId::Us, card_id: spell_b, mana_spent: true, alt_cost: false,
         });
-        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true, alt_cost: false };
         state.event_log.push(1, event.clone());
 
         // Fire the SpellCast event — storm trigger should fire.
@@ -5818,7 +5864,7 @@
         state.stack.push(fluster_id);
 
         // Only the Flusterstorm cast itself is in the log — no prior spells.
-        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true, alt_cost: false };
         state.event_log.push(1, event.clone());
 
         let (triggers, _) = fire_triggers(&event, &state);
@@ -6809,7 +6855,7 @@
         state.stack.push(spell_id);
         consume_latent_spell_mod(&mut state, PlayerId::Us, spell_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
 
@@ -6844,7 +6890,7 @@
         state.stack.push(spell1_id);
         consume_latent_spell_mod(&mut state, PlayerId::Us, spell1_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell1_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell1_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
         assert!(state.latent_spell_mods.is_empty(), "LatentSpellMod consumed by first spell");
@@ -6855,7 +6901,7 @@
         state.stack.push(spell2_id);
         consume_latent_spell_mod(&mut state, PlayerId::Us, spell2_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell2_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell2_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
 
@@ -7289,7 +7335,7 @@
 
         // Fire SpellCast event.
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
@@ -7344,7 +7390,7 @@
         };
 
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
 
@@ -7902,7 +7948,7 @@
             role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
         });
         state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-        fire_event(GameEvent::SpellCast { caster: who, card_id: id, mana_spent: true }, state, 1, who);
+        fire_event(GameEvent::SpellCast { caster: who, card_id: id, mana_spent: true, alt_cost: false }, state, 1, who);
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(state, 1, &[]); }
     }
 
@@ -7972,7 +8018,7 @@
         };
 
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false },
             &mut state, 1, PlayerId::Us,
         );
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
