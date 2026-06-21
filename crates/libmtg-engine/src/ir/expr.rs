@@ -63,6 +63,10 @@ pub enum Expr {
     /// (empty if `obj` isn't a spell or has none). Lets a Ward trigger test "this
     /// spell targets me": `Contains(Source, ChosenTargets(triggered_obj))`.
     ChosenTargets(Box<Expr>),    // ObjSet
+    /// True iff the permanent `obj` is showing its front face (`active_face == 0`),
+    /// `false` for a transformed/back face or non-permanent. Gates a DFC's own
+    /// front-face trigger so it doesn't re-fire once flipped (Delver of Secrets).
+    IsFrontFace(Box<Expr>),      // Bool
 
     /// The loyalty of planeswalker `obj` (CR 306.5b), as `i64` — 0 for non-PWs or
     /// objects off the battlefield. Read for "as long as ~ has one or more loyalty

@@ -146,6 +146,10 @@ pub enum TriggerSpec {
     AtStep {
         step: crate::StepKind,
         who: StepScope,
+        /// Optional intervening-if (CR 603.4) evaluated against the source's
+        /// binding frame — the trigger doesn't fire when it's false (Delver's
+        /// "if an instant or sorcery is on top"). `None` = unconditional.
+        condition: Option<Expr>,
     },
 }
 

@@ -1446,6 +1446,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
                 .unwrap_or_default();
             Value::ObjSet(ids)
         }
+        Expr::IsFrontFace(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.active_face == 0))
+        }
         Expr::Unblocked(e) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.unblocked))
@@ -1820,7 +1824,7 @@ pub(crate) fn match_trigger(
             }
             Some(env)
         }
-        TriggerSpec::AtStep { step, who } => {
+        TriggerSpec::AtStep { step, who, condition } => {
             let crate::GameEvent::EnteredStep {
                 step: s,
                 active_player,
@@ -1837,11 +1841,15 @@ pub(crate) fn match_trigger(
                 StepScope::You => *active_player == controller,
                 StepScope::EachOpponent => *active_player != controller,
             };
-            if fires {
-                Some(env)
-            } else {
-                None
+            if !fires {
+                return None;
             }
+            if let Some(cond) = condition {
+                if !expect_bool(eval_expr(cond, state, &env)) {
+                    return None;
+                }
+            }
+            Some(env)
         }
     }
 }
@@ -2429,7 +2437,8 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             walk_reads(e, out);
         }
         Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e)
-        | Expr::ChosenName(e) | Expr::ChosenColor(e) | Expr::ChosenTargets(e) => {
+        | Expr::ChosenName(e) | Expr::ChosenColor(e) | Expr::ChosenTargets(e)
+        | Expr::IsFrontFace(e) => {
             // Battlefield-/stack-state projection — no CE axis applies (combat /
             // attachment / ETB-choice / targeting state isn't a continuous-effect
             // characteristic surface). Walk the operand but emit no axis push.

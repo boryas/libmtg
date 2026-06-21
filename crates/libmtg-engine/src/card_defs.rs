@@ -2850,7 +2850,7 @@ fn sneak_attack() -> CardDef {
         // `target` binding is captured at schedule time, so it resolves to this
         // creature when the trigger fires (matches nothing if it has since left).
         Action::ScheduleDelayedTrigger {
-            fires: TriggerSpec::AtStep { step: StepKind::End, who: StepScope::EachPlayer },
+            fires: TriggerSpec::AtStep { step: StepKind::End, who: StepScope::EachPlayer, condition: None },
             action: Box::new(Action::Sacrifice {
                 who: IrWho::You,
                 filter: Filter(Expr::Eq(Box::new(Expr::Ctx(Ctx::It)), Box::new(chosen()))),
@@ -3678,6 +3678,7 @@ fn phelia_exuberant_shepherd() -> CardDef {
             fires: TriggerSpec::AtStep {
                 step: StepKind::End,
                 who: StepScope::EachPlayer,
+                condition: None,
             },
             action: Box::new(delayed_body),
         },
@@ -5293,39 +5294,59 @@ fn delver_of_secrets() -> CardDef {
         vec![], vec![], vec![], vec![],
     );
 
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, StepScope, TriggerSpec};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
+
+    let mut card = CardDef::new(
         "Delver of Secrets",
         CardKind::Creature(CreatureData::new("U", 1, 1)),
         parse_colors("U", false, false),
         Some(50),
         vec![], CardLayout::DoubleFaced, Some(Box::new(back)),
-        // Upkeep trigger: look at top card, if instant/sorcery, transform.
-        vec![TriggerDef {
-            check: Arc::new(move |event, source_id, controller, state, pending| {
-                if let GameEvent::EnteredStep { step: StepKind::Upkeep, active_player } = event {
-                    if *active_player != controller { return; }
-                    // Only flip from front face.
-                    if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
-                    // Check top card of library.
-                    let is_instant_or_sorcery = state.library_of(controller).next()
-                        .and_then(|obj| state.catalog.get(&obj.catalog_key))
-                        .map_or(false, |d| d.is_instant() || d.is_sorcery());
-                    if !is_instant_or_sorcery { return; }
-                    pending.push(TriggerContext {
-                        source_name: "Delver of Secrets".into(),
-                        controller,
-                        target_spec: TargetSpec::None,
-                        // "Transform this creature" — literal in-place flip (CR 701.28).
-                        effect: eff_ir(controller, crate::ir::action::Action::Transform {
-                            target: crate::ir::expr::Expr::ObjLit(source_id),
-                        }),
-                    });
-                }
+        vec![], vec![], vec![], vec![],
+    );
+
+    // "At the beginning of your upkeep, look at the top card of your library …
+    //  if an instant or sorcery card is revealed this way, transform Delver."
+    // Fires each upkeep (AtStep has no condition slot); the body is an intervening-
+    // if that flips only when still on the front face and the top card is I/S.
+    let top_is_inst_or_sorc = |t: CardType| Expr::Contains(
+        Box::new(Expr::TypeLit(t)),
+        Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::Var("c"))))),
+    );
+    let condition = Expr::And(
+        Box::new(Expr::IsFrontFace(Box::new(Expr::Ctx(Ctx::Source)))),
+        Box::new(Expr::Any {
+            set: Box::new(Expr::Top {
+                zone: ZoneSel::Scoped {
+                    zone_kind: ZoneKindSel::Library,
+                    owner: Box::new(Expr::Ctx(Ctx::Controller)),
+                },
+                n: Box::new(Expr::Num(1)),
             }),
-            active_when: tp_on_battlefield(),
-        }],
-        vec![], vec![], vec![],
-    )
+            bind: "c",
+            body: Box::new(Expr::Or(
+                Box::new(top_is_inst_or_sorc(CardType::Instant)),
+                Box::new(top_is_inst_or_sorc(CardType::Sorcery)),
+            )),
+        }),
+    );
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::AtStep {
+                step: StepKind::Upkeep,
+                who: StepScope::You,
+                condition: Some(condition),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Transform { target: Expr::Ctx(Ctx::Source) },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("At the beginning of your upkeep, look at the top card of your library. You may reveal that card. If an instant or sorcery card is revealed this way, transform Delver of Secrets."),
+    }];
+    card
 }
 
 // ── Unholy Heat ──────────────────────────────────────────────────────────────
