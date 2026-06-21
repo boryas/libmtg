@@ -775,6 +775,16 @@ The chosen-name → chosen-color analog of Flute, with no restriction — just a
   (they assert materialized ~colors~, not the mechanism). CE-closure count 5 → 4 (remaining:
   omniscience, sneak_attack, kaito, hexing_squelcher). 439 green.
 
+*** 2026-06-21 — Omniscience: alt-cost CE off closures (the representative AltCost card)
+"You may cast spells from your hand without paying their mana costs." No new primitive —
+~CEMod::AltCost(CostSpec::Free)~ was already translated by ~cemod_to_modifier~ (pushes an
+empty ~AlternateCost~); this just moves Omniscience onto it as ~Static{ AltCost(Free) }~ with
+scope ~Controller(It) == Ctx::Controller ∧ Not(land)~. Scope is controller-keyed but
+*zone-agnostic on purpose*: a spell moves hand→stack at CR 601.2a, before its cost is paid,
+so a hand-only scope would drop the alt cost mid-cast (only hand casts consume it anyway).
+Now the model path for the family of alt-cost grants. The three alt-cost-outcome tests pass
+unchanged. CE-closure count 4 → 3 (remaining: sneak_attack, kaito, hexing_squelcher). 439 green.
+
 * Known seams
 
 *Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less

@@ -2768,33 +2768,45 @@ fn show_and_tell() -> CardDef {
 }
 
 fn omniscience() -> CardDef {
-    // "You may cast spells from your hand without paying their mana costs."
-    // Static ability: L3TextEffects CE sets `free_cast = true` on all non-land cards
-    // controlled by Omniscience's controller.
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::ce::{CEMod, CostSpec};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter};
+
+    let mut card = CardDef::new(
         "Omniscience",
         CardKind::Enchantment(EnchantmentData::default()),
         parse_colors("UUUUUUUUU", false, false),  // blue; {7}{U}{U}{U}
         None,
         vec![], CardLayout::Normal, None,
         vec![], vec![], vec![],
-        vec![Arc::new(move |source_id, controller| ContinuousInstance {
-            source_id,
-            controller,
-            layer: ContinuousLayer::L3TextEffects,
-            reads: vec![],
-            writes: vec![],
-            timestamp: 0, // assigned at ETB via ci_timestamp
-            filter: Arc::new(move |_id, ctr, _| ctr == controller),
-            modifier: Arc::new(|def, _state| {
-                if !def.is_land() {
-                    def.alternate_costs.push(AlternateCost::default());
-                }
-            }),
-            expiry: Expiry::WhileSourceOnBattlefield,
-
-        })],
-    )
+        vec![], // effect is an IR Static ability (below)
+    );
+    // "You may cast spells from your hand without paying their mana costs."
+    // An L3 alt-cost CE: push a free `AlternateCost` onto each non-land card the
+    // Omniscience controller controls. Scope is controller-keyed but *zone-agnostic*
+    // on purpose — a spell moves hand→stack at CR 601.2a, before its cost is paid, so
+    // a hand-only scope would drop the alt cost mid-cast. (Only hand casts consume it
+    // in practice.) `AltCost(Free)` is translated by `cemod_to_modifier`.
+    let non_land_of_controller = Filter(Expr::And(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+            Box::new(Expr::Ctx(Ctx::Controller)),
+        )),
+        Box::new(Expr::Not(Box::new(Expr::Contains(
+            Box::new(Expr::TypeLit(CardType::Land)),
+            Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+        )))),
+    ));
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Static {
+            mods: vec![CEMod::AltCost(CostSpec::Free)],
+            scope: Some(non_land_of_controller),
+            condition: None,
+        },
+        text: Some("You may cast spells from your hand without paying their mana costs."),
+    }];
+    card
 }
 
 fn sneak_attack() -> CardDef {

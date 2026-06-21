@@ -276,7 +276,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card                         | Effect                                                        |
 |------------------------------+---------------------------------------------------------------|
-| Omniscience                  | Adds free-cast ~AlternateCost~ to all non-lands               |
+| Omniscience                  | IR ~Static{AltCost(Free)}~, scope = controller's non-lands (zone-agnostic) |
 | Disruptor Flute              | +3 casting cost + suppress non-mana abilities for named card (now IR — see ETB-choice table) |
 | Dauthi Voidwalker (activated) | ~castable = true~ + free-cast on exiled card (EndOfTurn)     |
 | Grafdigger's Cage            | ~castable = false~ for GY/library cards                       |
@@ -355,7 +355,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card                        | Condition                                           |
 |-----------------------------+-----------------------------------------------------|
 | Mindbreak Trap              | Opponent cast 3+ spells                             |
-| Omniscience (granted)       | L3 CE adds ~AlternateCost::default()~               |
+| Omniscience (granted)       | IR ~Static{AltCost(Free)}~ → ~AlternateCost::default()~ via ~cemod_to_modifier~ |
 | Dauthi Voidwalker (granted) | Activated ability grants free-cast                  |
 
 * Activation Timing (CR 602.5b, 605.3a)
