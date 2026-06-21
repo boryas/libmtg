@@ -4994,6 +4994,45 @@ fn griselbrand() -> CardDef {
 /// When you cast this spell, take an extra turn after this one.
 /// When put into a graveyard from anywhere, owner shuffles graveyard into library.
 /// TODO: cast trigger (extra turn), annihilator 6, graveyard shuffle not modeled.
+/// Ward (CR 702.21) as a reusable IR triggered ability: when an opponent's spell
+/// targets the holder, counter it unless its controller pays `cost`. The trigger
+/// self-scopes via `Contains(Source, ChosenTargets(triggered_obj))`, so it works
+/// both directly (self-ward) and when granted to another permanent via
+/// `CEMod::GrantAbility` (then `Source` is the grantee). The pay-or-counter
+/// decision runs in `Action::Ward` → `ward_pay_or_counter`.
+// Transient: exercised by tests now; its first card consumer (Hexing Squelcher)
+// lands in the immediately-following commit, which drops this allow.
+#[allow(dead_code)]
+pub(crate) fn ir_ward(cost: crate::ir::action::Action) -> crate::ir::ability::Ability {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+    Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::SpellCast { spell_filter: Filter(Expr::Bool(true)) },
+                condition: Some(Expr::And(
+                    // cast by an opponent of the holder
+                    Box::new(Expr::Not(Box::new(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::Var("triggered_actor"))),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )))),
+                    // targeting the holder: Source ∈ the spell's chosen targets
+                    Box::new(Expr::Contains(
+                        Box::new(Expr::Ctx(Ctx::Source)),
+                        Box::new(Expr::ChosenTargets(Box::new(Expr::Ctx(Ctx::Var("triggered_obj"))))),
+                    )),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Ward { cost: Box::new(cost) },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Ward (Whenever this permanent becomes the target of a spell an opponent controls, counter that spell unless its controller pays the ward cost.)"),
+    }
+}
+
 /// "This spell can't be countered." An `AbilityKind::Prohibition` that matches a
 /// `SpellBeingCountered` event whose spell is this source (`It == Source`) and
 /// suppresses it in the event pipeline (CR 701.5 / 101.2 "can't beats can"). The

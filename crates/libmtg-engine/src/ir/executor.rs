@@ -331,6 +331,24 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::Ward { cost } => {
+            // Resolves a ward trigger: the targeting spell (triggered_obj) and its
+            // caster (triggered_actor) come from the trigger's bind env; the warded
+            // permanent is the ability source, the holder is its controller. The
+            // helper runs the opponent's pay-or-counter decision.
+            let (Some(Value::Obj(spell)), Some(Value::Player(caster))) =
+                (env.get("triggered_obj").cloned(), env.get("triggered_actor").cloned())
+            else {
+                return ExecResult::Ok;
+            };
+            let ward_source = env.source.unwrap_or(ObjId::UNSET);
+            let ward_holder = env.controller.unwrap_or(actor);
+            crate::effects::ward_pay_or_counter(
+                ward_source, cost, spell, caster, ward_holder, state, t,
+            );
+            ExecResult::Ok
+        }
+
         Action::CopySpell { what, n, new_targets } => {
             let spell_id = expect_obj(eval_expr(what, state, env));
             let n = expect_num(eval_expr(n, state, env)) as usize;
@@ -1251,6 +1269,21 @@ pub(crate) fn cemod_to_modifier(
                 }),
             })
         }
+        CEMod::GrantAbility(ability) => {
+            // CR 613.1f layer 6: grant a full IR ability (e.g. Ward) to objects in
+            // scope. It lands on `granted_abilities` of the affected def, which
+            // `fire_triggers` consults — the declarative analog of pushing a
+            // `granted_trigger_def`.
+            let ability = (**ability).clone();
+            Some(CeBuild {
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    def.granted_abilities.push(ability.clone());
+                }),
+            })
+        }
         // Cost-to-cast surcharge (CR 601.2f / 614.12 "costs {N} more"): a
         // generic-mana add baked onto the matching def's casting cost. Scope
         // (which cards) lives in the static-ability filter; the modifier just
@@ -1384,6 +1417,14 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
                 Some(crate::ChoiceResult::Color(c)) => Value::Color(*c),
                 _ => Value::Unit,
             }
+        }
+        Expr::ChosenTargets(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            let ids = state.objects.get(&o)
+                .and_then(|obj| obj.spell())
+                .map(|s| s.chosen_targets.clone())
+                .unwrap_or_default();
+            Value::ObjSet(ids)
         }
         Expr::Unblocked(e) => {
             let o = expect_obj(eval_expr(e, state, env));
@@ -2342,9 +2383,9 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             walk_reads(e, out);
         }
         Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e)
-        | Expr::ChosenName(e) | Expr::ChosenColor(e) => {
-            // Battlefield-state projection — no CE axis applies (combat /
-            // attachment / ETB-choice state isn't a continuous-effect
+        | Expr::ChosenName(e) | Expr::ChosenColor(e) | Expr::ChosenTargets(e) => {
+            // Battlefield-/stack-state projection — no CE axis applies (combat /
+            // attachment / ETB-choice / targeting state isn't a continuous-effect
             // characteristic surface). Walk the operand but emit no axis push.
             walk_reads(e, out);
         }

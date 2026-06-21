@@ -755,6 +755,11 @@ pub struct CardDef {
     /// catalog where this is always empty). CE modifiers push to this during recompute.
     /// Checked by `fire_triggers` for each active battlefield object.
     pub(crate) granted_trigger_defs: Vec<TriggerCheckFn>,
+    /// IR abilities granted to this object by continuous effects (`CEMod::GrantAbility`,
+    /// Layer 6) — the declarative analog of `granted_trigger_defs`. Same lifecycle:
+    /// empty in the catalog, pushed during recompute, fired by `fire_triggers` (the
+    /// `Triggered` ones) for each active battlefield object.
+    pub(crate) granted_abilities: Vec<crate::ir::ability::Ability>,
     /// Costs that must always be paid in addition to the chosen base/alternative cost.
     /// Per CR 118.9d these apply regardless of which cost path is taken. Single-
     /// variant `CostBody::Ir(Action)`; X-cost amounts use `Expr::Ctx(Ctx::Var("$x"))`
@@ -1299,6 +1304,7 @@ impl CardDef {
             prohibition_defs,
             static_ability_defs,
             granted_trigger_defs: vec![],
+            granted_abilities: vec![],
             additional_costs: crate::ir::ability::CostBody::empty(),
             counterable: true,
             casting_cost_modifier: 0,
@@ -1573,59 +1579,92 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
     for (obj_id, controller, key, obj_zone) in all_ids {
         let Some(card_def) = state.catalog.get(&key) else { continue };
         for ability in &card_def.abilities {
-            let crate::ir::ability::AbilityKind::Triggered {
-                spec,
-                target_spec,
-                body,
-                active_zone,
-            } = &ability.kind
-            else {
-                continue;
-            };
-            if *active_zone != obj_zone {
-                continue;
-            }
-            let Some(match_env) = crate::ir::executor::match_trigger(spec, event, obj_id, controller, state)
-            else { continue };
-            // Capture bindings from the matched event (e.g. triggered_obj,
-            // triggered_mana_spent) so the body can reference them on resolution.
-            let match_bindings: Vec<(&'static str, crate::ir::expr::Value)> =
-                match_env.bindings.iter().map(|(k, v)| (*k, v.clone())).collect();
-            let body = body.clone();
-            let source_name = card_def.name.clone();
-            let effect = Effect(std::sync::Arc::new(move |state, _t, targets| {
-                use crate::ir::executor::{execute, BindEnv};
-                use crate::ir::expr::Value;
-                let mut env = BindEnv::new()
-                    .with_source(obj_id)
-                    .with_controller(controller);
-                for (k, v) in &match_bindings {
-                    env = env.with_var(k, v.clone());
-                }
-                if let Some(&tgt) = targets.first() {
-                    let v = if tgt == state.us_id || tgt == state.opp_id {
-                        Value::Player(state.who_pid(tgt))
-                    } else {
-                        Value::Obj(tgt)
-                    };
-                    env = env.with_var("target", v);
-                }
-                let _ = execute(&body, state, &env);
-            }));
-            // "Another target X" is expressed by excluding the ability's own
-            // source from every object filter in the spec. Harmless for specs
-            // that already exclude self (the id just never matches the zone).
-            let target_spec = crate::predicates::exclude_from_target_spec(target_spec, obj_id);
-            pending.push(TriggerContext {
-                source_name,
-                controller,
-                target_spec,
-                effect,
-            });
+            fire_ir_triggered(
+                ability, obj_id, controller, obj_zone, card_def.name.clone(),
+                event, state, &mut pending,
+            );
+        }
+    }
+
+    // Part 5: IR abilities granted by continuous effects (`CEMod::GrantAbility`),
+    // read from materialized defs of active battlefield objects — the IR analog
+    // of Part 3. The grantee is the source of the granted trigger.
+    let granted_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
+        .filter(|(_, o)| matches!(o.zone(), Some(Zone::Battlefield)) && o.materialized.is_some())
+        .map(|(id, o)| (*id, o.controller))
+        .collect();
+    for (obj_id, controller) in granted_ids {
+        let granted: Vec<crate::ir::ability::Ability> = match state.objects.get(&obj_id)
+            .and_then(|o| o.materialized.as_ref())
+        {
+            Some(mat) => mat.granted_abilities.clone(),
+            None => continue,
+        };
+        let name = state.objects.get(&obj_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+        for ability in &granted {
+            fire_ir_triggered(
+                ability, obj_id, controller, crate::ir::expr::ZoneKindSel::Battlefield,
+                name.clone(), event, state, &mut pending,
+            );
         }
     }
 
     (pending, one_shot_fired)
+}
+
+/// Fire one IR `Triggered` ability for `obj_id` (its source) against `event`,
+/// pushing a `TriggerContext` if it matches. Shared by Part 4 (abilities printed
+/// on the card) and Part 5 (abilities granted by a CE), so the bind-capture and
+/// effect-build logic lives in one place. Non-`Triggered` kinds and zone
+/// mismatches are skipped.
+fn fire_ir_triggered(
+    ability: &crate::ir::ability::Ability,
+    obj_id: ObjId,
+    controller: PlayerId,
+    obj_zone: crate::ir::expr::ZoneKindSel,
+    source_name: String,
+    event: &GameEvent,
+    state: &SimState,
+    pending: &mut Vec<TriggerContext>,
+) {
+    let crate::ir::ability::AbilityKind::Triggered { spec, target_spec, body, active_zone } =
+        &ability.kind
+    else {
+        return;
+    };
+    if *active_zone != obj_zone {
+        return;
+    }
+    let Some(match_env) = crate::ir::executor::match_trigger(spec, event, obj_id, controller, state)
+    else {
+        return;
+    };
+    // Capture bindings from the matched event (e.g. triggered_obj,
+    // triggered_mana_spent) so the body can reference them on resolution.
+    let match_bindings: Vec<(&'static str, crate::ir::expr::Value)> =
+        match_env.bindings.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let body = body.clone();
+    let effect = Effect(std::sync::Arc::new(move |state: &mut SimState, _t, targets: &[ObjId]| {
+        use crate::ir::executor::{execute, BindEnv};
+        use crate::ir::expr::Value;
+        let mut env = BindEnv::new().with_source(obj_id).with_controller(controller);
+        for (k, v) in &match_bindings {
+            env = env.with_var(k, v.clone());
+        }
+        if let Some(&tgt) = targets.first() {
+            let v = if tgt == state.us_id || tgt == state.opp_id {
+                Value::Player(state.who_pid(tgt))
+            } else {
+                Value::Obj(tgt)
+            };
+            env = env.with_var("target", v);
+        }
+        let _ = execute(&body, state, &env);
+    }));
+    // "Another target X" is expressed by excluding the ability's own source from
+    // every object filter in the spec. Harmless for specs that already exclude self.
+    let target_spec = crate::predicates::exclude_from_target_spec(target_spec, obj_id);
+    pending.push(TriggerContext { source_name, controller, target_spec, effect });
 }
 
 /// Push a vec of `TriggerContext`s onto the stack as triggered ability items.

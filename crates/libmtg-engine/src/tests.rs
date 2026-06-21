@@ -5400,6 +5400,140 @@
         );
     }
 
+    // ── §46b: IR Ward + CEMod::GrantAbility primitives ─────────────────────────
+
+    /// Build a `PayLife(2)` action — the canonical ward cost.
+    fn ward_cost_pay2() -> crate::ir::action::Action {
+        crate::ir::action::Action::PayLife {
+            who: crate::ir::action::Who::You,
+            amount: crate::ir::expr::Expr::Num(2),
+        }
+    }
+
+    /// Insert an opponent-controlled spell on the stack targeting `target`.
+    fn opp_spell_targeting(state: &mut SimState, caster: PlayerId, target: ObjId) -> ObjId {
+        let spell_id = state.alloc_id();
+        state.objects.insert(spell_id, GameObject {
+            id: spell_id,
+            catalog_key: "Brainstorm".to_string(),
+            owner: caster,
+            controller: caster,
+            is_token: false,
+            materialized: None,
+            counters: HashMap::new(),
+            ci_timestamp: 0,
+            role: ObjectRole::StackSpell(SpellState {
+                effect: None,
+                chosen_targets: vec![target],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+        });
+        state.stack.push(spell_id);
+        spell_id
+    }
+
+    /// IR Ward (printed directly): an opponent's spell targeting the holder triggers
+    /// it; resolving the trigger runs `Action::Ward`, and the default strategy pays,
+    /// so the caster loses 2 life and the spell survives.
+    #[test]
+    fn test_ir_ward_triggers_and_taxes_opponent() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mut bear = creature("Warded Bear", 2, 2);
+        bear.abilities = vec![crate::card_defs::ir_ward(ward_cost_pay2())];
+        let bear_id = add_perm_with_def(&mut state, PlayerId::Us, &bear, BattlefieldState::new());
+        recompute(&mut state);
+
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, bear_id);
+        let opp_life = state.player(PlayerId::Opp).life;
+
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Opp,
+        );
+        let ctx = state.pending_triggers.iter().position(|c| c.source_name == "Warded Bear")
+            .map(|i| state.pending_triggers.remove(i))
+            .expect("IR Ward should fire for an opponent's spell targeting the holder");
+
+        // Resolve the ward trigger — default strategy pays the cost.
+        ctx.effect.call(&mut state, 1, &[]);
+        assert_eq!(state.player(PlayerId::Opp).life, opp_life - 2,
+            "ward: targeting player pays 2 life");
+        assert!(state.stack.contains(&spell_id), "ward: spell survives when the cost is paid");
+    }
+
+    /// IR Ward does not trigger on the holder's controller's own spells (CR 702.21
+    /// — "a spell or ability an opponent controls").
+    #[test]
+    fn test_ir_ward_ignores_own_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mut bear = creature("Warded Bear", 2, 2);
+        bear.abilities = vec![crate::card_defs::ir_ward(ward_cost_pay2())];
+        let bear_id = add_perm_with_def(&mut state, PlayerId::Us, &bear, BattlefieldState::new());
+        recompute(&mut state);
+
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Us, bear_id); // Us casts it
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+        assert!(!state.pending_triggers.iter().any(|c| c.source_name == "Warded Bear"),
+            "ward must not fire for the controller's own spell");
+    }
+
+    /// `CEMod::GrantAbility`: a static "other creatures you control have Ward" grants
+    /// the IR ward to a vanilla creature, which then triggers on opponent targeting.
+    #[test]
+    fn test_ir_grant_ability_grants_ward_to_other_creature() {
+        use crate::ir::ability::{Ability, AbilityKind};
+        use crate::ir::ce::CEMod;
+        use crate::ir::context::Ctx;
+        use crate::ir::expr::{Expr, Filter};
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Granter: "Other creatures you control have Ward—Pay 2 life."
+        let mut granter = creature("Ward Granter", 1, 1);
+        granter.abilities = vec![Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::GrantAbility(Box::new(crate::card_defs::ir_ward(ward_cost_pay2())))],
+                scope: Some(Filter(Expr::And(
+                    Box::new(Expr::Eq(
+                        Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )),
+                    Box::new(Expr::Not(Box::new(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::It)),
+                        Box::new(Expr::Ctx(Ctx::Source)),
+                    )))),
+                ))),
+                condition: None,
+            },
+            text: Some("Other creatures you control have Ward—Pay 2 life."),
+        }];
+        add_perm_with_def(&mut state, PlayerId::Us, &granter, BattlefieldState::new());
+        let vanilla_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
+        recompute(&mut state);
+
+        // The grant landed on the vanilla creature's materialized def.
+        let mat = state.def_of(vanilla_id).expect("materialized def");
+        assert!(!mat.granted_abilities.is_empty(),
+            "vanilla creature should carry the granted Ward ability");
+
+        // Opponent spell targeting the vanilla creature → granted ward fires.
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, vanilla_id);
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Opp,
+        );
+        assert!(state.pending_triggers.iter().any(|c| c.source_name == "Grizzly Bears"),
+            "granted Ward should fire for the vanilla creature targeted by an opponent");
+    }
+
     /// Long Goodbye's "This spell can't be countered" still works after the ProhibitionDef refactor.
     #[test]
     fn test_long_goodbye_still_uncounterable() {

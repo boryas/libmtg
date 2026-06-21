@@ -114,6 +114,14 @@ pub enum Action {
     Counter {
         target: Expr,
     },
+    /// Ward (CR 702.21): the body of a ward trigger. The triggering spell
+    /// (`Ctx::Var("triggered_obj")`) is countered unless its controller
+    /// (`triggered_actor`) pays `cost`. `cost` is an `Action` (a payment, e.g.
+    /// `PayLife(2)` or `PayMana`), the same shape `ward_pay_or_counter` consumes.
+    /// Bridges to that helper, which runs the opponent's pay-or-decline decision.
+    Ward {
+        cost: Box<Action>,
+    },
     /// "Offer to cast X" — subsumes cast-without-paying, flashback, cascade,
     /// madness, Snapcaster, etc. All are `OfferCast` with different
     /// `permissions` CEMods.

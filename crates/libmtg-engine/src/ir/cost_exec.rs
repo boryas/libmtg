@@ -459,6 +459,7 @@ fn walk(
         | Action::Surveil { .. }
         | Action::Look { .. }
         | Action::Counter { .. }
+        | Action::Ward { .. }
         | Action::OfferCast { .. }
         | Action::CopySpell { .. }
         | Action::ApplyCE { .. }

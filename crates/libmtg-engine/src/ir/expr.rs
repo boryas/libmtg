@@ -59,6 +59,10 @@ pub enum Expr {
     /// a CE use the runtime-chosen color as a value: Painter's Servant adds
     /// `AddColor(ChosenColor(Source))`.
     ChosenColor(Box<Expr>),      // Color | Unit
+    /// The chosen targets of the spell/ability `obj` (CR 601.2c), as an `ObjSet`
+    /// (empty if `obj` isn't a spell or has none). Lets a Ward trigger test "this
+    /// spell targets me": `Contains(Source, ChosenTargets(triggered_obj))`.
+    ChosenTargets(Box<Expr>),    // ObjSet
 
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64
