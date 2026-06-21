@@ -433,10 +433,9 @@
       const games = $('games').valueAsNumber || 2000;
       const mull = $('mull').value;
       const cutoff = $('cutoff').valueAsNumber || 3;
-      // The objective is P(cast by the cut-off), so there's no reason to simulate
-      // past it: the turn cap is just the cut-off.
-      const turns = cutoff;
-      const sim = (n) => run_goldfish_asap_web(deck, n, turns, cutoff, mull);
+      // The objective is P(cast by the cut-off), and the sim's turn cap IS the cut-off
+      // (no reason to simulate past the turn the objective is judged on).
+      const sim = (n) => run_goldfish_asap_web(deck, n, cutoff, mull);
       const btn = $('run'), prog = $('progress'), fill = $('progress-fill'), plabel = $('progress-label');
       btn.disabled = true; btn.textContent = 'Simulating…';
       prog.hidden = false; fill.style.width = '0'; plabel.textContent = '';

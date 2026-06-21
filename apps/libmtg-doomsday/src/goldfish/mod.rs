@@ -147,7 +147,6 @@ fn run_goldfish_inner<F>(
     deck: &[(String, i32, String)],
     games: u32,
     protection: &[&str],
-    max_turns: u8,
     cutoff: u8,
     make_us: F,
     evaluator: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync>,
@@ -176,7 +175,9 @@ where
             opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
             evaluate_card: Arc::clone(&evaluator),
             objective: Box::new(GoldfishObjective::default()),
-            max_turns,
+            // The cutoff IS the horizon: there is no reason to simulate past the turn
+            // by which the objective is judged. (`.max(1)` guards a degenerate 0.)
+            max_turns: cutoff.max(1),
             on_play: None,
         };
         let state = run_game(scenario, &mut rng);
@@ -231,15 +232,14 @@ pub fn run_goldfish(
     deck: &[(String, i32, String)],
     games: u32,
     protection: &[&str],
-    max_turns: u8,
+    cutoff: u32,
 ) -> GoldfishStats {
     let evaluator = dd_card_evaluator(MatchupInfo::default());
     run_goldfish_inner(
         deck,
         games,
         protection,
-        max_turns,
-        0, // baseline has no cutoff objective / STATS line
+        cutoff.min(u8::MAX as u32) as u8,
         || Box::new(DoomsdayStrategy::new(MatchupInfo::default())),
         evaluator,
     )
@@ -253,10 +253,9 @@ pub fn run_goldfish_asap(
     deck: &[(String, i32, String)],
     games: u32,
     protection: &[&str],
-    max_turns: u8,
     cutoff: u32,
 ) -> GoldfishStats {
-    run_goldfish_asap_mode(deck, games, protection, max_turns, cutoff, MullMode::default())
+    run_goldfish_asap_mode(deck, games, protection, cutoff, MullMode::default())
 }
 
 /// Like [`run_goldfish_asap`], but with an explicit opening-hand [`MullMode`]
@@ -265,7 +264,6 @@ pub fn run_goldfish_asap_mode(
     deck: &[(String, i32, String)],
     games: u32,
     protection: &[&str],
-    max_turns: u8,
     cutoff: u32,
     mode: MullMode,
 ) -> GoldfishStats {
@@ -273,7 +271,6 @@ pub fn run_goldfish_asap_mode(
         deck,
         games,
         protection,
-        max_turns,
         cutoff.min(u8::MAX as u32) as u8,
         move || Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, mode)),
         dd_goldfish_evaluator(),
@@ -307,7 +304,7 @@ pub fn run_goldfish_compare(
             opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
             evaluate_card: dd_goldfish_evaluator(),
             objective: Box::new(GoldfishObjective::default()),
-            max_turns: 10,
+            max_turns: (cutoff.min(u8::MAX as u32) as u8).max(1),
             on_play: None,
         };
         let state = run_game(scenario, &mut rng);
@@ -332,14 +329,12 @@ pub fn run_goldfish_baseline_aggro(
     deck: &[(String, i32, String)],
     games: u32,
     protection: &[&str],
-    max_turns: u8,
     cutoff: u32,
 ) -> GoldfishStats {
     run_goldfish_inner(
         deck,
         games,
         protection,
-        max_turns,
         cutoff.min(u8::MAX as u32) as u8,
         move || Box::new(strategy::AggroMullStrategy::new(
             Box::new(DoomsdayStrategy::new(MatchupInfo::default())),
@@ -378,7 +373,7 @@ pub fn run_goldfish_calibration(
             opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
             evaluate_card: dd_goldfish_evaluator(),
             objective: Box::new(GoldfishObjective::default()),
-            max_turns: 10,
+            max_turns: (cutoff.min(u8::MAX as u32) as u8).max(1),
             on_play: None,
         };
         let state = run_game(scenario, &mut rng);
@@ -437,7 +432,7 @@ pub fn run_goldfish_audit_det(
             opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
             evaluate_card: dd_goldfish_evaluator(),
             objective: Box::new(GoldfishObjective::default()),
-            max_turns: 10,
+            max_turns: (cutoff.min(u8::MAX as u32) as u8).max(1),
             on_play: None,
         };
         let state = run_game(scenario, &mut rng);
@@ -522,8 +517,9 @@ mod tests {
     #[test]
     fn asap_casts_doomsday_reliably() {
         // The cast-ASAP strategy, following the recipe solver, should resolve
-        // Doomsday in the large majority of goldfish games on a real list.
-        let stats = run_goldfish_asap(&sample_doomsday_deck(), 300, DEFAULT_PROTECTION, 10, 4);
+        // Doomsday in the large majority of goldfish games given a generous horizon.
+        // (Cutoff = horizon here, so a long cutoff exercises the full cast tail.)
+        let stats = run_goldfish_asap(&sample_doomsday_deck(), 300, DEFAULT_PROTECTION, 10);
         assert_eq!(stats.games, 300);
         assert!(
             stats.fail_rate() < 0.2,
@@ -540,8 +536,8 @@ mod tests {
         // cutoff turn at least as often as the (mana-development-oriented) baseline.
         let deck = sample_doomsday_deck();
         let cutoff = 4u8;
-        let asap = run_goldfish_asap(&deck, 600, DEFAULT_PROTECTION, 10, cutoff as u32);
-        let base = run_goldfish(&deck, 600, DEFAULT_PROTECTION, 10);
+        let asap = run_goldfish_asap(&deck, 600, DEFAULT_PROTECTION, cutoff as u32);
+        let base = run_goldfish(&deck, 600, DEFAULT_PROTECTION, cutoff as u32);
         let asap_by = asap.cast_by(cutoff);
         let base_by = base.cast_by(cutoff);
         // Generous slack for Monte-Carlo noise; the directional claim is what matters.

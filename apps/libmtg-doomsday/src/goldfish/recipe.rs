@@ -88,6 +88,37 @@ fn is_black_ritual(def: &CardDef) -> bool {
     }
 }
 
+/// A ritual's GENERIC pip count (the `{N}` in its cost), clamped to the `ritual_gp`
+/// histogram width. Assumes one black seed pip (every modelled ritual is `{…}{B}`);
+/// any non-black colored pips are approximated as generic (rare for rituals). So
+/// Dark Ritual `{B}` → 0, Cabal Ritual `{1}{B}` → 1.
+fn ritual_generic_cost(def: &CardDef) -> usize {
+    let (mut generic, mut other_colored, mut num) = (0usize, 0usize, 0usize);
+    for ch in def.mana_cost().trim().chars() {
+        if let Some(d) = ch.to_digit(10) {
+            num = num * 10 + d as usize;
+            continue;
+        }
+        generic += std::mem::take(&mut num);
+        if matches!(ch, 'W' | 'U' | 'R' | 'G' | 'C') {
+            other_colored += 1;
+        }
+    }
+    (generic + num + other_colored).min(3)
+}
+
+/// A renewable mana source that makes some NON-black mana (and no black) — e.g.
+/// Island. It can pay a ritual's generic pip but never a black pip.
+fn produces_nonblack_mana(def: &CardDef) -> bool {
+    !produces_black(def)
+        && def.mana_abilities().iter().any(|ma| {
+            matches!(ma.source_zone, SourceZone::Battlefield)
+                && ma.timing == ActivationTiming::Default
+                && ma.condition.is_none()
+                && !ma.costs.requires_sac_self()
+        })
+}
+
 /// A free (0-mana) artifact that taps/sacs for `color` — Lotus Petal, generically.
 /// LED is excluded: its mana ability is `Instant`-timed, so `produces_color` is false.
 fn is_free_artifact_of_color(def: &CardDef, color: Color) -> bool {
@@ -132,8 +163,16 @@ struct Caps {
     /// whose members are CONSUMED when spent and never restored. Spending one to
     /// pay a pip removes it from BBB; this is the cost cycle, not a special case.
     pool: u32,
-    /// One-shot ritual spells (each: 1-black seed → 3 black), consumed on cast.
-    rituals: u32,
+    /// One-shot ritual spells bucketed by GENERIC pip count (index = `{N}` in the
+    /// cost, assuming a single black seed pip): index 0 = Dark Ritual `{B}`, index 1
+    /// = Cabal Ritual `{1}{B}`. Each yields 3 black; generic pips draw from any mana.
+    ritual_gp: [u32; 4],
+    /// NON-black renewable mana (lands that don't make black — e.g. Island): pays a
+    /// ritual's generic pip but never a black pip. Split like the black lands;
+    /// `other_inplay` is already on the battlefield.
+    other_untapped: u32,
+    other_tapped: u32,
+    other_inplay: u32,
     /// Is the once-per-turn land drop still available THIS turn?
     land_drop: bool,
 }
@@ -191,6 +230,8 @@ fn project_inner(state: &SimState, who: PlayerId, count_fetches: bool) -> Caps {
             c.pool += 1;
         } else if renewable_produces_color(def, Color::Black) || use_fetch(def) {
             c.renew_inplay += 1;
+        } else if produces_nonblack_mana(def) {
+            c.other_inplay += 1;
         }
     }
 
@@ -215,9 +256,15 @@ fn project_inner(state: &SimState, who: PlayerId, count_fetches: bool) -> Caps {
                 } else {
                     c.untapped_lands += 1;
                 }
+            } else if produces_nonblack_mana(def) {
+                if def.enters_tapped() {
+                    c.other_tapped += 1;
+                } else {
+                    c.other_untapped += 1;
+                }
             }
         } else if is_black_ritual(def) {
-            c.rituals += 1;
+            c.ritual_gp[ritual_generic_cost(def)] += 1;
         }
     }
     c
@@ -229,21 +276,32 @@ fn project_inner(state: &SimState, who: PlayerId, count_fetches: bool) -> Caps {
 /// producer gives +1; the land drop gives +1 once; a ritual converts a 1-black
 /// seed into 3. Sound + complete for the all-black goal (every producer is
 /// dominant toward black).
-fn reach_black(need: i32, flat: u32, land_gated: u32, rituals: u32, land_drop: bool) -> bool {
+fn reach_black(need: i32, black: u32, other: u32, ritual_gp: [u32; 4]) -> bool {
     if need <= 0 {
         return true;
     }
-    // a flat producer (+1)
-    if flat > 0 && reach_black(need - 1, flat - 1, land_gated, rituals, land_drop) {
+    // pay a black pip of `need` from a black producer (+1).
+    if black > 0 && reach_black(need - 1, black - 1, other, ritual_gp) {
         return true;
     }
-    // the land drop (+1, once)
-    if land_drop && land_gated > 0 && reach_black(need - 1, flat, land_gated - 1, rituals, false) {
-        return true;
-    }
-    // a ritual: produce its 1-black seed from the rest, then it yields 3 (≥ need ≤ 3)
-    if rituals > 0 && need <= 3 && reach_black(1, flat, land_gated, rituals - 1, land_drop) {
-        return true;
+    // fire a ritual: it yields 3 black (covers any need ≤ 3). Pay its g generic pips
+    // from `other` (non-black) mana first, the rest from black; then produce the 1
+    // black seed pip plus any generic-paid-from-black from what remains — which may
+    // chain another ritual.
+    if need <= 3 {
+        for g in 0..ritual_gp.len() {
+            if ritual_gp[g] == 0 {
+                continue;
+            }
+            let g = g as u32;
+            let from_other = g.min(other);
+            let seed = 1 + (g - from_other); // 1 black seed pip + generic paid from black
+            let mut rg = ritual_gp;
+            rg[g as usize] -= 1;
+            if reach_black(seed as i32, black, other - from_other, rg) {
+                return true;
+            }
+        }
     }
     false
 }
@@ -273,12 +331,33 @@ fn renew_black_by_turn(c: &Caps, turn: u32) -> u32 {
     c.renew_inplay + online_lands(c.untapped_lands, c.tapped_lands, c.land_drop, turn)
 }
 
+/// NON-black renewable mana online by turn `turn` (for paying ritual generic pips).
+/// The land drop is SHARED with the black lands, so this is (total lands online) −
+/// (black lands online): black lands win the early drops, and what's left is the
+/// non-black mana available — e.g. Swamp + Island gives 1 black / 0 other on turn 1,
+/// 1 black / 1 other on turn 2.
+fn other_online_by_turn(c: &Caps, turn: u32) -> u32 {
+    let black_lands = online_lands(c.untapped_lands, c.tapped_lands, c.land_drop, turn);
+    let total_lands = online_lands(
+        c.untapped_lands + c.other_untapped,
+        c.tapped_lands + c.other_tapped,
+        c.land_drop,
+        turn,
+    );
+    c.other_inplay + total_lands.saturating_sub(black_lands)
+}
+
 /// Can BBB (3 black) be produced on turn `turn` with `pool` one-shot tokens still
 /// available? Renewable capacity is per-turn (it returns each untap); the pool and
 /// rituals are consumables. `pool` is passed explicitly so a caller that already
 /// spent a token (e.g. a sac'd petal paying a pip) charges BBB the depleted pool.
 fn bbb_on_turn(c: &Caps, turn: u32, pool: u32) -> bool {
-    reach_black(3, renew_black_by_turn(c, turn) + pool, 0, c.rituals, false)
+    reach_black(
+        3,
+        renew_black_by_turn(c, turn) + pool,
+        other_online_by_turn(c, turn),
+        c.ritual_gp,
+    )
 }
 
 /// Earliest turn (≤ `max_turn`) BBB is producible with `pool` one-shot tokens, or
@@ -704,7 +783,8 @@ pub fn mana_gap(state: &SimState, who: PlayerId) -> Vec<&'static str> {
     // `dp` extra petals (pool) / `dr` extra rituals added to hand.
     let suff = |du: u32, dp: u32, dr: u32| {
         let renew = c.renew_inplay + online_lands(c.untapped_lands + du, c.tapped_lands, c.land_drop, 1);
-        reach_black(3, renew + c.pool + dp, 0, c.rituals + dr, false)
+        // Gap heuristic treats every ritual as Dark-style (one black seed, no generic).
+        reach_black(3, renew + c.pool + dp, 0, [c.ritual_gp.iter().sum::<u32>() + dr, 0, 0, 0])
     };
     let mut gap = Vec::new();
     if suff(0, 0, 0) {
@@ -751,7 +831,7 @@ pub fn bundles(deck: &[(String, i32, String)]) -> Vec<Bundle> {
     let cap_petals = max_petals.min(3);
     let cap_rituals = max_rituals.min(1);
 
-    let suff = |b: Bundle| reach_black(3, b.lands + b.petals, 0, b.rituals, false);
+    let suff = |b: Bundle| reach_black(3, b.lands + b.petals, 0, [b.rituals, 0, 0, 0]);
     let dominated = |b: Bundle, found: &[Bundle]| {
         found.iter().any(|s| {
             *s != b && s.lands <= b.lands && s.petals <= b.petals && s.rituals <= b.rituals && suff(*s)
@@ -907,9 +987,15 @@ fn fold_known_card(c: &mut Caps, has_dd: &mut bool, def: &CardDef, key: &str) {
             c.untapped_lands += 1;
         } else if produces_black(def) {
             c.tapped_lands += 1;
+        } else if produces_nonblack_mana(def) {
+            if def.enters_tapped() {
+                c.other_tapped += 1;
+            } else {
+                c.other_untapped += 1;
+            }
         }
     } else if is_black_ritual(def) {
-        c.rituals += 1;
+        c.ritual_gp[ritual_generic_cost(def)] += 1;
     }
 }
 
@@ -1832,6 +1918,15 @@ mod tests {
         assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), None);
     }
 
+    #[test]
+    fn cabal_ritual_swamp_island_is_turn_two() {
+        // Swamp + Island + Cabal Ritual ({1}{B}) + Doomsday. Cabal's generic pip needs
+        // a SECOND mana source, so this is a turn-2 line, not turn-1: T1 play a land,
+        // T2 play the other, tap both for {1}{B} → Cabal adds BBB → cast Doomsday.
+        let s = setup(&[], &["Swamp", "Island", "Cabal Ritual", "Doomsday"], &[]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(2));
+    }
+
     // ── deterministic payoff acquisition (Personal Tutor) ─────────────────────
 
     #[test]
@@ -2215,7 +2310,7 @@ mod tests {
         for (name, deck) in decks {
             let counts = categorize_pt(&deck, &catalog);
             std::env::set_var("KEEP7", "1");
-            let k7 = crate::run_goldfish_asap(&deck, 2_000, crate::DEFAULT_PROTECTION, 6, 4);
+            let k7 = crate::run_goldfish_asap(&deck, 2_000, crate::DEFAULT_PROTECTION, 4);
             std::env::remove_var("KEEP7");
             println!("\n=== {name} === (open-7 deterministic floor; strategy keeps every 7)");
             for t in 1..=4i64 {

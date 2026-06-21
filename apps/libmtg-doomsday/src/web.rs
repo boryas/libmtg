@@ -216,13 +216,12 @@ pub fn decode_snapshot(token: &str) -> Result<String, JsValue> {
 pub fn run_goldfish_asap_web(
     deck_text: &str,
     games: u32,
-    max_turns: u8,
     cutoff: u32,
     mull_mode: &str,
 ) -> String {
     let deck = Decklist::parse_text(deck_text).to_engine_deck();
     let mode = MullMode::from_str_or_default(mull_mode);
-    let stats = run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, max_turns, cutoff, mode);
+    let stats = run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, cutoff, mode);
     serde_json::to_string(&stats).unwrap()
 }
 

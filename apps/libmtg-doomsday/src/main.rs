@@ -52,9 +52,6 @@ struct Args {
     /// Number of games to simulate.
     #[arg(long, default_value_t = 10_000)]
     games: u32,
-    /// Turn cap per game.
-    #[arg(long, default_value_t = 10)]
-    max_turns: u8,
     /// Which pilot to simulate.
     #[arg(long, value_enum, default_value_t = StrategyKind::Asap)]
     strategy: StrategyKind,
@@ -131,19 +128,19 @@ fn main() -> ExitCode {
         StrategyKind::BaselineAggro => "baseline+aggro-mull",
     };
     eprintln!(
-        "Goldfishing {} games ({label}, cap {} turns, cutoff T{})…",
-        args.games, args.max_turns, args.cutoff
+        "Goldfishing {} games ({label}, cutoff T{})…",
+        args.games, args.cutoff
     );
     let stats = match args.strategy {
-        StrategyKind::Baseline => run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.max_turns),
+        StrategyKind::Baseline => run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.cutoff),
         StrategyKind::Asap => run_goldfish_asap_mode(
-            &deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff, args.mull_mode.into(),
+            &deck, args.games, DEFAULT_PROTECTION, args.cutoff, args.mull_mode.into(),
         ),
         StrategyKind::BaselineAggro => libmtg_doomsday::run_goldfish_baseline_aggro(
-            &deck, args.games, DEFAULT_PROTECTION, args.max_turns, args.cutoff,
+            &deck, args.games, DEFAULT_PROTECTION, args.cutoff,
         ),
     };
-    print_report(&stats, args.max_turns, args.cutoff);
+    print_report(&stats, args.cutoff);
     ExitCode::SUCCESS
 }
 
@@ -171,9 +168,9 @@ fn bar(c: u32, max: u32, width: usize) -> String {
     "█".repeat(n)
 }
 
-fn print_report(s: &GoldfishStats, max_turns: u8, cutoff: u32) {
+fn print_report(s: &GoldfishStats, cutoff: u32) {
     println!("\n══ Doomsday goldfish — {} games ══", s.games);
-    let cutoff_t = cutoff.min(max_turns as u32) as u8;
+    let cutoff_t = cutoff.min(u8::MAX as u32) as u8;
     println!(
         "  P(cast by T{}): {:.1}%   ← cut-off objective",
         cutoff_t,
@@ -210,7 +207,7 @@ fn print_report(s: &GoldfishStats, max_turns: u8, cutoff: u32) {
 
     println!("\n  cast-turn distribution:");
     let max_c = s.cast_turn.values().copied().max().unwrap_or(1);
-    for t in 1..=max_turns {
+    for t in 1..=cutoff_t {
         let c = s.cast_turn.get(&t).copied().unwrap_or(0);
         println!(
             "    T{:<2} {:>7} {:>5.1}% │{}",
@@ -237,11 +234,11 @@ fn print_report(s: &GoldfishStats, max_turns: u8, cutoff: u32) {
 
     // Cumulative "cast by turn N" curve.
     use textplots::{Chart, Plot, Shape};
-    let pts: Vec<(f32, f32)> = (1..=max_turns)
+    let pts: Vec<(f32, f32)> = (1..=cutoff_t)
         .map(|t| (t as f32, (100.0 * s.cast_by(t)) as f32))
         .collect();
     println!("\n  P(cast by turn) %:");
-    Chart::new(100, 50, 1.0, max_turns as f32)
+    Chart::new(100, 50, 1.0, cutoff_t as f32)
         .lineplot(&Shape::Lines(&pts))
         .display();
 }
