@@ -107,11 +107,11 @@
 
       <p><b>How the pilot mulligans.</b> Selectable, because the headline rate shifts a lot with
         how hard you ship hands:
-        <b>Realistic</b> (default) keeps a hand with real mana <i>and</i> a concrete plan to cast
-        Doomsday (a guaranteed line; or DD + a black source + a castable cantrip; or a Tamiyo
-        deploy; or two castable cantrips off a black source), and ships no-mana / flooded /
-        do-nothing hands &mdash; an explicit, inspectable rule that does <i>not</i> consult
-        <code>g</code>. <b>Keep 7</b> never mulligans (raw deck speed). <b>Aggressive</b> re-draws
+        <b>Realistic</b> (default) ignores "air" cards (Wasteland, LED, Thassa, …) and keeps a hand
+        with real mana <i>and</i> a concrete plan: a guaranteed line; Doomsday + a black source + a
+        dig; a deterministic Tamiyo flip by turn&nbsp;2; or, unflooded, two looks (or one look + a
+        supporter). It ships no-mana / flooded / do-nothing hands &mdash; an explicit, inspectable
+        rule that does <i>not</i> consult <code>g</code>. <b>Keep 7</b> never mulligans (raw deck speed). <b>Aggressive</b> re-draws
         any hand below a high <code>g</code> threshold (0.55 / 0.38 / 0.20 by mulligan) &mdash;
         fast but it ships almost every imperfect seven and so flattens deck differences.</p>
 
@@ -185,32 +185,31 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260620-mullmodes';
-    const WASM_VER = '20260620-mullmodes';
+      from '../pkg/libmtg_doomsday.js?v=20260620-realistic';
+    const WASM_VER = '20260620-realistic';
 
     const REPO = 'boryas/libmtg';
 
     // Precise per-mode descriptions, shown live under the selector so the user knows
     // exactly what they're getting. Kept in sync with `goldfish::mull::MullMode`.
     const MULL_DESC = {
-      realistic: `<p>A fixed rule that reads the cards in hand. It never uses the solver's
-        probability. Keep the hand if any of the following is true:</p>
+      realistic: `<p>A fixed rule that reads the cards in hand &mdash; it never uses the solver's
+        probability. First, <b>air cards are ignored</b> (Wasteland, Cavern, Thassa's Oracle, LED,
+        Edge of Autumn, Unearth, Jace) &mdash; the hand is read as if they weren't drawn. Then keep
+        if any of these holds:</p>
         <ol>
-          <li>It can cast Doomsday by the cut-off with no draws &mdash; a guaranteed line.</li>
-          <li>It has at least one colored land, fewer than four lands in total, and one of these
-            plans:
-            <ul>
-              <li>Doomsday, a black source, and a castable cantrip to find the rest;</li>
-              <li>Tamiyo, a blue land to cast it, and either a castable cantrip or a fetch;</li>
-              <li>two castable cantrips and a black source.</li>
-            </ul>
-          </li>
+          <li>it can cast Doomsday by the cut-off with no draws &mdash; a guaranteed line;</li>
+          <li><b>Doomsday</b> in hand + a black source + a castable look (dig for the rest);</li>
+          <li>a deterministic <b>Tamiyo</b> flip by turn 2;</li>
+          <li>not flooded (under four real lands), a black source, and <b>either</b> two castable
+            looks <b>or</b> one look plus a supporter.</li>
         </ol>
-        <p>Otherwise, mulligan. So the hands it ships are those with no colored land, four or more
-        lands, or no plan above.</p>
-        <p class="note">A cantrip is <i>castable</i> when you can make blue to cast it, or when it
-        draws for free (Street Wraith). A black source is a black land or a Lotus Petal; a Dark
-        Ritual on its own does not count, because it needs black mana to cast.</p>`,
+        <p>Otherwise mulligan &mdash; the hands it ships have no real mana, four or more lands
+        (flood), or no plan above.</p>
+        <p class="note">A <i>castable look</i> is a cantrip you can cast off a blue <b>land</b> (a
+        lone Lotus Petal doesn't count &mdash; it's one-shot), or a free cantrip (Street Wraith). A
+        <i>black source</i> is a black land or a Petal (a bare Dark Ritual doesn't count). A
+        <i>supporter</i> is interaction or a threat body (Tamiyo / Murktide / …).</p>`,
       keep7: `<p>Never mulligans &mdash; it always keeps the opening seven. This shows the deck's
         raw speed, with no mulligan decisions mixed in.</p>`,
       aggressive: `<p>Mulligans whenever the solver's estimate of <code>P(cast by the cut-off)</code>

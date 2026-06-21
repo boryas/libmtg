@@ -62,8 +62,23 @@ impl MullMode {
     }
 }
 
+/// Cards that contribute to no realistic plan in a Doomsday hand — they're read as if
+/// they weren't in the hand (a junk-heavy hand thus has too few real cards to form a
+/// plan, and mulligans). A curated list because they're context-free dead weight here:
+/// the alt win-con and tutor-target (Thassa's Oracle), reanimation with no target
+/// (Unearth), the hand-discard mana rock (LED), a marginal cantrip (Edge of Autumn), the
+/// secondary win-con (Jace), and the utility lands (Wasteland, Cavern of Souls). Extend
+/// as imported lists surface more. (Excess *real* lands are handled separately, as flood.)
+const AIR: &[&str] = &[
+    "Thassa's Oracle", "Unearth", "Lion's Eye Diamond", "Edge of Autumn",
+    "Jace, Wielder of Mysteries", "Wasteland", "Cavern of Souls",
+];
+
+fn is_air(name: &str) -> bool { AIR.contains(&name) }
+
 /// Explicit, inspectable signals over the opening hand — plain card counts plus one
-/// trustworthy deterministic-solver fact. No `p_cast_by`.
+/// trustworthy deterministic-solver fact. No `p_cast_by`. Named-air cards (see [`AIR`])
+/// are excluded from every count, as if they weren't drawn.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HandSignals {
     /// Lands (a fetch counts) that tap blue UNCONDITIONALLY.
@@ -87,18 +102,27 @@ pub struct HandSignals {
     pub has_tamiyo: bool,
     /// A fetch in hand (fixes colours / fuels the Tamiyo flip).
     pub fetch: bool,
+    /// Real non-mana, non-dig, non-payoff cards — interaction (Force/Daze/Thoughtseize)
+    /// and threat bodies (Tamiyo/Murktide/Bowmasters). The "support" that carries a
+    /// thin-dig hand over the top.
+    pub supporters: u32,
     /// The solver finds a guaranteed Doomsday line by the cutoff.
     pub det_line: bool,
+    /// The hand can deterministically flip Tamiyo by turn 2 (the fast-Tamiyo plan).
+    pub tami_fast_flip: bool,
 }
 
 impl HandSignals {
-    /// Can the hand make blue at all (to cast a cantrip / Tamiyo's pip)? A lone Petal
-    /// counts (for one blue spell).
-    fn can_blue(&self) -> bool { self.blue_lands >= 1 || self.petals >= 1 }
+    /// A STABLE blue source — a blue land. A lone Petal does NOT count: casting a cantrip
+    /// by burning your only one-shot isn't a reliable dig (the difference between a Swamp
+    /// hand and an Underground Sea hand).
+    fn stable_blue(&self) -> bool { self.blue_lands >= 1 }
     /// A real mana base: at least one colored LAND (one-shots don't count).
     fn mana_base(&self) -> bool { self.colored_lands >= 1 }
     /// A real black source toward BBB (land or Petal — a bare Ritual needs a seed).
     fn black_src(&self) -> bool { self.black_lands >= 1 || self.petals >= 1 }
+    /// Flooded — too many real (non-air) colored lands; excess lands are dead weight.
+    fn flooded(&self) -> bool { self.colored_lands >= 4 }
 }
 
 /// Does `def` tap for `color` from the battlefield UNCONDITIONALLY (default timing,
@@ -114,19 +138,24 @@ fn taps_for(def: &CardDef, color: Color) -> bool {
 }
 
 /// A castable card-selection "look": a cast-to-dig cantrip (Ponder/Brainstorm/Consider)
-/// when blue is available, or a free cycling cantrip (Street Wraith) regardless.
-fn is_castable_look(def: &CardDef, can_blue: bool) -> bool {
-    (def.digs_on_resolve() && can_blue) || def.has_cycling_draw()
+/// only when there's a STABLE blue source to cast it off (a blue land, not a one-shot
+/// Petal), or a free cycling cantrip (Street Wraith) regardless of mana.
+fn is_castable_look(def: &CardDef, stable_blue: bool) -> bool {
+    (def.digs_on_resolve() && stable_blue) || def.has_cycling_draw()
 }
 
-/// Compute the [`HandSignals`] for `who`'s current hand at the given cutoff.
+/// Compute the [`HandSignals`] for `who`'s current hand at the given cutoff. Named-air
+/// cards (see [`AIR`]) are skipped in every count, as if they weren't drawn.
 pub fn hand_signals(state: &SimState, who: PlayerId, cutoff: u32) -> HandSignals {
     let mut s = HandSignals {
         det_line: recipe::deterministic_cast_turn(state, who, cutoff).is_some(),
+        // Fast Tamiyo plan: a deterministic flip by turn 2 (see `recipe::tamiyo_flip_turn`).
+        tami_fast_flip: recipe::tamiyo_flip_turn(state, who, 2).is_some(),
         ..Default::default()
     };
-    // Pass 1: mana base (so `can_blue` is known before classifying looks).
+    // Pass 1: mana base (so `can_blue` is known before classifying looks). Skip air.
     for card in state.hand_of(who) {
+        if is_air(&card.catalog_key) { continue; }
         let role = recipe::card_role(state, who, card.id);
         let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
         if def.is_land() {
@@ -146,33 +175,45 @@ pub fn hand_signals(state: &SimState, who: PlayerId, cutoff: u32) -> HandSignals
             _ => {}
         }
         if card.catalog_key == "Tamiyo, Inquisitive Student" { s.has_tamiyo = true; }
+        // A "supporter" = a real card that isn't mana, a dig, or the payoff: i.e.
+        // interaction (Force/Daze/Thoughtseize) or a threat body (Tamiyo/Murktide/…).
+        let is_dig = def.digs_on_resolve() || def.has_cycling_draw();
+        let is_mana = def.is_land() || matches!(role, CardRole::Ritual | CardRole::Petal);
+        let is_payoff = matches!(role, CardRole::Payoff | CardRole::PayoffTutor);
+        if !is_dig && !is_mana && !is_payoff { s.supporters += 1; }
     }
-    // Pass 2: castable looks (needs the mana base from pass 1).
-    let can_blue = s.can_blue();
+    // Pass 2: castable looks (needs the mana base from pass 1). Skip air. A blue cantrip
+    // counts only off a STABLE blue source (a blue land), not a one-shot Petal.
+    let stable_blue = s.stable_blue();
     for card in state.hand_of(who) {
+        if is_air(&card.catalog_key) { continue; }
         if let Some(def) = state.catalog.get(&card.catalog_key) {
-            if is_castable_look(def, can_blue) { s.castable_looks += 1; }
+            if is_castable_look(def, stable_blue) { s.castable_looks += 1; }
         }
     }
     s
 }
 
-/// The "Realistic" keep decision for an opening hand (the G1 checklist). Returns true
-/// to KEEP. Mulligan-depth handling (always keep at 4) is applied by [`should_mulligan`].
+/// The "Realistic" keep decision for an opening hand — keep iff the (air-filtered) hand
+/// has a viable plan. Returns true to KEEP. Mulligan-depth handling (always keep at 4)
+/// is applied by [`should_mulligan`]. The plans:
+/// - **fast dd**: a guaranteed line, or Doomsday + a black source + a dig for the mana;
+/// - **tami flip**: a deterministic Tamiyo flip by turn 2;
+/// - **dig**: a black source + either two castable looks, or one look backed by a real
+///   supporter on a stable (≥2-land) base — both only if not flooded.
 pub fn realistic_keep(s: &HandSignals) -> bool {
-    // A guaranteed line (incl. DD + reachable BBB) is a snap keep, over everything.
+    // Strong combo plans — keep regardless of air.
     if s.det_line { return true; }
-    // Bad shapes: no real mana, or flooded.
-    if !s.mana_base() { return false; }
-    if s.lands >= 4 { return false; }
-    // A real plan to assemble Doomsday:
-    // - Doomsday in hand + a black source + a look to find the rest of the mana;
-    if s.has_dd && s.black_src() && s.castable_looks >= 1 { return true; }
-    // - a Tamiyo plan: deployable (blue land) + something to fuel the flip;
-    if s.has_tamiyo && s.blue_lands >= 1 && (s.castable_looks >= 1 || s.fetch) { return true; }
-    // - enough digging to find the combo AND a black source to actually cast it. Two
-    //   cantrips with no black mana just dig toward a Doomsday you can't pay for.
-    if s.castable_looks >= 2 && s.black_src() { return true; }
+    if !s.mana_base() { return false; } // no real colored land → nothing to cast off
+    if s.has_dd && s.black_src() && s.castable_looks >= 1 { return true; } // fast dd (have payoff)
+    if s.tami_fast_flip { return true; } // tami flip
+    // Dig plans — need a black source and a non-flooded mana base.
+    if s.black_src() && !s.flooded() {
+        if s.castable_looks >= 2 { return true; } // enough dig to find the combo
+        // one look is enough with real backup (interaction / a threat body); a thin dig
+        // with no support (just mana) isn't a plan.
+        if s.castable_looks >= 1 && s.supporters >= 1 { return true; }
+    }
     false
 }
 
@@ -260,11 +301,18 @@ mod tests {
             (true,  &["Swamp", "Thoughtseize", "Unearth", "Misty Rainforest", "Consider", "Brainstorm", "Wasteland"]), // N
             (true,  &["Daze", "Consider", "Tamiyo, Inquisitive Student", "Underground Sea", "Ponder", "Dark Ritual", "Ponder"]), // O
             (true,  &["Marsh Flats", "Street Wraith", "Wasteland", "Daze", "Edge of Autumn", "Wasteland", "Ponder"]), // P
+            // one land but a dig + a wall of interaction/threats (low air) — a keep.
+            (true,  &["Underground Sea", "Thoughtseize", "Force of Will", "Murktide Regent", "Murktide Regent", "Ponder", "Force of Will"]), // batch #12
+            // H but the land is a blue Sea, so Consider IS castable off stable mana — a
+            // terrible-but-lowest-end keep (dig + support).
+            (true,  &["Consider", "Underground Sea", "Force of Will", "Orcish Bowmasters", "Edge of Autumn", "Lotus Petal", "Lotus Petal"]), // H-with-Sea
             // ── mulls ──
             (false, &["Lotus Petal", "Ponder", "Murktide Regent", "Tamiyo, Inquisitive Student", "Wasteland", "Dark Ritual", "Dark Ritual"]), // B (no colored land)
             (false, &["Tamiyo, Inquisitive Student", "Force of Will", "Daze", "Ponder", "Edge of Autumn", "Brainstorm", "Thoughtseize"]), // C (no land)
             (false, &["Cavern of Souls", "Force of Will", "Murktide Regent", "Ponder", "Wasteland", "Swamp", "Orcish Bowmasters"]), // D (Ponder uncastable, no blue)
-            (false, &["Consider", "Swamp", "Force of Will", "Orcish Bowmasters", "Edge of Autumn", "Lotus Petal", "Lotus Petal"]), // H (1 look, no DD/Tamiyo)
+            // H: its only land is a black Swamp, so Consider is castable only by burning a
+            // one-shot Petal — not a real dig. No stable look ⇒ no plan ⇒ mull.
+            (false, &["Consider", "Swamp", "Force of Will", "Orcish Bowmasters", "Edge of Autumn", "Lotus Petal", "Lotus Petal"]), // H
             // round 4: two Ponders but NO black source — digs toward an uncastable DD.
             (false, &["Thoughtseize", "Ponder", "Daze", "Unearth", "Island", "Ponder", "Wasteland"]), // r4-#12
             // round 4: explosive mana but only one look and no DD/Tamiyo — speculative.
