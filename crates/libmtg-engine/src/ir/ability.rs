@@ -67,6 +67,13 @@ pub enum AbilityKind {
     Restriction {
         action: ActionKind,
         subject: Filter,
+        /// CR "… unless they're mana abilities". Only meaningful for
+        /// `ActionKind::Activate`: when `true`, the restriction does not apply to
+        /// mana abilities (Pithing Needle, Disruptor Flute — name a card, shut off
+        /// its non-mana abilities); when `false`, it applies to every activated
+        /// ability including mana (Null Rod, Karn — shut off artifact mana too).
+        /// Ignored for `Cast`.
+        mana_exempt: bool,
     },
     /// Continuous effect: while source is active, apply these CE mods.
     Static {

@@ -1169,7 +1169,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     for card in state.permanents_of(who) {
         // Null Rod / Karn: artifact mana abilities can't be activated. Source-keyed
         // action-Restriction (mana abilities are activated abilities — CR 605.1a).
-        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, card.id) { continue; }
+        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, card.id, true) { continue; }
         let mas = state.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
         let bf = match card.bf() { Some(bf) => bf, None => continue };
         for (idx, ma) in mas.iter().enumerate() {
@@ -1188,7 +1188,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     }
     // Hand-zone mana abilities (e.g. Simian Spirit Guide).
     for card in state.hand_of(who) {
-        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, card.id) { continue; }
+        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, card.id, true) { continue; }
         let mas = state.catalog.get(&card.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
         for (idx, ma) in mas.iter().enumerate() {
             if !ma.activatable { continue; }
@@ -1232,7 +1232,7 @@ pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<Ma
             if used.contains(id) { return None; }
             if c.controller != who || !c.in_zone(Zone::Battlefield) { return None; }
             // Null Rod / Karn: don't plan to tap an artifact whose abilities are restricted.
-            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, *id) { return None; }
+            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, *id, true) { return None; }
             let bf = c.bf()?;
             let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
@@ -1250,7 +1250,7 @@ pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<Ma
     let find_hand = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize)> {
         state.hand_of(who).find_map(|c| {
             if used.contains(&c.id) { return None; }
-            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, c.id) { return None; }
+            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, c.id, true) { return None; }
             let mas = state.catalog.get(&c.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, _) = mas.iter().enumerate().find(|(_, ma)| {
                 ma.activatable

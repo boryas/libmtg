@@ -156,7 +156,7 @@ prioritized first; this is its own architectural pass.
 |----------------------+--------------+----------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Cavern of Souls      | CreatureType | ~bf.etb_choice~      | Colored mana restricted to creature spells (coarsened — ignores named type). Uncounterable (TODO: not enforced). *TODO*: proper fix requires tagging mana with conditions/effects so the engine can track "this mana was produced by Cavern for creature type X" and enforce uncounterable + type restriction at spend time. |
 | Painter's Servant    | Color        | ~bf.etb_choice~      | L5 CE adding chosen color globally                                                                                                                                                                                                                                                                                                                                     |
-| Disruptor Flute      | CardName     | ~bf.etb_choice~      | L3 CE: +3 cost & suppress abilities                                                                                                                                                                                                                                                                                                                                    |
+| Disruptor Flute      | CardName     | ~bf.etb_choice~      | IR ~Static{CastingCostPlus(3)}~ (+3 cost) & ~Restriction{Activate, mana_exempt}~ (suppress non-mana abilities), both scoped ~Name(It)==ChosenName(Source)~ |
 | Engineered Explosives | (sunburst)  | ~obj.counters[Charge]~ | Reads ~resolving_costs_ctx.chosen_x~                                                                                                                                                                                                                                                                                                                                 |
 
 ** Placeholder/incomplete ETB
@@ -176,7 +176,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Dauthi Voidwalker       | Opponent GY → Exile + Void counter          | ~dv_replacement_check~                                                                         |
 | Painter's Servant       | Stores color, registers L5 CE               | ~etb_self_replacement~                                                                         |
 | Cavern of Souls         | Stores creature type                         | ~etb_self_replacement~                                                                         |
-| Disruptor Flute         | Stores card name, registers L3 CE           | ~etb_self_replacement~                                                                         |
+| Disruptor Flute         | Stores card name only (effects are IR abilities) | ~etb_self_replacement~                                                                    |
 | Engineered Explosives   | Sets Charge counters from X                 | ~etb_self_check~                                                                               |
 | MKM surveil duals (10)  | Sets ~bf.tapped = true~                     | IR ~Replacement~ + ~EventMod::EnterTapped~                                                     |
 | Mistrise Village        | Conditionally sets ~bf.tapped~              | IR ~Replacement~ + ~condition~ over battlefield (lowercase "mountain"/"forest" subtypes)       |
@@ -277,7 +277,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card                         | Effect                                                        |
 |------------------------------+---------------------------------------------------------------|
 | Omniscience                  | Adds free-cast ~AlternateCost~ to all non-lands               |
-| Disruptor Flute              | +3 casting cost + suppress abilities for named card           |
+| Disruptor Flute              | +3 casting cost + suppress non-mana abilities for named card (now IR — see ETB-choice table) |
 | Dauthi Voidwalker (activated) | ~castable = true~ + free-cast on exiled card (EndOfTurn)     |
 | Grafdigger's Cage            | ~castable = false~ for GY/library cards                       |
 

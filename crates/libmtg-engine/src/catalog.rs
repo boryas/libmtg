@@ -1180,17 +1180,6 @@ impl CardDef {
         })
     }
 
-    pub(crate) fn abilities_mut(&mut self) -> &mut [AbilityDef] {
-        match &mut self.kind {
-            CardKind::Land(l) => &mut l.abilities,
-            CardKind::Creature(c) => &mut c.abilities,
-            CardKind::Artifact(a) => &mut a.abilities,
-            CardKind::Planeswalker(p) => &mut p.abilities,
-            CardKind::Enchantment(e) => &mut e.abilities,
-            CardKind::Instant(_) | CardKind::Sorcery(_) => &mut [],
-        }
-    }
-
     /// Mutable access to the owning `Vec<AbilityDef>` for this card's kind,
     /// for push/append. Returns `None` for spell kinds (which have no
     /// activated-ability list).

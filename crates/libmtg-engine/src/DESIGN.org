@@ -725,6 +725,37 @@ gate (uniform, not a recompute flag-set: unconditionally correct for granted abi
 karn off their ~castable/activatable~ CE closures; removed dead ~mana_abilities_mut~.
 CE-closure count 10 → 7. Full contract in [[file:STRATEGY.org][STRATEGY.org]]. 439 green.
 
+*** 2026-06-20 (later) — Grafdigger's Cage: both 3a and 3b on one card
+First card exercising the occurrence-prohibition (3a) *and* action-restriction (3b)
+mechanisms together. "Creatures can't ETB from GY/library" → ~Prohibition~ over
+~EventPattern::Or([ZoneChange GY→BF, ZoneChange Library→BF], creature)~; "players can't
+cast from GY/library" → ~Restriction{Cast, subject: ZoneOf(It) ∈ {GY,library}}~. Two new
+IR primitives: ~EventPattern::Or~ (dual of ~And~; first match's bindings win) and
+~Prohibition.active_zone: Option<ZoneKindSel>~ — gates a *static-permanent* prohibition's
+source by zone (~Some(Battlefield)~: Cage stops prohibiting off the battlefield), ~None~ for
+self-scoping ~It==Source~ patterns (Emrakul/Long Goodbye can't-be-countered, where a Stack
+gate is both redundant *and* wrong for callers that fake a stack spell without a
+~StackSpell~ role — that broke ~test_long_goodbye~ until it became ~None~). Retired Cage's
+~ProhibitionDef~ closure + ~castable=false~ CE. The two old CE tests had gone vacuous
+(zone-default ~castable=false~; a CI that no longer exists) → rewrote to assert
+~action_restricted(Cast)~ directly. CE-closure count 7 → 6. 439 green.
+
+*** 2026-06-20 (later) — Disruptor Flute: runtime-chosen-name CE + mana exemption
+Ported the last per-name "name a card" CE off closures. Oracle (verified): "spells with
+the chosen name cost {3} more; activated abilities of sources with the chosen name can't be
+activated *unless they're mana abilities*". Three primitives:
+- ~Expr::ChosenName(obj)~ — reads ~bf.etb_choice~ as a ~Name~ (battlefield-state
+  projection, no CE axis). Lets a CE scope by *runtime-chosen data*: ~Eq(Name(It),
+  ChosenName(Source))~. The ETB closure now *only* stores the choice; no CE pushed.
+- ~CEMod::CastingCostPlus(Expr)~ wired into ~cemod_to_modifier~ (writes
+  ~casting_cost_modifier += N~); "which cards" lives in the ~Static~ scope, not the mod.
+- ~Restriction.mana_exempt: bool~ + ~action_restricted(.., is_mana_ability)~ — CR "unless
+  they're mana abilities". Flute = ~true~ (shuts off non-mana only); Null Rod / Karn =
+  ~false~ (shut off Moxen too). Threaded ~is_mana_ability~ through all activate call sites
+  (mana enumerators / auto-tap = true; ~ability_available~ = false). Removed now-dead
+  ~abilities_mut~. CE-closure count 6 → 5 (remaining: omniscience, sneak_attack, kaito,
+  hexing_squelcher, painters_servant). 439 green.
+
 * Known seams
 
 *Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less

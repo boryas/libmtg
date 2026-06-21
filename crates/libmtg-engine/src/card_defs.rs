@@ -1278,6 +1278,7 @@ fn grafdiggers_cage() -> CardDef {
     let cant_cast = Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Cast,
+            mana_exempt: false,
             subject: Filter(Expr::Or(
                 Box::new(Expr::Eq(
                     Box::new(zone_of_it()),
@@ -3475,6 +3476,7 @@ fn lavinia_azorius_renegade() -> CardDef {
     let cant_cast = Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Cast,
+            mana_exempt: false,
             subject: Filter(Expr::And(
                 Box::new(Expr::Not(Box::new(Expr::Eq(
                     Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
@@ -3890,7 +3892,12 @@ fn leyline_of_the_void() -> CardDef {
 /// As this enters, choose a card name. Spells with that name cost {3} more to cast.
 /// Activated abilities of sources with that name can't be activated unless they're mana abilities.
 fn disruptor_flute() -> CardDef {
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, ActionKind};
+    use crate::ir::ce::CEMod;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter};
+
+    let mut card = CardDef::new(
         "Disruptor Flute",
         CardKind::Artifact(ArtifactData {
             mana_cost: "2".to_string(),
@@ -3900,37 +3907,51 @@ fn disruptor_flute() -> CardDef {
         Some(40),
         vec![], CardLayout::Normal, None,
         vec![],  // no trigger_defs
+        // ETB (CR 614.12 "as ~ enters, choose a card name") — store the choice in
+        // etb_choice; the ongoing effects below read it. No CE pushed here anymore.
         vec![etb_self_replacement(|source_id, id, controller, state, _t| {
             let ChoiceResult::CardName(chosen) =
                 state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::CardName, st)) else { return };
             if let Some(bf) = state.permanent_bf_mut(id) {
-                bf.etb_choice = Some(ChoiceResult::CardName(chosen.clone()));
+                bf.etb_choice = Some(ChoiceResult::CardName(chosen));
             }
-            // L3TextEffects CE: cost +3 and ability suppression for matching card name.
-            let controller = state.objects.get(&id).map_or(PlayerId::Us, |o| o.controller);
-            let ts = state.next_ci_timestamp();
-            state.continuous_instances.push(ContinuousInstance {
-                source_id, controller,
-                layer: ContinuousLayer::L3TextEffects,
-                reads: vec![],
-                writes: vec![],
-                timestamp: ts,
-                filter: Arc::new(|_, _, _| true),
-                modifier: Arc::new(move |def, _| {
-                    if def.name == chosen {
-                        def.casting_cost_modifier += 3;
-                        for ab in def.abilities_mut() {
-                            ab.activatable = false;
-                        }
-                    }
-                }),
-                expiry: Expiry::WhileSourceOnBattlefield,
-
-            });
         })],
         vec![],  // no prohibition_defs
-        vec![],  // no static_ability_defs
-    )
+        vec![],  // ongoing effects are IR abilities (below)
+    );
+
+    // Both ongoing clauses scope to "a card whose name == the name this Flute
+    // chose" — `Eq(Name(It), ChosenName(Source))`, evaluated per candidate with
+    // the Flute bound as Source.
+    let names_match = || Filter(Expr::Eq(
+        Box::new(Expr::Name(Box::new(Expr::Ctx(Ctx::It)))),
+        Box::new(Expr::ChosenName(Box::new(Expr::Ctx(Ctx::Source)))),
+    ));
+
+    card.abilities = vec![
+        // "Spells with the chosen name cost {3} more to cast." A casting-cost
+        // surcharge CE (recompute writes casting_cost_modifier += 3 on matches).
+        Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::CastingCostPlus(Expr::Num(3))],
+                scope: Some(names_match()),
+                condition: None,
+            },
+            text: Some("Spells with the chosen name cost {3} more to cast."),
+        },
+        // "Activated abilities of sources with the chosen name can't be activated
+        // unless they're mana abilities." An action-Restriction (mana_exempt) over
+        // the named card, consulted at activation-legality.
+        Ability {
+            kind: AbilityKind::Restriction {
+                action: ActionKind::Activate,
+                mana_exempt: true,
+                subject: names_match(),
+            },
+            text: Some("Activated abilities of sources with the chosen name can't be activated unless they're mana abilities."),
+        },
+    ];
+    card
 }
 
 /// Legendary Planeswalker — Karn {4}. Loyalty 5.
@@ -3961,6 +3982,7 @@ fn karn_the_great_creator() -> CardDef {
     card.abilities = vec![Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Activate,
+            mana_exempt: false,
             subject: Filter(Expr::And(
                 Box::new(Expr::Contains(
                     Box::new(Expr::TypeLit(CardType::Artifact)),
@@ -5473,7 +5495,8 @@ fn prismatic_ending() -> CardDef {
 // ── Null Rod ─────────────────────────────────────────────────────────────────
 
 /// Null Rod — {2} Artifact. "Activated abilities of artifacts can't be activated."
-/// Static L6 CE that sets activatable = false on all artifact abilities (both players').
+/// An action-Restriction (Activate, mana_exempt=false) over artifacts — symmetric,
+/// and it covers mana abilities too (shuts off Moxen). CR 101.2 "can't beats can".
 fn null_rod() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, ActionKind};
     use crate::ir::context::Ctx;
@@ -5496,6 +5519,7 @@ fn null_rod() -> CardDef {
     card.abilities = vec![Ability {
         kind: AbilityKind::Restriction {
             action: ActionKind::Activate,
+            mana_exempt: false,
             subject: Filter(Expr::Contains(
                 Box::new(Expr::TypeLit(CardType::Artifact)),
                 Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),

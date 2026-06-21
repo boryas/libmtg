@@ -49,6 +49,11 @@ pub enum Expr {
     /// if it is attached to nothing. Lets an equipment's continuous effect scope
     /// to its equipped creature as data: `Eq(It, AttachedTo(Source))`.
     AttachedTo(Box<Expr>),       // Obj | Unit
+    /// The card name `obj` chose as it entered (CR 614.12 "as ~ enters, choose
+    /// a card name"), read from `etb_choice`, as `Name` — or `Unit` if it made
+    /// no name choice. Lets a "name a card" effect scope by data:
+    /// `Eq(Name(It), ChosenName(Source))` (Disruptor Flute, Pithing Needle).
+    ChosenName(Box<Expr>),       // Name | Unit
 
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64

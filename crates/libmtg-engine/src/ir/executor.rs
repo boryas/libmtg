@@ -1232,6 +1232,21 @@ pub(crate) fn cemod_to_modifier(
                 }),
             })
         }
+        // Cost-to-cast surcharge (CR 601.2f / 614.12 "costs {N} more"): a
+        // generic-mana add baked onto the matching def's casting cost. Scope
+        // (which cards) lives in the static-ability filter; the modifier just
+        // applies the delta. Disruptor Flute names a card → +3.
+        CEMod::CastingCostPlus(amount) => {
+            let amt = expect_num(eval_expr(amount, state, env)) as i32;
+            Some(CeBuild {
+                layer: ContinuousLayer::L3TextEffects,
+                reads: vec![],
+                writes: vec![],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    def.casting_cost_modifier += amt;
+                }),
+            })
+        }
         // Cast-permission / rules-text mods (CR 613.1b layer 3): mutate the def
         // via the shared env-less hook (Uncounterable, CastableFrom, AltCost).
         CEMod::Uncounterable | CEMod::CastableFrom(_) | CEMod::AltCost(_) => {
@@ -1335,6 +1350,13 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             match state.permanent_bf(o).and_then(|bf| bf.attached_to) {
                 Some(id) => Value::Obj(id),
                 None => Value::Unit,
+            }
+        }
+        Expr::ChosenName(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            match state.permanent_bf(o).and_then(|bf| bf.etb_choice.as_ref()) {
+                Some(crate::ChoiceResult::CardName(n)) => Value::Name(n.clone()),
+                _ => Value::Unit,
             }
         }
         Expr::Unblocked(e) => {
@@ -1604,10 +1626,16 @@ pub(crate) fn matches(
 /// option producers call this as an AND-NOT gate over *permission*, making "can't
 /// beats can" order-independent. The action analogue of the event `Prohibition` walk
 /// in `fire_event` Stage 1.
+///
+/// `is_mana_ability` reflects whether the call is gating a mana ability (CR 605):
+/// a `mana_exempt` restriction (Pithing Needle / Disruptor Flute "unless they're
+/// mana abilities") does not forbid mana abilities. Pass `false` for casts and
+/// non-mana activations.
 pub(crate) fn action_restricted(
     state: &SimState,
     kind: crate::ir::ability::ActionKind,
     subject_id: ObjId,
+    is_mana_ability: bool,
 ) -> bool {
     use crate::ir::ability::AbilityKind;
     state.objects.iter().any(|(id, obj)| {
@@ -1616,8 +1644,10 @@ pub(crate) fn action_restricted(
         }
         state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
             card_def.abilities.iter().any(|ab| {
-                if let AbilityKind::Restriction { action, subject } = &ab.kind {
-                    *action == kind && {
+                if let AbilityKind::Restriction { action, subject, mana_exempt } = &ab.kind {
+                    *action == kind
+                        && !(is_mana_ability && *mana_exempt)
+                        && {
                         let env = BindEnv::new().with_source(*id).with_controller(obj.controller);
                         matches(subject, subject_id, state, &env)
                     }
@@ -2260,10 +2290,11 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::PT);
             walk_reads(e, out);
         }
-        Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e) => {
+        Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e)
+        | Expr::ChosenName(e) => {
             // Battlefield-state projection — no CE axis applies (combat /
-            // attachment state isn't a continuous-effect characteristic
-            // surface). Walk the operand for reads but emit no axis push.
+            // attachment / ETB-choice state isn't a continuous-effect
+            // characteristic surface). Walk the operand but emit no axis push.
             walk_reads(e, out);
         }
         // Mana cost is a printed characteristic; layer 1 copy is the only
