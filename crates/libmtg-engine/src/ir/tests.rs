@@ -293,7 +293,7 @@ mod deps {
     #[test]
     fn color_writers() {
         assert_eq!(writes_of(&CEMod::SetColors(vec![Color::Red])), vec![Axis::Color]);
-        assert_eq!(writes_of(&CEMod::AddColor(Color::Blue)), vec![Axis::Color]);
+        assert_eq!(writes_of(&CEMod::AddColor(Expr::ColorLit(Color::Blue))), vec![Axis::Color]);
     }
 
     #[test]

@@ -762,6 +762,19 @@ activated *unless they're mana abilities*". Three primitives:
 Removed now-dead ~abilities_mut~. CE-closure count 6 → 5 (remaining: omniscience,
 sneak_attack, kaito, hexing_squelcher, painters_servant). 439 green.
 
+*** 2026-06-21 — Painter's Servant: runtime-chosen *color* (reuses the Flute machinery)
+The chosen-name → chosen-color analog of Flute, with no restriction — just an L5 color CE.
+- ~Expr::ChosenColor(obj)~ — reads ~bf.etb_choice~ as a ~Color~ (sibling of ~ChosenName~).
+- ~CEMod::AddColor~ now takes an ~Expr~ (was a literal ~Color~) and is wired into
+  ~cemod_to_modifier~: the color is evaluated once against the source's frame and baked into
+  the L5 modifier (Unit → no CI, so nothing is added). A fixed grant uses ~AddColor(ColorLit
+  c)~; Painter uses ~AddColor(ChosenColor(Source))~.
+- Card: ETB closure stores the color only; the effect is ~Static{ AddColor(ChosenColor(
+  Source)) }~ with ~scope: None~ (every object, all zones — the FoW-pitch / hand-card test
+  confirms it reaches non-battlefield cards). The three colors-outcome tests pass unchanged
+  (they assert materialized ~colors~, not the mechanism). CE-closure count 5 → 4 (remaining:
+  omniscience, sneak_attack, kaito, hexing_squelcher). 439 green.
+
 * Known seams
 
 *Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less

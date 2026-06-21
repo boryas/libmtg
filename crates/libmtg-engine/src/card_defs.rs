@@ -3823,28 +3823,18 @@ fn tamiyo_inquisitive_student() -> CardDef {
 /// Layer 5 continuous effect, expires when Painter leaves the battlefield.
 /// CR 613.4 (color-changing effects apply at layer 5).
 fn painters_servant() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::ce::CEMod;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+
+    // ETB (CR 614.12 "as ~ enters, choose a color") — store the choice only.
     let repl = etb_self_replacement(|source_id, id, controller, state, _t| {
         let ChoiceResult::Color(chosen) =
             state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::Color, st)) else { return };
         if let Some(bf) = state.permanent_bf_mut(id) {
             bf.etb_choice = Some(ChoiceResult::Color(chosen));
         }
-        // Register L5 CE: all objects everywhere gain chosen_color while Painter is in play.
-        let ts = state.next_ci_timestamp();
-        state.continuous_instances.push(ContinuousInstance {
-            source_id,
-            controller,
-            layer: ContinuousLayer::L5ColorEffects,
-            reads: vec![],
-            writes: vec![CeWrites::Color],
-            timestamp: ts,
-            filter: Arc::new(|_, _, _| true),
-            modifier: Arc::new(move |def, _| {
-                if !def.colors.contains(&chosen) { def.colors.push(chosen); }
-            }),
-            expiry: Expiry::WhileSourceOnBattlefield,
-
-        });
     });
     let mut def = CardDef::new(
         "Painter's Servant",
@@ -3857,6 +3847,17 @@ fn painters_servant() -> CardDef {
         vec![],
         vec![],
     );
+    // "All cards, spells, and permanents are the chosen color in addition to their
+    // other colors." An L5 IR Static (scope None = every object) that adds the color
+    // read from this Painter's own ETB choice. Expires with the source by default.
+    def.abilities = vec![Ability {
+        kind: AbilityKind::Static {
+            mods: vec![CEMod::AddColor(Expr::ChosenColor(Box::new(Expr::Ctx(Ctx::Source))))],
+            scope: None,
+            condition: None,
+        },
+        text: Some("All cards, spells, and permanents are the chosen color in addition to their other colors."),
+    }];
     // Painter's Servant is an Artifact Creature; the constructor derives only one type from
     // CardKind, so we push the second type explicitly.
     def.types.push(CardType::Artifact);

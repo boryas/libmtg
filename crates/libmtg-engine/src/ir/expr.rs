@@ -54,6 +54,11 @@ pub enum Expr {
     /// no name choice. Lets a "name a card" effect scope by data:
     /// `Eq(Name(It), ChosenName(Source))` (Disruptor Flute, Pithing Needle).
     ChosenName(Box<Expr>),       // Name | Unit
+    /// The color `obj` chose as it entered ("as ~ enters, choose a color"), read
+    /// from `etb_choice`, as `Color` — or `Unit` if it made no color choice. Lets
+    /// a CE use the runtime-chosen color as a value: Painter's Servant adds
+    /// `AddColor(ChosenColor(Source))`.
+    ChosenColor(Box<Expr>),      // Color | Unit
 
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64

@@ -1218,6 +1218,25 @@ pub(crate) fn cemod_to_modifier(
                 }),
             })
         }
+        CEMod::AddColor(color_expr) => {
+            // CR 613.4 layer 5: add a color to every object in scope. The color is
+            // an Expr so it can be runtime-chosen (Painter's Servant reads its own
+            // `ChosenColor`); evaluate it once here against the source's frame and
+            // bake it in. No chosen color (Unit) → no CI, so nothing is added.
+            let Value::Color(color) = eval_expr(color_expr, state, env) else {
+                return None;
+            };
+            Some(CeBuild {
+                layer: ContinuousLayer::L5ColorEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Color],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    if !def.colors.contains(&color) {
+                        def.colors.push(color);
+                    }
+                }),
+            })
+        }
         CEMod::AddKeyword(kw) => {
             // CR 613.1f layer 6: grant a keyword ability (trample, haste, …).
             let kw = *kw;
@@ -1356,6 +1375,13 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             let o = expect_obj(eval_expr(e, state, env));
             match state.permanent_bf(o).and_then(|bf| bf.etb_choice.as_ref()) {
                 Some(crate::ChoiceResult::CardName(n)) => Value::Name(n.clone()),
+                _ => Value::Unit,
+            }
+        }
+        Expr::ChosenColor(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            match state.permanent_bf(o).and_then(|bf| bf.etb_choice.as_ref()) {
+                Some(crate::ChoiceResult::Color(c)) => Value::Color(*c),
                 _ => Value::Unit,
             }
         }
@@ -2316,7 +2342,7 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             walk_reads(e, out);
         }
         Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e)
-        | Expr::ChosenName(e) => {
+        | Expr::ChosenName(e) | Expr::ChosenColor(e) => {
             // Battlefield-state projection — no CE axis applies (combat /
             // attachment / ETB-choice state isn't a continuous-effect
             // characteristic surface). Walk the operand but emit no axis push.

@@ -47,7 +47,10 @@ pub enum CEMod {
 
     // ── layer 5 (color) ──────────────────────────────────────────────────
     SetColors(Vec<Color>),
-    AddColor(Color),
+    /// Add the color the `Expr` evaluates to (CR 105 / 613.4). An `Expr` rather
+    /// than a literal `Color` so a runtime-chosen color works: Painter's Servant
+    /// adds `ChosenColor(Source)`; a fixed grant uses `ColorLit(c)`.
+    AddColor(Expr),
 
     // ── layer 6 (abilities) ──────────────────────────────────────────────
     AddKeyword(Keyword),
