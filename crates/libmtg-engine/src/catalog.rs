@@ -1441,60 +1441,6 @@ pub(crate) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: 
 }
 
 
-pub(crate) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
-    match event {
-        // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
-        GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
-            if *active_player == controller =>
-        {
-            pending.push(TriggerContext {
-                source_name: "Tamiyo, Inquisitive Student".into(),
-                controller,
-                target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
-                    if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
-                        do_create_token("Clue Token", controller, state, t);
-                    }
-                })),
-            });
-        }
-        // Controller draws their 3rd card this turn.
-        GameEvent::Draw { controller: drawer, draw_index: 3, .. }
-            if *drawer == controller =>
-        {
-            pending.push(TriggerContext {
-                source_name: "Tamiyo, Inquisitive Student".into(),
-                controller,
-                target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, _t, _targets| {
-                    // Only transform if still on the front face.
-                    if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
-                    // "Exile Tamiyo, then return her transformed" — a genuinely new
-                    // object (CR 712 / 701.28): exile, re-enter the battlefield (fresh,
-                    // summoning-sick), then flip to the back face. `Transform` sets the
-                    // planeswalker's starting loyalty.
-                    use crate::ir::action::Action;
-                    use crate::ir::expr::{Expr, ZoneKindSel};
-                    let seq = Action::Sequence(vec![
-                        Action::Exile { target: Expr::ObjLit(source_id), bind_as: None },
-                        Action::Move {
-                            what: Expr::ObjLit(source_id),
-                            to: ZoneKindSel::Battlefield,
-                            to_owner: None,
-                            bind_as: None,
-                        },
-                        Action::Transform { target: Expr::ObjLit(source_id) },
-                    ]);
-                    let env = crate::ir::executor::BindEnv::new().with_controller(controller);
-                    crate::ir::executor::execute(&seq, state, &env);
-                })),
-            });
-        }
-        _ => {}
-    }
-}
-
-
 /// Check all triggers for the given event.
 /// Part 1: Card-bound triggers — walks all objects, checks trigger_defs from catalog,
 ///         filtered by `active_when` predicate. No instances needed.

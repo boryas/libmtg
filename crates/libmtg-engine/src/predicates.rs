@@ -44,11 +44,6 @@ pub(crate) fn ir_subtype(s: &str) -> Filter {
 /// A token.
 pub(crate) fn ir_token() -> Filter { Filter(Expr::IsToken(Box::new(it()))) }
 
-/// Exactly the object with id `id` (`It == ObjLit(id)`).
-pub(crate) fn ir_obj(id: ObjId) -> Filter {
-    Filter(Expr::Eq(Box::new(it()), Box::new(Expr::ObjLit(id))))
-}
-
 /// Evaluate a `Filter` against object `id` with `It`/`Source` = `id` and the
 /// controller bound to `id`'s controller. The standard way to check a filter
 /// that gates on a specific object (ability conditions, protection sources).

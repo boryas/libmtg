@@ -3785,6 +3785,11 @@ fn hexing_squelcher() -> CardDef {
 /// Back: Tamiyo, Seasoned Scholar — planeswalker with +2 loyalty ability.
 /// Transforms after controller draws their 3rd card in a turn. CR 701.28.
 fn tamiyo_inquisitive_student() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, StepScope, TriggerSpec};
+    use crate::ir::action::{Action, TokenSpec, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::event_log::Window;
+    use crate::ir::expr::{EventFilter, Expr, Filter, ZoneKindSel};
     let back = CardDef::new(
         "Tamiyo, Seasoned Scholar",
         CardKind::Planeswalker(PlaneswalkerData {
@@ -3828,17 +3833,88 @@ fn tamiyo_inquisitive_student() -> CardDef {
     let mut front_data = CreatureData::new("U", 0, 3);
     front_data.legendary = true;
 
-    CardDef::new(
+    let mut front = CardDef::new(
         "Tamiyo, Inquisitive Student",
         CardKind::Creature(front_data),
         parse_colors("U", false, false),
         None,
         vec![Supertype::Legendary], CardLayout::DoubleFaced, Some(Box::new(back)),
-        vec![TriggerDef { check: Arc::new(tamiyo_check), active_when: tp_on_battlefield() }],
-        vec![],
-        vec![],
-        vec![],
-    )
+        vec![], vec![], vec![], vec![],
+    );
+
+    // "Whenever Tamiyo attacks, create a Clue token." Step-gated on "Tamiyo is
+    // attacking" (the attacking flag is set after attackers are declared).
+    let clue_on_attack = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::AtStep {
+                step: StepKind::DeclareAttackers,
+                who: StepScope::You,
+                condition: Some(Expr::Attacking(Box::new(Expr::Ctx(Ctx::Source)))),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::CreateToken {
+                who: IrWho::You,
+                spec: TokenSpec {
+                    name: "Clue Token",
+                    types: vec![CardType::Artifact],
+                    subtypes: vec!["Clue"],
+                    colors: vec![],
+                    power: None,
+                    toughness: None,
+                    keywords: vec![],
+                },
+                n: Expr::Num(1),
+                bind_as: None,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Whenever Tamiyo, Inquisitive Student attacks, create a Clue token."),
+    };
+
+    // "Whenever you draw your third card each turn, exile Tamiyo, then return her to
+    // the battlefield transformed." "Third card this turn" is a log count, and
+    // exile→return is the fresh-object transform (CR 603.6e / 712), so a new untapped
+    // Tamiyo, Seasoned Scholar (back face) comes back.
+    let flip_on_third_draw = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::Draw {
+                    who: Filter(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::It)),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )),
+                },
+                condition: Some(Expr::And(
+                    // still on the front face (don't re-flip the back)
+                    Box::new(Expr::IsFrontFace(Box::new(Expr::Ctx(Ctx::Source)))),
+                    Box::new(Expr::Eq(
+                        Box::new(Expr::EventCount {
+                            window: Window::ThisTurn,
+                            filter: Box::new(EventFilter::Draw {
+                                who: Some(Box::new(Expr::Ctx(Ctx::Controller))),
+                            }),
+                        }),
+                        Box::new(Expr::Num(3)),
+                    )),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sequence(vec![
+                Action::Exile { target: Expr::Ctx(Ctx::Source), bind_as: None },
+                Action::Move {
+                    what: Expr::Ctx(Ctx::Source),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+                Action::Transform { target: Expr::Ctx(Ctx::Source) },
+            ]),
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Whenever you draw your third card each turn, exile Tamiyo, Inquisitive Student, then return her to the battlefield transformed."),
+    };
+    front.abilities = vec![clue_on_attack, flip_on_third_draw];
+    front
 }
 
 /// Artifact Creature {2}, 1/3. ETB: choose a color; all objects everywhere gain that color.

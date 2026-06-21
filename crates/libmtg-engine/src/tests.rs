@@ -2034,22 +2034,23 @@
     #[test]
     fn test_tamiyo_flip_on_third_draw() {
         let mut state = make_state();
-        add_default_perm(&mut state, PlayerId::Us, "Tamiyo, Inquisitive Student");
-
-        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false };
-        let (result, _) = fire_triggers(&ev, &state);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
-
-        let mut state2 = state;
+        let tamiyo_id = add_default_perm(&mut state, PlayerId::Us, "Tamiyo, Inquisitive Student");
         // Tap Tamiyo first: "exile, then return transformed" must yield a FRESH object,
         // so the tapped status (and any other bf state) is reset on the way back.
-        let tamiyo_id = state2.permanents_of(PlayerId::Us)
-            .find(|p| p.catalog_key == "Tamiyo, Inquisitive Student").map(|p| p.id)
-            .expect("Tamiyo on battlefield before flip");
-        state2.objects.get_mut(&tamiyo_id).unwrap().bf_mut().unwrap().tapped = true;
+        state.objects.get_mut(&tamiyo_id).unwrap().bf_mut().unwrap().tapped = true;
 
-        result[0].effect.call(&mut state2, 1, &[]);
+        // Three draws this turn logged; the third draw event fires Tamiyo's flip.
+        // ("Third card this turn" = EventCount over the log, not the draw_index field.)
+        for i in 1..=3u8 {
+            state.event_log.push(1, GameEvent::Draw { controller: PlayerId::Us, draw_index: i, is_natural: false });
+        }
+        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false };
+        let (result, _) = fire_triggers(&ev, &state);
+        let ctx = result.iter().find(|c| c.source_name == "Tamiyo, Inquisitive Student").cloned()
+            .expect("third draw fires Tamiyo's flip trigger");
+
+        let mut state2 = state;
+        ctx.effect.call(&mut state2, 1, &[]);
         // A NEW object: back on the battlefield (same catalog_key — the front-face name
         // is unchanged) with active_face == 1, fresh starting loyalty, and untapped
         // (the exile-return reset it) — distinguishing it from Delver's in-place flip.
