@@ -225,7 +225,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card                       | When              | Effect                                                                                           |
 |----------------------------+-------------------+--------------------------------------------------------------------------------------------------|
-| Sneak Attack               | Next end step     | Sacrifice creature; ~OneShot~ ~TriggerInstance~                                                  |
+| Sneak Attack               | Next end step     | IR ~ScheduleDelayedTrigger{AtStep End}~ → ~Sacrifice(It == target)~                              |
 | Fury (evoke)               | Self ETB with ~alt_cost_index~ set | Sacrifice self                                                                   |
 | Mishra's Bauble            | Next upkeep       | Draw 1; ~OneShot~ delayed ~TriggerInstance~                                                      |
 | Phelia, Exuberant Shepherd | Next end step     | Return exiled card under owner's control; +1/+1 counter if it returned under your control       |
@@ -303,7 +303,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Null Rod                   | Suppress all activated abilities on all artifacts (both players)                                                       |
 | Lavinia                    | ~castable = false~ on opponent noncreature spells                                                                      |
 | Hexing Squelcher           | Grants Ward trigger to other creatures via ~granted_trigger_defs~                                                      |
-| Sneak Attack               | Grants Haste to sneaked creature                                                                                       |
+| Sneak Attack               | Grants Haste to sneaked creature (IR ~ApplyCE{AddKeyword(Haste)}~, EndOfTurn)                                          |
 | Cori-Steel Cutter          | Grants Trample + Haste to equipped creature via ~bf.attached_to~ filter                                                |
 | Mistrise Village           | IR ~Action::GrantCEToNextSpellCast~ with ~CEMod::Uncounterable~ — latent mod applies CE to the next spell cast that turn |
 | Dragon's Rage Channeler    | Delirium: grants Flying when ≥4 card types in GY                                                                       |
@@ -400,7 +400,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | First Strike  | Engine-supported via split combat damage step (CR 510.5); no printed card currently has it                                    |
 | Double Strike | Fury — functional: deals damage in both the first-strike and regular combat damage steps                                       |
 | Trample       | Granted by Cori-Steel Cutter via L6 CE; functional in CombatDamage step (lethal-to-blockers, excess to player/PW)             |
-| Haste         | Granted by Sneak Attack via L6 CE; also by Cori-Steel Cutter                                                                   |
+| Haste         | Granted by Sneak Attack via IR ~ApplyCE{AddKeyword(Haste)}~; also by Cori-Steel Cutter                                         |
 | Vigilance     | Granted by Batterskull, Pre-War Formalwear via L6 CE; functional in DeclareAttackers (skips tap)                              |
 | Lifelink      | Griselbrand, Atraxa; granted by Batterskull via L6 CE; functional in CombatDamage (controller gains life equal to damage dealt) |
 | Deathtouch    | Atraxa; functional in CombatDamage (any nonzero damage = lethal; trample-DT assigns 1 to blockers)                             |

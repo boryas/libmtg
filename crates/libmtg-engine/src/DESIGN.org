@@ -785,6 +785,20 @@ so a hand-only scope would drop the alt cost mid-cast (only hand casts consume i
 Now the model path for the family of alt-cost grants. The three alt-cost-outcome tests pass
 unchanged. CE-closure count 4 → 3 (remaining: sneak_attack, kaito, hexing_squelcher). 439 green.
 
+*** 2026-06-21 — Sneak Attack: first IR Activated with a choice_spec (three sub-effects)
+"{R}: put a creature from hand onto the battlefield with haste; sacrifice it at the next end
+step." No new primitive — composes existing ones into one ~AbilityKind::Activated~ (the first
+with a ~choice_spec~), retiring its ~ability_factory~ closure *and* its haste CE closure:
+- choice (CR 701.10) → ~choice_spec{ Hand, creature }~; the picked card binds as
+  ~Ctx::Var("target")~ via ~build_ability_effect~ (verified end-to-end).
+- body = ~Sequence[ Move(target → Battlefield), ApplyCE(target, AddKeyword(Haste), EndOfTurn),
+  ScheduleDelayedTrigger(AtStep End, Sacrifice(It == target)) ]~.
+- ~Move~ routes through ~change_zone~ (full ETB pipeline). Haste is ~EndOfTurn~ (ApplyCE sources
+  the CI on Sneak Attack, not the creature; effect-correct since the creature is sacced this
+  turn). The delayed sac captures ~target~ at schedule time (Phelia's pattern) and matches
+  nothing if the creature already left. Two activated-ability tests + the delayed-sac test pass
+  unchanged. CE-closure count 3 → 2 (remaining: kaito, hexing_squelcher). 439 green.
+
 * Known seams
 
 *Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less

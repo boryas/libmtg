@@ -2810,76 +2810,73 @@ fn omniscience() -> CardDef {
 }
 
 fn sneak_attack() -> CardDef {
-    // "{R}: You may put a creature card from your hand onto the battlefield.
-    // That creature gains haste. Sacrifice the creature at the beginning of
-    // the next end step."
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, StepScope, TriggerSpec};
+    use crate::ir::action::{Action, Expiry as IrExpiry, Who as IrWho};
+    use crate::ir::ce::CEMod;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+
+    // The creature picked from hand (CR 701.10 resolution choice) is bound as
+    // `Ctx::Var("target")` by `build_ability_effect`.
+    let chosen = || Expr::Ctx(Ctx::Var("target"));
+
+    // "{R}: You may put a creature card from your hand onto the battlefield. That
+    //  creature gains haste. Sacrifice it at the beginning of the next end step."
+    let body = Action::Sequence(vec![
+        // Put the chosen creature onto the battlefield (full ETB pipeline).
+        Action::Move {
+            what: chosen(),
+            to: ZoneKindSel::Battlefield,
+            to_owner: None,
+            bind_as: None,
+        },
+        // It gains haste. EndOfTurn duration suffices — it's sacrificed this turn,
+        // and the printed creature has no haste once the effect ends.
+        Action::ApplyCE {
+            target: chosen(),
+            mods: vec![CEMod::AddKeyword(Keyword::Haste)],
+            expiry: IrExpiry::EndOfTurn,
+        },
+        // Delayed: at the beginning of the next end step, sacrifice it. The
+        // `target` binding is captured at schedule time, so it resolves to this
+        // creature when the trigger fires (matches nothing if it has since left).
+        Action::ScheduleDelayedTrigger {
+            fires: TriggerSpec::AtStep { step: StepKind::End, who: StepScope::EachPlayer },
+            action: Box::new(Action::Sacrifice {
+                who: IrWho::You,
+                filter: Filter(Expr::Eq(Box::new(Expr::Ctx(Ctx::It)), Box::new(chosen()))),
+                count: Expr::Num(1),
+                bind_as: None,
+            }),
+        },
+    ]);
+
+    let mut card = CardDef::new(
         "Sneak Attack",
-        CardKind::Enchantment(EnchantmentData {
-            abilities: vec![AbilityDef {
-                costs: ir_pay_mana_str("R"),
-                choice_spec: Some(ChoiceSpec {
-                    controller: Who::Actor,
-                    zone: ZoneId::Hand,
-                    filter: ir_type(CardType::Creature),
-                }),
-                ability_factory: Some(Arc::new(|who, _source_id| {
-                    Effect(Arc::new(move |state, t, targets| {
-                        let Some(&creature_id) = targets.first() else { return };
-                        let name = state.objects.get(&creature_id)
-                            .map(|c| c.catalog_key.clone())
-                            .unwrap_or_default();
-                        state.log(t, who, format!("Sneak Attack → {} onto the battlefield", name));
-                        change_zone(creature_id, ZoneId::Battlefield, state, t, who);
-
-                        // Grant haste via L6 CE (expires when the creature leaves the battlefield).
-                        let ts = state.next_ci_timestamp();
-                        state.continuous_instances.push(ContinuousInstance {
-                            source_id: creature_id,
-                            controller: who,
-                            layer: ContinuousLayer::L6AbilityEffects,
-                            reads: vec![],
-                            writes: vec![CeWrites::Abilities],
-                            timestamp: ts,
-                            filter: Arc::new(move |id, _ctr, _| id == creature_id),
-                            modifier: Arc::new(|def, _state| {
-                                if let CardKind::Creature(c) = &mut def.kind {
-                                    c.keywords.insert(Keyword::Haste);
-                                }
-                            }),
-                            expiry: Expiry::WhileSourceOnBattlefield,
-
-                        });
-
-                        // Delayed trigger: at the beginning of the next end step, sacrifice this creature.
-                        let sac_pred = ir_obj(creature_id);
-                        state.trigger_instances.push(TriggerInstance {
-                            source_id: creature_id,
-                            controller: who,
-                            check: Arc::new(move |event, _source_id, controller, _state, pending| {
-                                if let GameEvent::EnteredStep { step: StepKind::End, .. } = event {
-                                    let sac = sac_pred.clone();
-                                    pending.push(TriggerContext {
-                                        source_name: "Sneak Attack (delayed)".into(),
-                                        controller,
-                                        target_spec: TargetSpec::None,
-                                        effect: eff_sacrifice(controller, Who::Actor, sac),
-                                    });
-                                }
-                            }),
-                            expiry: Some(Expiry::OneShot),
-                        });
-                    }))
-                })),
-                ..Default::default()
-            }],
-        }),
+        CardKind::Enchantment(EnchantmentData::default()),
         parse_colors("3R", false, false),
         None,
         vec![], CardLayout::Normal, None,
         vec![], vec![], vec![],
         vec![],
-    )
+    );
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_pay_mana_str("R"),
+            target_spec: TargetSpec::None,
+            choice_spec: Some(ChoiceSpec {
+                controller: Who::Actor, // effects::Who, via super::*
+                zone: ZoneId::Hand,
+                filter: ir_type(CardType::Creature),
+            }),
+            body,
+            timing: ActivationTiming::Default, // instant speed
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("{R}: You may put a creature card from your hand onto the battlefield. That creature gains haste. Sacrifice the creature at the beginning of the next end step."),
+    }];
+    card
 }
 
 // ── Creatures ─────────────────────────────────────────────────────────────────
