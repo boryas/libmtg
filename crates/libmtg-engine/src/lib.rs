@@ -4217,9 +4217,12 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
     // Populate state.objects with Library-zone objects for each player's mainboard.
     // catalog: game setup — ObjIds are assigned here for the first time; materialized
     // does not exist yet. Catalog is the only source of card definitions at this stage.
+    // A name with no catalog entry is kept as a BLANK card: it occupies its deck
+    // slot and is drawn normally, but has no def, so it is never castable/playable
+    // (every `catalog.get()` consumer guards on `None` and skips it) — i.e. inert
+    // air. This keeps deck size honest rather than silently shrinking the library.
     for (name, qty, board) in &us_deck {
         if board != "main" { continue; }
-        if state.catalog.get(name.as_str()).is_none() { continue; }
         for _ in 0..*qty {
             let id = state.alloc_id();
             state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Us));
@@ -4228,7 +4231,6 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
     }
     for (name, qty, board) in &opp_deck {
         if board != "main" { continue; }
-        if state.catalog.get(name.as_str()).is_none() { continue; }
         for _ in 0..*qty {
             let id = state.alloc_id();
             state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Opp));
@@ -4337,7 +4339,8 @@ fn card_has_implementation(def: &CardDef) -> bool {
 /// Why a deck card can't be faithfully simulated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum UnimplementedKind {
-    /// ✗ name not in the catalog at all — excluded from simulation entirely.
+    /// ✗ name not in the catalog at all — kept in the deck as a blank card
+    /// (drawn but never castable/playable), so deck size stays honest.
     Missing,
     /// ~ in the catalog but no actionable effects — drawn but never played/cast.
     Inert,
@@ -4376,8 +4379,8 @@ pub fn classify_unimplemented_cards(
 
 /// Print a warning for deck cards that lack a simulation implementation.
 ///
-/// Two categories:
-///   ✗ not in catalog — excluded from simulation entirely (silently dropped)
+/// Two categories, both kept in the deck (deck size stays honest) and inert:
+///   ✗ not in catalog — kept as a blank card (drawn but never castable)
 ///   ~ in catalog but no actionable effects — drawn but never played/cast
 pub fn warn_unimplemented_cards(
     cards: &[(String, i32, String)],
@@ -4389,7 +4392,7 @@ pub fn warn_unimplemented_cards(
 
     let emit = |c: &UnimplementedCard| match c.kind {
         UnimplementedKind::Missing =>
-            println!("   ✗ {}×{} — not in catalog (excluded from simulation)", c.qty, c.name),
+            println!("   ✗ {}×{} — not in catalog (kept as a blank card; drawn but never cast)", c.qty, c.name),
         UnimplementedKind::Inert =>
             println!("   ~ {}×{} — no simulation effects (drawn but never cast)", c.qty, c.name),
     };
