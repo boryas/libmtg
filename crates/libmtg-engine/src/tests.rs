@@ -4791,7 +4791,7 @@
         enter_cage(&mut state, PlayerId::Opp);
 
         // Helper: drop a Dark Ritual into `role` and return its id.
-        let mut put = |state: &mut SimState, role: ObjectRole| -> ObjId {
+        let put = |state: &mut SimState, role: ObjectRole| -> ObjId {
             let id = state.alloc_id();
             state.objects.insert(id, GameObject {
                 id,
@@ -5470,6 +5470,46 @@
         );
         assert!(state.pending_triggers.iter().any(|c| c.source_name == "Grizzly Bears"),
             "granted Ward should fire for the vanilla creature targeted by an opponent");
+    }
+
+    // ── §46c: Kaito animation (BecomeCreature + ActivePlayer/LoyaltyOf) ─────────
+
+    /// "During your turn, as long as Kaito has one or more loyalty counters, he's a
+    /// 3/4 Ninja creature with hexproof." Animates only when both conditions hold.
+    #[test]
+    fn test_kaito_animates_only_on_your_turn_with_loyalty() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let kaito = catalog_card("Kaito, Bane of Nightmares");
+
+        let mut bf = BattlefieldState::new();
+        bf.loyalty = 4;
+        let kaito_id = add_perm_with_def(&mut state, PlayerId::Us, &kaito, bf);
+
+        // Your turn + loyalty > 0 → 3/4 Ninja creature with hexproof, no longer a PW.
+        state.current_ap = state.player_id(PlayerId::Us);
+        recompute(&mut state);
+        let def = state.def_of(kaito_id).expect("materialized def");
+        assert!(def.is_creature(), "Kaito should be a creature on your turn with loyalty");
+        let c = def.as_creature().expect("animated Kaito is a creature");
+        assert_eq!((c.power(), c.toughness()), (3, 4), "animated Kaito is 3/4");
+        assert!(def.has_subtype("Ninja"), "animated Kaito is a Ninja");
+        assert!(def.has_keyword(Keyword::Hexproof), "animated Kaito has hexproof");
+        assert!(!def.types.contains(&CardType::Planeswalker),
+            "per the ruling, animated Kaito stops being a planeswalker");
+
+        // Opponent's turn → not animated.
+        state.current_ap = state.player_id(PlayerId::Opp);
+        recompute(&mut state);
+        assert!(!state.def_of(kaito_id).unwrap().is_creature(),
+            "Kaito is not a creature on the opponent's turn");
+
+        // Your turn but loyalty 0 → not animated.
+        state.current_ap = state.player_id(PlayerId::Us);
+        if let Some(bf) = state.permanent_bf_mut(kaito_id) { bf.loyalty = 0; }
+        recompute(&mut state);
+        assert!(!state.def_of(kaito_id).unwrap().is_creature(),
+            "Kaito with 0 loyalty is not a creature even on your turn");
     }
 
     /// Long Goodbye's "This spell can't be countered" still works after the ProhibitionDef refactor.

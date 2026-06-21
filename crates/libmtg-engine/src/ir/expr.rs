@@ -64,6 +64,11 @@ pub enum Expr {
     /// spell targets me": `Contains(Source, ChosenTargets(triggered_obj))`.
     ChosenTargets(Box<Expr>),    // ObjSet
 
+    /// The loyalty of planeswalker `obj` (CR 306.5b), as `i64` — 0 for non-PWs or
+    /// objects off the battlefield. Read for "as long as ~ has one or more loyalty
+    /// counters on him" (Kaito's animation condition).
+    LoyaltyOf(Box<Expr>),        // i64
+
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64
     HandSize(Box<Expr>),         // i64
@@ -90,6 +95,10 @@ pub enum Expr {
     Neg(Box<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Max(Box<Expr>, Box<Expr>),
+
+    /// The active player (CR 102.1), as `Player`. `Eq(ActivePlayer, Ctx::Controller)`
+    /// is "during your turn".
+    ActivePlayer,
 
     // ── set-builder and folds ────────────────────────────────────────────
     /// The players, as objects (`ObjSet` of the player `GameObject`s). Players are

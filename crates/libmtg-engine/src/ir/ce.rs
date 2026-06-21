@@ -34,6 +34,18 @@ pub enum CEMod {
     AddType(CardType),
     AddSubtype(String),
     RemoveSubtype(String),
+    /// "~ is a [P]/[T] [subtypes] creature [with keywords]" (CR 613.1c layer 4 +
+    /// the P/T it sets). The animate-as-creature primitive: makes the object a
+    /// creature with the given base P/T, creature subtypes, and keywords, carrying
+    /// its existing activated abilities over (loyalty abilities stay usable). Used
+    /// for a planeswalker that becomes a creature (Kaito) — per the CR ruling it
+    /// stops being a planeswalker while animated.
+    BecomeCreature {
+        power: Expr,
+        toughness: Expr,
+        subtypes: Vec<String>,
+        keywords: Vec<Keyword>,
+    },
     /// CR 305.6: set the land's subtype to a basic land type. Replaces all
     /// existing land subtypes, swaps the intrinsic mana ability, and — per
     /// CR 305.7 — strips all abilities generated from rules text. Applies to

@@ -818,6 +818,25 @@ ward-grant tests now use a vanilla other-creature so the granted ward is unambig
 "enters later" test asserts ~granted_abilities~ (was ~granted_trigger_defs~). CE-closure count
 2 → 1 (remaining: kaito). 442 green.
 
+*** 2026-06-21 — Kaito's animation: the last CE closure → IR. *Migration complete (0 left).*
+"During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja
+creature and has hexproof." The hardest CE: a *conditional planeswalker→creature type change*.
+Checked the CR ruling first (it corrected our assumption): the "he's a … creature" wording
+makes him *stop being a planeswalker* while animated (older templating; not "also a creature"),
+though loyalty abilities stay usable and combat damage doesn't shed loyalty. Three new primitives:
+- ~Expr::ActivePlayer~ (CR 102.1) — ~Eq(ActivePlayer, Ctx::Controller)~ is "during your turn".
+- ~Expr::LoyaltyOf(obj)~ — reads ~bf.loyalty~ for the ">0" gate.
+- ~CEMod::BecomeCreature{ power, toughness, subtypes, keywords }~ (L4) — the animate primitive:
+  set base P/T + creature subtypes + keywords, carry existing abilities over, drop the
+  planeswalker type. Reusable for any "becomes a creature" effect (man-lands, other PWs).
+Kaito's animation becomes ~Static{ BecomeCreature(3/4 Ninja, Hexproof), scope: It==Source,
+  condition: your-turn ∧ loyalty>0 }~. First test added for the animation (none existed):
+animates only on your turn with loyalty, reverts off-turn or at 0 loyalty. 443 green.
+
+*This retires the last continuous-effect closure in ~card_defs.rs~ (count 1 → 0). The IR/closure
+CE migration that began at ~23~ is complete: every card's continuous effects are declarative IR
+(~AbilityKind::Static/Triggered/Prohibition/Restriction/Activated~) over ~cemod_to_modifier~.*
+
 * Known seams
 
 *Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less

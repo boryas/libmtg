@@ -1221,6 +1221,22 @@ pub(crate) fn cemod_to_modifier(
                 }),
             })
         }
+        CEMod::BecomeCreature { power, toughness, subtypes, keywords } => {
+            // Layer 4 (type) + the P/T it sets. Evaluate P/T now (env-less hook)
+            // and bake them into the animate modifier.
+            let p = expect_num(eval_expr(power, state, env)) as i32;
+            let t = expect_num(eval_expr(toughness, state, env)) as i32;
+            let subtypes = subtypes.clone();
+            let keywords = keywords.clone();
+            Some(CeBuild {
+                layer: ContinuousLayer::L4TypeEffects,
+                reads: vec![],
+                writes: vec![CeWrites::CardTypes, CeWrites::PowerToughness, CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_become_creature(def, p, t, &subtypes, &keywords);
+                }),
+            })
+        }
         CEMod::PumpPT(p, t) => {
             // Evaluate the deltas now (env may hold an announced X); bake them in.
             let pv = expect_num(eval_expr(p, state, env)) as i32;
@@ -1506,6 +1522,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         }
 
         // player projections
+        Expr::LoyaltyOf(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Num(state.permanent_bf(o).map_or(0, |bf| bf.loyalty) as i64)
+        }
         Expr::Life(e) => {
             let p = expect_player(eval_expr(e, state, env));
             Value::Num(crate::SimState::life_of(state, p) as i64)
@@ -1574,6 +1594,13 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             expect_num(eval_expr(a, state, env)) * expect_num(eval_expr(b, state, env)),
         ),
         Expr::Players => Value::ObjSet(vec![state.us_id, state.opp_id]),
+        Expr::ActivePlayer => {
+            if state.current_ap == ObjId::UNSET {
+                Value::Unit
+            } else {
+                Value::Player(state.who_pid(state.current_ap))
+            }
+        }
         Expr::Neg(a) => Value::Num(-expect_num(eval_expr(a, state, env))),
         Expr::Min(a, b) => Value::Num(std::cmp::min(
             expect_num(eval_expr(a, state, env)),
@@ -2418,6 +2445,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::Counters);
             walk_reads(e, out);
         }
+        // Loyalty is a counter (CR 306.5b); active player is global game state.
+        Expr::LoyaltyOf(e) => {
+            out.push(Axis::Counters);
+            walk_reads(e, out);
+        }
+        Expr::ActivePlayer => out.push(Axis::GameCtx),
 
         // ── player projections ────────────────────────────────────────────
         Expr::Life(e) => {
@@ -2508,6 +2541,9 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
         | CEMod::AddType(_)
         | CEMod::AddSubtype(_)
         | CEMod::RemoveSubtype(_) => vec![Axis::Type],
+
+        // Animate: sets type, P/T, and the carried ability set.
+        CEMod::BecomeCreature { .. } => vec![Axis::Type, Axis::PT, Axis::Abilities],
 
         // CR 305.7: also strips abilities generated from rules text.
         CEMod::SetBasicLandType(_) => vec![Axis::Type, Axis::Abilities],
@@ -2678,6 +2714,40 @@ fn apply_add_basic_land_type(def: &mut CardDef, kind: BasicLandType) {
         land.land_types.insert(kind);
         land.mana_abilities.push(mana_for_basic_land(kind));
     }
+}
+
+/// Animate `def` as a creature (CR 613.1c layer 4): give it the base P/T, creature
+/// subtypes, and keywords, carrying its existing activated abilities over (so a
+/// planeswalker's loyalty abilities stay usable). Per the CR ruling for Kaito-style
+/// "he's a … creature" wording, an animated planeswalker stops being a planeswalker.
+fn apply_become_creature(
+    def: &mut CardDef,
+    power: i32,
+    toughness: i32,
+    subtypes: &[String],
+    keywords: &[crate::Keyword],
+) {
+    use crate::{CardKind, CardType, CreatureData};
+    let was_legendary = def.legendary();
+    def.types.retain(|ty| *ty != CardType::Planeswalker);
+    if !def.types.contains(&CardType::Creature) {
+        def.types.push(CardType::Creature);
+    }
+    // Carry existing activated abilities over (loyalty abilities stay activatable).
+    let abilities = match &def.kind {
+        CardKind::Planeswalker(pw) => pw.abilities.clone(),
+        CardKind::Creature(c) => c.abilities.clone(),
+        _ => Vec::new(),
+    };
+    let mana_cost = def.mana_cost().to_string();
+    let mut c = CreatureData::new(&mana_cost, power, toughness);
+    c.legendary = was_legendary;
+    c.creature_subtypes = subtypes.to_vec();
+    for kw in keywords {
+        c.keywords.insert(*kw);
+    }
+    c.abilities = abilities;
+    def.kind = CardKind::Creature(c);
 }
 
 fn mana_for_basic_land(kind: BasicLandType) -> crate::ManaAbility {

@@ -2942,9 +2942,16 @@ fn ingenious_infiltrator() -> CardDef {
 /// +1: emblem "Ninjas you control get +1/+1."
 /// 0: Surveil 2, draw per opponent who lost life this turn.
 /// −2: Tap target creature, put 2 stun counters on it.
-/// Static: during your turn, if loyalty > 0, he's a 3/4 Ninja creature with hexproof.
+/// Static: during your turn, as long as loyalty > 0, he's a 3/4 Ninja creature with
+/// hexproof (and per the CR ruling stops being a planeswalker, but keeps his loyalty
+/// abilities). Modeled as a conditional self-scoped L4 `BecomeCreature` CE.
 fn kaito_bane_of_nightmares() -> CardDef {
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::ce::CEMod;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter};
+
+    let mut card = CardDef::new(
         "Kaito, Bane of Nightmares",
         CardKind::Planeswalker(PlaneswalkerData {
             mana_cost: "2UB".into(),
@@ -2986,55 +2993,38 @@ fn kaito_bane_of_nightmares() -> CardDef {
         vec![],
         vec![replacement_planeswalker_etb(4)],
         vec![],
-        vec![kaito_animation_ce()],
-    )
-}
+        vec![], // animation is now an IR Static ability (below)
+    );
 
-/// Static CE for Kaito: "During your turn, as long as Kaito has one or more loyalty
-/// counters on him, he's a 3/4 Ninja creature and has hexproof."
-/// Modeled as a self-targeting L4 CE that conditionally makes Kaito a creature.
-fn kaito_animation_ce() -> StaticAbilityDef {
-    Arc::new(move |source_id, controller| ContinuousInstance {
-        source_id,
-        controller,
-        layer: ContinuousLayer::L4TypeEffects,
-        reads: vec![],
-        writes: vec![CeWrites::CardTypes, CeWrites::PowerToughness, CeWrites::Abilities],
-        timestamp: 0,
-        filter: Arc::new(move |id, _ctr, _state| id == source_id),
-        modifier: Arc::new(move |def, state| {
-            // Check conditions: controller's turn AND loyalty > 0.
-            let is_my_turn = state.current_ap == state.player_id(controller);
-            let has_loyalty = state.permanent_bf(source_id)
-                .map_or(false, |bf| bf.loyalty > 0);
-            if !is_my_turn || !has_loyalty { return; }
-            // Add Creature type (Kaito is now a Planeswalker Creature).
-            if !def.types.contains(&CardType::Creature) {
-                def.types.push(CardType::Creature);
-            }
-            // Set to 3/4 Ninja with hexproof.
-            match &mut def.kind {
-                CardKind::Planeswalker(pw) => {
-                    // Overlay creature data: 3/4 Ninja creature with hexproof.
-                    // P/T is set directly since this is a type-setting effect, not a modifier.
-                    let mut c = CreatureData::new(&pw.mana_cost, 3, 4);
-                    c.legendary = true;
-                    c.creature_subtypes = vec!["Ninja".into()];
-                    c.keywords.insert(Keyword::Hexproof);
-                    // Carry over abilities so loyalty abilities remain activatable.
-                    c.abilities = pw.abilities.clone();
-                    def.kind = CardKind::Creature(c);
-                }
-                CardKind::Creature(c) => {
-                    // Already animated (e.g. multiple CEs); just ensure stats.
-                    c.creature_subtypes = vec!["Ninja".into()];
-                    c.keywords.insert(Keyword::Hexproof);
-                }
-                _ => {}
-            }
-        }),
-        expiry: Expiry::WhileSourceOnBattlefield,
-    })
+    // "During your turn, as long as Kaito has one or more loyalty counters on him,
+    // he's a 3/4 Ninja creature and has hexproof." Self-scoped (`It == Source`) L4
+    // BecomeCreature, gated on the active turn being his controller's and loyalty > 0.
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Static {
+            mods: vec![CEMod::BecomeCreature {
+                power: Expr::Num(3),
+                toughness: Expr::Num(4),
+                subtypes: vec!["Ninja".to_string()],
+                keywords: vec![Keyword::Hexproof],
+            }],
+            scope: Some(Filter(Expr::Eq(
+                Box::new(Expr::Ctx(Ctx::It)),
+                Box::new(Expr::Ctx(Ctx::Source)),
+            ))),
+            condition: Some(Expr::And(
+                Box::new(Expr::Eq(
+                    Box::new(Expr::ActivePlayer),
+                    Box::new(Expr::Ctx(Ctx::Controller)),
+                )),
+                Box::new(Expr::Gt(
+                    Box::new(Expr::LoyaltyOf(Box::new(Expr::Ctx(Ctx::Source)))),
+                    Box::new(Expr::Num(0)),
+                )),
+            )),
+        },
+        text: Some("During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof."),
+    }];
+    card
 }
 
 /// ETB: search your library for a creature with toughness ≤ 2, put it into your hand.
