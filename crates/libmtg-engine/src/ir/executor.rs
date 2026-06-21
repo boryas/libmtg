@@ -1627,15 +1627,35 @@ pub(crate) fn matches(
 /// beats can" order-independent. The action analogue of the event `Prohibition` walk
 /// in `fire_event` Stage 1.
 ///
-/// `is_mana_ability` reflects whether the call is gating a mana ability (CR 605):
-/// a `mana_exempt` restriction (Pithing Needle / Disruptor Flute "unless they're
-/// mana abilities") does not forbid mana abilities. Pass `false` for casts and
-/// non-mana activations.
+/// Use this for casts and **non-mana** activated abilities — every matching
+/// restriction applies. The mana sub-loop uses [`mana_ability_restricted`], which
+/// honors the CR "unless they're mana abilities" exemption (`mana_exempt`). Which
+/// of the two a caller uses follows from the ability's CR-605.1a classification
+/// (mana abilities live in `mana_abilities()`, non-mana in `abilities()`) — there
+/// is no mana-ness tag to pass.
 pub(crate) fn action_restricted(
     state: &SimState,
     kind: crate::ir::ability::ActionKind,
     subject_id: ObjId,
-    is_mana_ability: bool,
+) -> bool {
+    restriction_hits(state, kind, subject_id, false)
+}
+
+/// Is activating a **mana ability** (CR 605.1a) of `subject_id` forbidden? Like
+/// [`action_restricted`] for `Activate`, but skips `mana_exempt` restrictions
+/// (Pithing Needle / Disruptor Flute "… can't be activated unless they're mana
+/// abilities"). Null Rod / Karn are not `mana_exempt`, so they still bite here.
+pub(crate) fn mana_ability_restricted(state: &SimState, subject_id: ObjId) -> bool {
+    restriction_hits(state, crate::ir::ability::ActionKind::Activate, subject_id, true)
+}
+
+/// Shared walk for the two restriction queries. `for_mana_ability` skips
+/// `mana_exempt` restrictions (they don't forbid mana abilities).
+fn restriction_hits(
+    state: &SimState,
+    kind: crate::ir::ability::ActionKind,
+    subject_id: ObjId,
+    for_mana_ability: bool,
 ) -> bool {
     use crate::ir::ability::AbilityKind;
     state.objects.iter().any(|(id, obj)| {
@@ -1646,7 +1666,7 @@ pub(crate) fn action_restricted(
             card_def.abilities.iter().any(|ab| {
                 if let AbilityKind::Restriction { action, subject, mana_exempt } = &ab.kind {
                     *action == kind
-                        && !(is_mana_ability && *mana_exempt)
+                        && !(for_mana_ability && *mana_exempt)
                         && {
                         let env = BindEnv::new().with_source(*id).with_controller(obj.controller);
                         matches(subject, subject_id, state, &env)

@@ -4486,21 +4486,21 @@
         recompute(&mut state);
 
         use crate::ir::ability::ActionKind::Activate;
-        use crate::ir::executor::action_restricted;
+        use crate::ir::executor::{action_restricted, mana_ability_restricted};
         // Wasteland: non-mana activation forbidden …
         assert!(
-            action_restricted(&state, Activate, wl_id, false),
+            action_restricted(&state, Activate, wl_id),
             "Wasteland's non-mana ability should be restricted by Flute"
         );
         // … but its mana ability is exempt.
         assert!(
-            !action_restricted(&state, Activate, wl_id, true),
+            !mana_ability_restricted(&state, wl_id),
             "Wasteland's mana ability must remain activatable (mana exemption)"
         );
         // Underground Sea is not the named card — restricted in neither sense.
         assert!(
-            !action_restricted(&state, Activate, sea_id, false)
-                && !action_restricted(&state, Activate, sea_id, true),
+            !action_restricted(&state, Activate, sea_id)
+                && !mana_ability_restricted(&state, sea_id),
             "Underground Sea is unnamed and must not be restricted"
         );
     }
@@ -4530,7 +4530,7 @@
         assert_eq!(modifier, 0, "Unnamed Brainstorm should not be taxed");
         assert!(
             !crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Activate, bs_id, false),
+                &state, crate::ir::ability::ActionKind::Activate, bs_id),
             "Unnamed Brainstorm should not be restricted by Flute"
         );
     }
@@ -4816,19 +4816,19 @@
         // castable=false by zone, so that flag can't distinguish Cage's effect).
         assert!(
             crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, gy_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
             "Cage should restrict casting from the graveyard"
         );
         assert!(
             crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, lib_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, lib_id),
             "Cage should restrict casting from the library"
         );
         // Exile ≠ GY/library: the zone-scoped subject simply doesn't match, so a
         // Dauthi-style exile cast is *not* forbidden by Cage.
         assert!(
             !crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, exile_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, exile_id),
             "Cage must not restrict casting from exile"
         );
     }
@@ -4858,7 +4858,7 @@
         // While Cage is on the battlefield, the cast-Restriction is active.
         assert!(
             crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, gy_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
             "GY card should be cast-restricted while Cage is on the battlefield"
         );
 
@@ -4868,7 +4868,7 @@
         recompute(&mut state);
         assert!(
             !crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, gy_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
             "Cast-Restriction should lift once Cage leaves the battlefield"
         );
     }
@@ -5133,7 +5133,7 @@
         recompute(&mut state);
         assert!(
             crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, spell_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, spell_id),
             "Lavinia should restrict casting an MV-2 noncreature spell when opponent has only 1 land"
         );
 
@@ -5142,7 +5142,7 @@
         recompute(&mut state);
         assert!(
             !crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Cast, spell_id, false),
+                &state, crate::ir::ability::ActionKind::Cast, spell_id),
             "Lavinia should allow an MV-2 noncreature spell when opponent has 2 lands"
         );
     }
@@ -7092,15 +7092,13 @@
         // Opponent's artifact: activation restricted by Karn (consulted at the
         // activation-legality gate, not via the materialized activatable flag).
         assert!(
-            crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Activate, opp_petal_id, true),
+            crate::ir::executor::mana_ability_restricted(&state, opp_petal_id),
             "Karn should restrict activating opponent's artifact abilities"
         );
 
         // Our own artifact: not restricted (Karn is asymmetric).
         assert!(
-            !crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Activate, our_petal_id, true),
+            !crate::ir::executor::mana_ability_restricted(&state, our_petal_id),
             "Karn should NOT restrict our own artifacts"
         );
     }
@@ -7525,8 +7523,7 @@
         let def = state.def_of(petal_id).expect("Lotus Petal should have materialized def");
         assert!(!def.mana_abilities().is_empty(), "Lotus Petal should still have mana abilities listed");
         assert!(
-            crate::ir::executor::action_restricted(
-                &state, crate::ir::ability::ActionKind::Activate, petal_id, true),
+            crate::ir::executor::mana_ability_restricted(&state, petal_id),
             "Lotus Petal's abilities should be restricted under Null Rod"
         );
     }

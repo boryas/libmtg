@@ -749,12 +749,17 @@ activated *unless they're mana abilities*". Three primitives:
   ChosenName(Source))~. The ETB closure now *only* stores the choice; no CE pushed.
 - ~CEMod::CastingCostPlus(Expr)~ wired into ~cemod_to_modifier~ (writes
   ~casting_cost_modifier += N~); "which cards" lives in the ~Static~ scope, not the mod.
-- ~Restriction.mana_exempt: bool~ + ~action_restricted(.., is_mana_ability)~ — CR "unless
-  they're mana abilities". Flute = ~true~ (shuts off non-mana only); Null Rod / Karn =
-  ~false~ (shut off Moxen too). Threaded ~is_mana_ability~ through all activate call sites
-  (mana enumerators / auto-tap = true; ~ability_available~ = false). Removed now-dead
-  ~abilities_mut~. CE-closure count 6 → 5 (remaining: omniscience, sneak_attack, kaito,
-  hexing_squelcher, painters_servant). 439 green.
+- ~Restriction.mana_exempt: bool~ — CR "unless they're mana abilities" (a property of the
+  *restriction's text*: Flute/Pithing Needle = ~true~, shut off non-mana only; Null Rod /
+  Karn = ~false~, shut off Moxen too). The complementary "is this a mana ability?" is *not*
+  a tag — it is CR 605.1a, already derived by ~is_mana_ability~ (no target ∧ could-add-mana)
+  at synthesis, which is exactly what splits an ability into ~mana_abilities()~ vs
+  ~abilities()~. So the consultation has two intent-named entry points and the call site's
+  ability category (already classified) picks one: ~action_restricted(kind, subj)~ for casts
+  / non-mana activations (every restriction applies) and ~mana_ability_restricted(subj)~ for
+  the mana sub-loop (skips ~mana_exempt~). No mana-ness bool is threaded.
+Removed now-dead ~abilities_mut~. CE-closure count 6 → 5 (remaining: omniscience,
+sneak_attack, kaito, hexing_squelcher, painters_servant). 439 green.
 
 * Known seams
 
