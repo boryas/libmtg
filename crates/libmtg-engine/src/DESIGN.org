@@ -501,6 +501,9 @@ one primitive, two drivers.
 *None.* All structural gaps are closed (see RESOLVED notes below). Remaining work is
 per-card depth (the ~28 ~eff_*~ spell bodies) and optional representational tightening
 (the ~bf~/~spell~/~ability~ optionals → a ~role~ enum; see "object model" note).
+/(Correction 2026-06-20: this "None" was a *type-level* claim. The ~CEMod~ vocabulary//
+//exists, but only ~5 of ~30 variants are actually translated into running continuous//
+//effects — the CE-translation breadth gap is real and still open. See 2026-06-20 entry.)/
 
 *RESOLVED 2026-06-04 — Split stack (object-model unification).* Abilities on the stack
 are now card-less ~GameObject~ s in ~state.objects~ (zone=Stack, ~ability=Some~), not a
@@ -537,11 +540,190 @@ on LTB (CR 704.5q). Reconfigure/move-equipment not yet needed.
 
 **Not a breadth gap.** ~28 instant/sorcery bodies still on legacy ~eff_*~ closures
 (the ~SpellFactory~ path) — mechanical translation, every verb has an IR home.
+(*Count superseded — see 2026-06-19 below: down to 2.*)
 ~IrSpellMode~ (~17 cards) proves spell bodies can be IR. New: ~eff_ir(who, action)~
 bridges a self-contained IR ~Action~ into a still-closure body — the migration adapter.
 
 Next: no structural gaps remain. Per-card ~eff_*~ → ~IrSpellMode~ translation continues
 opportunistically. Census review due every 20 cards / on any new structural variant.
+
+*** 2026-06-19 — Spell-body migration: 8 cards ported, 1 remains
+
+The 2026-06-03 "~28 still on legacy" figure was stale long before this entry —
+the live split was 30 IR / 9 legacy when this round opened. Ported the 7
+mechanically-expressible legacy spell bodies plus Toxic Deluge (which needed a
+small ~ApplyCE~ engine extension — see the 2026-06-20 entry), leaving **1**
+(*Show and Tell*) on the ~SpellFactory~ path. Live split now:
+*38 ~IrSpellMode~ cards / 1 legacy*.
+
+Ported this round (all reuse existing primitives — no new variants):
+- Consign to Memory → ~Counter~. Force of Negation → ~Sequence([Counter, Exile])~
+  (this engine deliberately exiles the countered spell; the old scoped-replacement
+  ~eff_counter_and_exile~ is deleted — Counter-to-graveyard then Exile-from-graveyard
+  reaches the same end state, and the FoN tests now drive the card's IR body).
+- Sheoldred's Edict → 3× ~Action::Sacrifice { who: Opponent }~ (modal OnResolve).
+- Thoughtseize → ~Sequence([Reveal opp hand, Discard 1 nonland, PayLife 2])~. The
+  reveal enumerates the opponent's hand as ~AllObjects{ Global(Hand), Owner(it) ≠ Controller }~.
+- Brazen Borrower / Petty Theft → ~Return { to: Hand }~.
+- Prismatic Ending → ~IfThen(Mv(target) ≤ X+1, Exile)~ — converge read as ~Ctx::Var("x")~ + 1.
+- Surgical Extraction → ~Sequence~ of three ~ForEach~ sweeps over
+  ~AllObjects{ Scoped(zone, Owner(target)), Name(it) = Name(target) }~ → ~Exile~,
+  one per {Graveyard, Hand, Library}. The same-name multi-zone sweep needed no new
+  primitive: ~Expr::Name~ + ~values_eq(Name, Name)~ already exist.
+
+Deleted: ~eff_counter_and_exile~ (zero refs). Demoted to ~#[allow(dead_code)]~
+test-only/parity scaffolding (no card uses them; their parity + unit tests still do,
+matching the existing ~eff_destroy_target~/~eff_damage_target~ convention):
+~eff_counter_target~, ~eff_reveal_hand~, ~eff_discard~, ~eff_life_loss~, ~Effect::then~,
+~SpellModes::modal~/~is_modal~ (no modal card uses the ~SpellFactory~ path anymore).
+
+*Toxic Deluge* (-X/-X to all creatures, EOT) was ported the next day via a small
+~ApplyCE~ extension — see 2026-06-20 below.
+
+The 1 remaining (*Show and Tell* — each player may put a permanent from hand onto
+the battlefield, simultaneously) is NOT mechanical: no primitive expresses
+per-player iteration (~ForEach~ over players is ~Unimplemented~), an effect-context
+"choose a card from your hand" (~MoveByChoice~ only reads a *pre-bound* cost-tree
+answer), or the simultaneity. Needs a justified new structural primitive
+(player-scoped optional reveal-and-place), not a translation.
+
+Next: Show and Tell is its own design task. Once it lands, the entire
+~SpellFactory~ path (~SpellMode~/~SpellModes~/~single_mode~/~untargeted_mode~/~then~)
+can be deleted wholesale.
+
+*** 2026-06-20 — ApplyCE generalized; the CEMod-translation gap surfaced
+
+Porting Toxic Deluge forced a look at the IR continuous-effect path, and it is
+much thinner than the ~CEMod~ enum's surface suggests. *The data model advertises
+full CR-613 coverage (~30 ~CEMod~ variants — P/T, types, colors, keywords,
+subtypes, grant/copy abilities, cost mods, cast permissions, protection, step
+skips); the executor honors only a handful, and every real continuous effect on a
+card is still a hand-rolled closure.*
+
+The concrete state at the start of this entry:
+- *35* raw ~ContinuousInstance~ closure constructions across the crate, spanning
+  *all five* layers — 13× L7, 11× L6, 4× L3, 3× L4, 1× L5. (So "we only have L3
+  CEs" is false — the L3 hardcode was a quirk of the *one* ~ApplyCE~ executor arm,
+  not the CE system.)
+- *Two* separate, both-incomplete ~CEMod~→effect translators:
+  - ~cemod_to_ci~ (the ~AbilityKind::Static~ path) implemented *2* of ~30
+    (~SetBasicLandType~, ~AddBasicLandType~ — Urborg / Yavimaya); ~_ => None~ for
+    the rest.
+  - ~apply_cemod_to_spell_def~ (the ~Action::ApplyCE~ path) implemented *3* of ~30
+    (~Uncounterable~, ~CastableFrom~, ~AltCost~); ~_ => {}~ for the rest.
+  - The other ~25 ~CEMod~ variants are *defined and dependency-tracked* (~writes_of~
+    maps them to read/write axes) but have *no executor path that builds a
+    ContinuousInstance* — they are inert.
+- *2* cards use the IR static path; *1* card used the IR ~ApplyCE~ path (Dauthi).
+  Everything else — Blood Moon, Null Rod, Omniscience, Painter's Servant, the
+  equipment pumps, Tamiyo +2, Toxic Deluge — is a bespoke closure.
+
+So the 2026-06-03 "Breadth gaps: *None*" line was true only at the *type* level:
+the ~CEMod~ vocabulary exists, but the translation from it to running CEs is ~5/30
+across two stubs. *This is the standing CE breadth gap and it should not be
+recorded as closed.*
+
+*Done this entry (the minimal honest fix, scoped to Toxic Deluge):* ~Action::ApplyCE~
+generalized — (a) target may now be a set (~obj_ids_of~), registering ONE CI with a
+locked-membership filter (CR 611.2c) rather than only a single object; (b) layer is
+derived from the mods' ~writes~ via ~layer_for_writes~ (P/T→L7, types→L4, colors→L5,
+abilities→L6, default L3) instead of the L3 hardcode; (c) ~CEMod::PumpPT~ is honored
+— its ~Expr~ deltas are evaluated in the ApplyCE arm (where the env still holds the
+announced X) and baked into the modifier, since the recompute-time modifier hook is
+env-less. Toxic Deluge is now ~ApplyCE { target: AllObjects(creatures), mods:
+[PumpPT(-X,-X)], EndOfTurn }~. Dauthi's single-object L3 free-cast path is preserved
+(empty writes → L3 default; verified by ~test_dv_activated_grants_castable_from_exile_via_ir~).
+
+*Follow-up (now planned + started):* the full CE migration has a plan at
+~~/org/projects/libmtg-ir-ce-migration.org~ (also covers the broader closure
+census — activated abilities, triggers, replacements, prohibitions — toward FULL
+retirement of the closure "effect" model).
+
+*** 2026-06-20 (later) — Phase 0: CEMod translators unified
+The two forked translators are now one. ~cemod_to_modifier(cemod, env, state) ->
+Option<CeBuild>~ (CeBuild = {layer, reads, writes, modifier}) is the single source
+of truth for the CEMod-intrinsic half of a continuous instance; callers add the
+extrinsic half (filter/expiry/timestamp). ~cemod_to_ci~ (the ~AbilityKind::Static~
+path — ~state~ now threaded through ~ir_static_to_cis~) and the ~Action::ApplyCE~
+arm both route through it; ApplyCE now emits *one CI per mod* (each at its own
+layer) instead of one merged CI. Implemented arms unchanged in behavior:
+~SetBasicLandType~/~AddBasicLandType~ (L4), ~PumpPT~ (L7, Expr deltas), ~Uncounterable~
+/~CastableFrom~/~AltCost~ (L3). The ~_ => None~ arm is the remaining ~25-CEMod gap;
+each future card adds one arm here and *both* CE paths gain it. 439 tests green,
+zero behavior change.
+
+*** 2026-06-20 (later) — Phase 1: equipment P/T + keyword CEs on IR
+Added ~CEMod::AddKeyword~ (L6) to ~cemod_to_modifier~ and ~Expr::AttachedTo(obj)~
+(→ the object an Equipment/Aura is attached to, or ~Unit~), so an equipment's CE
+scopes to its equipped creature as pure data: ~Eq(It, AttachedTo(Source))~ (helper
+~equipped_creature_ce~). Ported 6 cards off hand-rolled ~ContinuousInstance~ closures
+— cori_steel_cutter, batterskull, meteor_sword, pre_war_formalwear, cryptic_coat
+(static, via ~AbilityKind::Static~), and monk_token (prowess, via ~ApplyCE~ through the
+~eff_ir_targeted~ bridge). ~ContinuousInstance~ closures in card_defs.rs: 21 → 12.
+Remaining CE-closure cards: painters_servant, hexing_squelcher, dragons_rage_channeler
+(Phase 2); null_rod, karn, lavinia, grafdiggers_cage, disruptor_flute (Phase 3);
+kaito_animation_ce, omniscience (Phase 4); sneak_attack (Part 3, activated ability).
+439 tests green.
+
+*** 2026-06-20 (later) — Phase 2: conditional-CE gate (delirium)
+Added ~condition: Option<Expr>~ to ~AbilityKind::Static~ — a first-class block gate
+(CR 613 "as long as …"), re-evaluated each recompute in ~ir_static_to_cis~; false ⇒
+the block emits no CIs. (Decision: a block gate, *not* a per-object filter — separates
+"is the effect active?" from "which objects does it touch?".) Ported
+dragons_rage_channeler: ~condition: delirium~ (~Ge(Count(Types(AllObjects{GY})), 4)~),
+~scope: It==Source~, ~mods: [PumpPT(+2,+2), AddKeyword(Flying)]~ — replacing two CIs
+that each re-checked delirium inside their modifier; deleted the dead
+~gy_card_type_count~ helper. CE-closure count in card_defs.rs: 12 → 10. 439 green.
+Regrouped (need new capability): painters_servant (~AddColor~ keyed on the ETB-chosen
+color), hexing_squelcher (~GrantAbility~ of a Ward trigger).
+
+*** 2026-06-20 (later) — Phase 3 begins: the prohibition pipeline
+*Design decision: the event pipeline rules.* All "can't" (CR 101.2 — "can't beats
+can") is one generic mechanism, NOT a CEMod and NOT a ~castable/activatable~ flag:
+the action fires an event and the pipeline runs *prohibit? → replace? → fire →
+triggers*. Prohibitions are ~AbilityKind::Prohibition { matches: EventPattern }~,
+consulted in ~fire_event~ Stage 1. (The engine was designed for this — ~SpellBeingCast~
+carries ~mana_value~/~is_noncreature~ for Lavinia's prohibition but was never fired;
+~AbilityKind::Prohibition~ was declared with no executor path; Lavinia's comment admits
+the CE-flag was a "Stage 3 not wired" shortcut.) Step 1 done: wired the IR-prohibition
+consultation into Stage 1; added ~EventPattern::SpellBeingCountered~; ported emrakul +
+long_goodbye "can't be countered" off ~ProhibitionDef~ closures (Long Goodbye, having no
+~counterable~ flag, proves the path). 439 green. Next: fire ~SpellBeingCast~
+(can't-cast: lavinia, grafdiggers_cage) and add ~AbilityBeingActivated~ (can't-activate:
+null_rod, karn); then retire the ~castable/activatable~ CE flags + ~ProhibitionDef~.
+
+*** 2026-06-20 (later) — Prohibitions split into two CR categories; strategy contract
+*Refines the entry above (do NOT fire SpellBeingCast/AbilityBeingActivated as veto
+events).* "Can't" has *two* rules-level categories, enforced at different points:
+- *Occurrence-prohibition* (CR 701.5f/701.7c — can't be countered/destroyed/ETB): the
+  game attempts an occurrence and it is suppressed → the *event pipeline*
+  (~AbilityKind::Prohibition { matches: EventPattern }~, ~fire_event~ Stage 1). This is 3a.
+- *Action-restriction* (CR 601/602.5/508–509 — can't cast/activate/attack/block/target):
+  a *player choice* made illegal, like a basic timing rule → *legal-option production*
+  (~enumerate_playable~ already skips ~!castable~/~!activatable~). This is 3b. Casting/
+  activating are NOT occurrences to veto mid-pipeline, so SpellBeingCast/AbilityActivated
+  are *not* fired as vetoes.
+The strategy↔engine contract this rests on (engine owns legality, strategy owns
+preference; one ~is_legal~ core surfaced as curated-list vs propose-then-validate) is
+now documented with a full 22-method census in [[file:STRATEGY.org][STRATEGY.org]].
+Next (3b): route Lavinia/Null Rod/Karn through an ~AbilityKind::Restriction { action,
+subject }~ (CR's word for can't-do, 508.1d/509.1c) consulted by ~enumerate_playable~,
+retiring their ~castable/activatable~ CE flag-flips.
+
+*** 2026-06-20 (later) — Phase 3b done: action-Restrictions (can't cast / can't activate)
+Added ~AbilityKind::Restriction { action: ActionKind, subject: Filter }~ + ~ActionKind::
+{Cast, Activate}~ + ~action_restricted(state, kind, subject_id)~ (the action analogue of
+the ~fire_event~ ~Prohibition~ walk; source-keyed). Consulted at *legal-option production*
+as an AND-NOT gate over *permission* — so "can't beats can" (CR 101.2) is
+order-independent and the ~castable~/~activatable~ flags stay as pure *permission* caches
+(Dauthi grant, Flashback) rather than conflating grant+deny (the prior last-writer-wins
+bug). *Cast* gate at all 3 cast-production sites (hand, adventure-exile, granted-exile) —
+zone lives in the *subject*, so a Dauthi exile-cast under Grafdigger's (GY/library)
+correctly doesn't conflict, while under Lavinia (zone-agnostic) it's restricted. *Activate*
+gate (uniform, not a recompute flag-set: unconditionally correct for granted abilities) at
+~ability_available~ + ~enumerate_mana_abilities~ + ~auto_tap_plan~. Ported lavinia/null_rod/
+karn off their ~castable/activatable~ CE closures; removed dead ~mana_abilities_mut~.
+CE-closure count 10 → 7. Full contract in [[file:STRATEGY.org][STRATEGY.org]]. 439 green.
 
 * Known seams
 

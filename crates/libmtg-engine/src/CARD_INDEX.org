@@ -313,7 +313,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card                     | Effect                                                              |
 |--------------------------+---------------------------------------------------------------------|
-| Toxic Deluge             | All creatures get -X/-X (EndOfTurn); SBA handles death at 0 toughness |
+| Toxic Deluge             | All creatures get -X/-X (EndOfTurn); IR ~ApplyCE{ target: AllObjects(creatures), PumpPT(-X,-X) }~ → one L7 CI (layer from ~writes~); SBA handles death at 0 toughness |
 | Dragon's Rage Channeler  | Delirium: +2/+2 when ≥4 card types in GY                            |
 | Cori-Steel Cutter        | +1/+1 to equipped creature via ~bf.attached_to~ filter              |
 | Monk Token (prowess)     | +1/+1 until EOT per noncreature spell (stacking CIs)                |
@@ -428,12 +428,12 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card               | Target                              | Primitive                                                                                               |
 |--------------------+-------------------------------------+---------------------------------------------------------------------------------------------------------|
 | Force of Will      | Any spell                            | ~eff_counter_target~                                                                                    |
-| Force of Negation  | Noncreature                          | ~eff_counter_and_exile~                                                                                 |
+| Force of Negation  | Noncreature                          | IR ~Sequence([Counter, Exile])~ — countered to GY, then exiled from GY (end state: exile)               |
 | Daze               | Any spell                            | ~eff_counter_unless_pays~ ({1})                                                                         |
 | Spell Pierce       | Noncreature                          | ~eff_counter_unless_pays~ ({2})                                                                         |
 | Flusterstorm       | Instant/sorcery                      | ~eff_counter_unless_pays~ ({1}) + storm copies                                                          |
 | Mindbreak Trap     | Any number                           | ~eff_exile_all_targets~ (exiles, doesn't counter)                                                       |
-| Consign to Memory  | Triggered ability or colorless       | ~eff_counter_target~                                                                                    |
+| Consign to Memory  | Triggered ability or colorless       | IR ~Action::Counter~; ~Replicate {1}~ additional cost                                                   |
 | Stifle             | Activated or triggered ability       | ~eff_counter_target~; ~ObjectInZone { Stack, ir_ability() }~ (mana abilities never hit stack — CR 605.3a) |
 
 ** Destroy (CR 701.7)
@@ -457,9 +457,9 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card                       | Target                                        | Notes                                                           |
 |----------------------------+-----------------------------------------------+-----------------------------------------------------------------|
 | Swords to Plowshares       | Creature                                       | ~eff_exile_target_gain_power~                                   |
-| Surgical Extraction        | GY card + all copies                          | Custom effect iterating zones                                   |
+| Surgical Extraction        | GY card + all copies                          | IR ~Sequence~ of 3× ~ForEach~ over ~AllObjects{Scoped(zone, Owner(target)), Name(it)=Name(target)}~ → ~Exile~ (GY/Hand/Library) |
 | Mindbreak Trap             | All targeted spells                            | ~eff_exile_all_targets~                                         |
-| Prismatic Ending           | Nonland permanent MV ≤ converge               | Inline ~change_zone~; reads ~chosen_x~ from factory arg         |
+| Prismatic Ending           | Nonland permanent MV ≤ converge               | IR ~IfThen(Mv(target) ≤ Ctx::Var("x")+1, Exile)~; ~XMana~ additional cost (converge = X+1) |
 | Phelia, Exuberant Shepherd | Other nonland permanent (up to one)            | Inline ~change_zone~; pairs with delayed return trigger         |
 
 ** Search (CR 701.19)
@@ -477,7 +477,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card              | What                | Trigger                              |
 |-------------------+---------------------+--------------------------------------|
-| Sheoldred's Edict | Opponent (modal)    | ~eff_sacrifice~                      |
+| Sheoldred's Edict | Opponent (modal)    | IR ~Action::Sacrifice { who: Opponent }~ (3-mode OnResolve) |
 | Fury (evoke)      | Self                | ETB when alt cost used               |
 | Sneak Attack      | Creature            | Delayed end-step trigger             |
 | City of Traitors  | Self                | Another-land-played trigger          |

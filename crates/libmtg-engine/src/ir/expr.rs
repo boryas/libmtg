@@ -45,6 +45,10 @@ pub enum Expr {
     /// attacker that wasn't blocked this combat). Used by ninjutsu's
     /// "return an unblocked attacker" cost filter.
     Unblocked(Box<Expr>),        // Bool
+    /// The object `obj` (an Equipment/Aura) is attached to, as `Obj` — or `Unit`
+    /// if it is attached to nothing. Lets an equipment's continuous effect scope
+    /// to its equipped creature as data: `Eq(It, AttachedTo(Source))`.
+    AttachedTo(Box<Expr>),       // Obj | Unit
 
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64

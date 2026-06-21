@@ -602,10 +602,9 @@
         let _b = add_hand_card(&mut state, PlayerId::Opp, "Dark Ritual");
         let _c = add_hand_card(&mut state, PlayerId::Opp, "Island");
 
-        // Thoughtseize's effect: reveal hand, discard nonland, lose 2 life.
-        let effect = eff_reveal_hand(PlayerId::Us, Who::Opp)
-            .then(eff_discard(PlayerId::Us, Who::Opp, 1, ir_not(ir_type(CardType::Land))))
-            .then(eff_life_loss(PlayerId::Us, 2));
+        // Thoughtseize's effect (IR body): reveal hand, discard nonland, lose 2 life.
+        let ts_def = catalog_card("Thoughtseize");
+        let effect = build_spell_effect(&ts_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[]);
 
         assert_eq!(state.hand_size(PlayerId::Opp), 2);
@@ -3479,8 +3478,9 @@
         assert!(!condition(PlayerId::Us, &state), "pitch cost unavailable on our own turn");
     }
 
-    /// eff_counter_and_exile sends the countered spell to Exile, not Graveyard.
-    /// Models Force of Negation's "exile it instead of putting it into its owner's graveyard".
+    /// Force of Negation's IR body (`Sequence([Counter, Exile])`) sends the countered
+    /// spell to Exile, not Graveyard — modeling "exile it instead of putting it into its
+    /// owner's graveyard."
     #[test]
     fn test_fon_counter_and_exile() {
         let mut state = make_state();
@@ -3511,7 +3511,7 @@
 
         // Fire FoN's counter-and-exile effect.
         let fon_id = state.alloc_id();
-        let effect = eff_counter_and_exile(PlayerId::Us, fon_id);
+        let effect = build_spell_effect(&catalog_card("Force of Negation"), PlayerId::Us, fon_id, 0, 0).1;
         effect.call(&mut state, 1, &[spell_id]);
 
         // Spell should be in Exile, not Graveyard; stack should be empty.
@@ -3556,7 +3556,7 @@
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState {
-                effect: Some(eff_counter_and_exile(PlayerId::Us, fon_id)),
+                effect: Some(build_spell_effect(&catalog_card("Force of Negation"), PlayerId::Us, fon_id, 0, 0).1),
                 chosen_targets: vec![y_id],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -3610,7 +3610,7 @@
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState {
-                effect: Some(eff_counter_and_exile(PlayerId::Us, fon_id)),
+                effect: Some(build_spell_effect(&catalog_card("Force of Negation"), PlayerId::Us, fon_id, 0, 0).1),
                 chosen_targets: vec![y_id],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -4139,13 +4139,9 @@
             role: ObjectRole::Hand { known: false },
         });
 
-        // Build and call the Surgical Extraction effect targeting gy_id.
+        // Build and call the Surgical Extraction effect (IR body) targeting gy_id.
         let se_def = catalog_card("Surgical Extraction");
-        let factory = match &se_def.kind {
-            CardKind::Instant(s) => s.modes.as_ref().unwrap().get(0).unwrap().factory.clone(),
-            _ => panic!("not an instant"),
-        };
-        let eff = factory(PlayerId::Us, ObjId::UNSET, 0);
+        let eff = build_spell_effect(&se_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         eff.call(&mut state, 1, &[gy_id]);
 
         // All 3 Dark Ritual copies should be in exile.
@@ -4176,14 +4172,10 @@
         let victim_id = add_perm_with_def(&mut state, PlayerId::Opp, &victim_def, BattlefieldState::new());
         let survivor_id = add_perm_with_def(&mut state, PlayerId::Opp, &survivor_def, BattlefieldState::new());
 
-        // Invoke the factory directly with x=3 (strategy-chosen).
+        // Invoke the IR body directly with x=3 (strategy-chosen).
         let td_def = catalog_card("Toxic Deluge");
-        let factory = match &td_def.kind {
-            CardKind::Sorcery(s) => s.modes.as_ref().unwrap().get(0).unwrap().factory.clone(),
-            _ => panic!("not a sorcery"),
-        };
         let source_id = state.alloc_id();
-        let eff = factory(PlayerId::Us, source_id, 3);
+        let eff = build_spell_effect(&td_def, PlayerId::Us, source_id, 3, 0).1;
         eff.call(&mut state, 1, &[]);
 
         // One ContinuousInstance should be registered.
@@ -5131,19 +5123,22 @@
         state.catalog.insert("TestSorcery2".to_string(), sorcery_def);
         let spell_id = add_hand_card(&mut state, PlayerId::Opp, "TestSorcery2");
 
-        // With 1 land, MV 2 > 1 → Lavinia CE sets castable=false.
+        // With 1 land, MV 2 > 1 → Lavinia's action-Restriction forbids the cast
+        // (CR 101.2; consulted at legal-cast enumeration, not via the castable flag).
         recompute(&mut state);
         assert!(
-            !state.def_of(spell_id).map_or(true, |d| d.castable),
-            "Lavinia should set castable=false for MV-2 noncreature spell when opponent has only 1 land"
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, spell_id),
+            "Lavinia should restrict casting an MV-2 noncreature spell when opponent has only 1 land"
         );
 
         // Add a second land so opponent now has 2 lands — MV 2 is no longer > 2.
         make_land(&mut state, PlayerId::Opp, "Swamp", false);
         recompute(&mut state);
         assert!(
-            state.def_of(spell_id).map_or(false, |d| d.castable),
-            "Lavinia should allow MV-2 noncreature spell when opponent has 2 lands"
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, spell_id),
+            "Lavinia should allow an MV-2 noncreature spell when opponent has 2 lands"
         );
     }
 
@@ -7089,18 +7084,19 @@
 
         recompute(&mut state);
 
-        // Opponent's artifact: mana abilities should be suppressed.
-        let opp_def = state.def_of(opp_petal_id).expect("opponent petal should have materialized def");
+        // Opponent's artifact: activation restricted by Karn (consulted at the
+        // activation-legality gate, not via the materialized activatable flag).
         assert!(
-            opp_def.mana_abilities().iter().all(|ma| !ma.activatable),
-            "Karn should suppress mana abilities on opponent's artifacts"
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Activate, opp_petal_id),
+            "Karn should restrict activating opponent's artifact abilities"
         );
 
-        // Our own artifact: mana abilities should be unaffected.
-        let our_def = state.def_of(our_petal_id).expect("our petal should have materialized def");
+        // Our own artifact: not restricted (Karn is asymmetric).
         assert!(
-            our_def.mana_abilities().iter().all(|ma| ma.activatable),
-            "Karn should NOT suppress mana abilities on our own artifacts"
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Activate, our_petal_id),
+            "Karn should NOT restrict our own artifacts"
         );
     }
 
@@ -7518,10 +7514,16 @@
         let petal_id = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");
         recompute(&mut state);
 
+        // Null Rod restricts activating any artifact's abilities (symmetric), consulted
+        // at the activation-legality gate — incl. mana abilities (CR 605.1a). The ability
+        // still *exists* on the def; it just can't be activated.
         let def = state.def_of(petal_id).expect("Lotus Petal should have materialized def");
-        let ma = def.mana_abilities();
-        assert!(!ma.is_empty(), "Lotus Petal should still have mana abilities listed");
-        assert!(!ma[0].activatable, "Lotus Petal mana ability should not be activatable under Null Rod");
+        assert!(!def.mana_abilities().is_empty(), "Lotus Petal should still have mana abilities listed");
+        assert!(
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Activate, petal_id),
+            "Lotus Petal's abilities should be restricted under Null Rod"
+        );
     }
 
     // ── Meltdown ──────────────────────────────────────────────────────────────

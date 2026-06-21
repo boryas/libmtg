@@ -44,12 +44,31 @@ pub enum AbilityKind {
     Prohibition {
         matches: EventPattern,
     },
+    /// Action-restriction (CR's "restriction" — 508.1d/509.1c pair restrictions with
+    /// requirements; CR 601/602.5): the controller of a `subject` object can't take
+    /// player action `action` with it (can't cast / can't activate / …). Consulted
+    /// where legal options are *produced* (`is_legal` / enumeration), as an AND-NOT
+    /// gate over *permission*, so "can't beats can" (CR 101.2) is order-independent —
+    /// distinct from `Prohibition`, which suppresses a fired *event* in the pipeline.
+    /// `subject` is evaluated with the candidate object as `Ctx::It` and the
+    /// restriction's source/controller bound (so "opponent's" = `Controller(It) ≠
+    /// Ctx::Controller`).
+    Restriction {
+        action: ActionKind,
+        subject: Filter,
+    },
     /// Continuous effect: while source is active, apply these CE mods.
     Static {
         mods: Vec<CEMod>,
         /// Scope: what the CE applies to. `None` = global; else filter on
         /// candidate objects/players.
         scope: Option<Filter>,
+        /// Global activation gate (CR 613 "as long as …"), re-evaluated each
+        /// recompute against the source's binding frame. `None` = always active;
+        /// `Some(e)` = the whole block contributes nothing while `e` is false
+        /// (e.g. delirium, metalcraft, "during your turn"). Distinct from `scope`,
+        /// which decides *which objects* a (then-active) effect touches.
+        condition: Option<Expr>,
     },
     /// "[cost]: [effect]." Mana abilities (CR 605.1a) are NOT a separate
     /// variant — they are activated abilities whose body could produce mana
@@ -90,6 +109,14 @@ pub enum AbilityKind {
     OnResolve {
         modes: Vec<IrSpellMode>,
     },
+}
+
+/// A player action an `AbilityKind::Restriction` can forbid (CR 601 cast / 602.5
+/// activate / 508–509 attack-block). Grows as cards need it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ActionKind {
+    Cast,
+    Activate,
 }
 
 /// Trigger specification — what event fires this ability.
@@ -150,6 +177,14 @@ pub enum EventPattern {
     },
     /// A spell is cast.
     SpellCast {
+        spell_filter: Filter,
+    },
+    /// A spell on the stack is about to be countered (CR 701.5). Fired by
+    /// `counter_one` before removal; a matching `AbilityKind::Prohibition`
+    /// suppresses it ("this spell can't be countered" — Emrakul, Long Goodbye).
+    /// `spell_filter` runs with the countered spell as the subject (`Ctx::It`),
+    /// so `It == Source` self-scopes the prohibition to its own spell.
+    SpellBeingCountered {
         spell_filter: Filter,
     },
     /// A player draws one or more cards.

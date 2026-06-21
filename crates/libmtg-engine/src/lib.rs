@@ -860,7 +860,7 @@ pub(crate) fn recompute(state: &mut SimState) {
         }
         // IR-authored static abilities (dual-pathway alongside static_ability_defs).
         for ability in &card_def.abilities {
-            for mut ci in crate::ir::executor::ir_static_to_cis(id, obj.controller, ability) {
+            for mut ci in crate::ir::executor::ir_static_to_cis(id, obj.controller, ability, state) {
                 ci.timestamp = obj.ci_timestamp;
                 static_cis.push(ci);
             }
@@ -1167,6 +1167,9 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     let mut options = Vec::new();
     // Battlefield permanents.
     for card in state.permanents_of(who) {
+        // Null Rod / Karn: artifact mana abilities can't be activated. Source-keyed
+        // action-Restriction (mana abilities are activated abilities — CR 605.1a).
+        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, card.id) { continue; }
         let mas = state.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
         let bf = match card.bf() { Some(bf) => bf, None => continue };
         for (idx, ma) in mas.iter().enumerate() {
@@ -1185,6 +1188,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     }
     // Hand-zone mana abilities (e.g. Simian Spirit Guide).
     for card in state.hand_of(who) {
+        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, card.id) { continue; }
         let mas = state.catalog.get(&card.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
         for (idx, ma) in mas.iter().enumerate() {
             if !ma.activatable { continue; }
@@ -1227,6 +1231,8 @@ pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<Ma
         state.objects.iter().find_map(|(id, c)| {
             if used.contains(id) { return None; }
             if c.controller != who || !c.in_zone(Zone::Battlefield) { return None; }
+            // Null Rod / Karn: don't plan to tap an artifact whose abilities are restricted.
+            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, *id) { return None; }
             let bf = c.bf()?;
             let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
@@ -1244,6 +1250,7 @@ pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<Ma
     let find_hand = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize)> {
         state.hand_of(who).find_map(|c| {
             if used.contains(&c.id) { return None; }
+            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Activate, c.id) { return None; }
             let mas = state.catalog.get(&c.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, _) = mas.iter().enumerate().find(|(_, ma)| {
                 ma.activatable
@@ -2441,8 +2448,24 @@ pub(crate) fn fire_event(
     // from catalog, filtered by active_when predicate.
     let prohibited = state.objects.iter().any(|(id, obj)| {
         state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
+            // Closure prohibitions (legacy path, being retired).
             card_def.prohibition_defs.iter().any(|pdef| {
                 (pdef.active_when)(*id, state) && (pdef.check)(&event, *id, obj.controller, state)
+            })
+            // IR prohibitions: `AbilityKind::Prohibition { matches }` — the event
+            // pipeline's single "can't" mechanism (CR 101.2). The pattern matches the
+            // proposed event; a match suppresses it. Self-scoping (e.g. `It == Source`)
+            // gates relevance; an explicit armed-zone gate is added when a static
+            // battlefield prohibition (Null Rod) needs it.
+            || card_def.abilities.iter().any(|ab| {
+                if let crate::ir::ability::AbilityKind::Prohibition { matches } = &ab.kind {
+                    let env = crate::ir::executor::BindEnv::new()
+                        .with_source(*id)
+                        .with_controller(obj.controller);
+                    crate::ir::executor::match_event_pattern(matches, &event, &env, state).is_some()
+                } else {
+                    false
+                }
             })
         })
     });

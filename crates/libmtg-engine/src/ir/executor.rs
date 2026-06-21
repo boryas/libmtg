@@ -939,49 +939,43 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         }
 
         Action::ApplyCE { target, mods, expiry } => {
-            let Value::Obj(target_id) = eval_expr(target, state, env) else {
-                return ExecResult::Ok;
-            };
-            if target_id == ObjId::UNSET {
+            // Target may be a single object (Mistrise/Dauthi: a chosen card) or a
+            // set (Toxic Deluge: every creature). The affected id set is locked at
+            // resolution (CR 611.2c — later-entering objects are not affected);
+            // each mod becomes one CI sharing that membership filter, so each gets
+            // its own correct CR-613 layer (via the shared `cemod_to_modifier`).
+            let target_ids: Vec<ObjId> = obj_ids_of(eval_expr(target, state, env))
+                .into_iter()
+                .filter(|id| *id != ObjId::UNSET)
+                .collect();
+            if target_ids.is_empty() {
                 return ExecResult::Ok;
             }
             let source_id = env.source.unwrap_or(ObjId::UNSET);
             let ctrl = env.controller.unwrap_or(actor);
             let engine_expiry = map_ir_expiry(expiry);
-            let ts = state.next_ci_timestamp();
 
-            let mut writes: Vec<crate::CeWrites> = Vec::new();
+            // Build each CI up front (needs `&state` for `cemod_to_modifier`'s
+            // Expr eval), then push — avoids borrowing `state` mutably and
+            // immutably at once.
+            let mut built: Vec<ContinuousInstance> = Vec::new();
             for m in mods {
-                for axis in writes_of(m) {
-                    if let Some(w) = axis_to_cewrites(axis) {
-                        if !writes.contains(&w) {
-                            writes.push(w);
-                        }
-                    }
-                }
+                let Some(build) = cemod_to_modifier(m, env, state) else { continue };
+                let ts = state.next_ci_timestamp();
+                let filter_ids = target_ids.clone();
+                built.push(ContinuousInstance {
+                    source_id,
+                    controller: ctrl,
+                    layer: build.layer,
+                    reads: build.reads,
+                    writes: build.writes,
+                    timestamp: ts,
+                    filter: std::sync::Arc::new(move |id, _ctr, _state| filter_ids.contains(&id)),
+                    modifier: build.modifier,
+                    expiry: engine_expiry.clone(),
+                });
             }
-
-            let mods_cloned = mods.clone();
-            state.continuous_instances.push(ContinuousInstance {
-                source_id,
-                controller: ctrl,
-                // Cast-permission / characteristic-text modifications are CR
-                // 613.1b layer 3 effects (rules-text). Other CE layers land
-                // when a card needs P/T pump / type override / etc. via
-                // ApplyCE — the correct layer can be picked by inspecting
-                // `writes` if needed.
-                layer: ContinuousLayer::L3TextEffects,
-                reads: Vec::new(),
-                writes,
-                timestamp: ts,
-                filter: std::sync::Arc::new(move |id, _ctr, _state| id == target_id),
-                modifier: std::sync::Arc::new(move |def, _state| {
-                    for m in &mods_cloned {
-                        apply_cemod_to_spell_def(def, m);
-                    }
-                }),
-                expiry: engine_expiry,
-            });
+            state.continuous_instances.extend(built);
             ExecResult::Ok
         }
 
@@ -1120,10 +1114,13 @@ fn axis_to_cewrites(axis: Axis) -> Option<crate::CeWrites> {
     }
 }
 
-/// Apply a `CEMod` to a spell's (cloned) `CardDef` via the CI modifier hook.
-/// Only the CEMods that are *meaningful on a stack-resident spell* are wired
-/// here — Mistrise Village's `Uncounterable` is the first. Other variants
-/// (PumpPT on a spell, etc.) land when needed by a real card.
+/// Apply a non-P/T `CEMod` to a (cloned) `CardDef` via the CI modifier hook.
+/// Handles the rules-text / cast-permission mods that need no env at apply time:
+/// `Uncounterable` (Mistrise), `CastableFrom` + `AltCost` (Dauthi free-cast).
+/// `PumpPT` is handled separately in the `ApplyCE` arm — its `Expr` deltas are
+/// evaluated against the live env there and baked in, since this hook is env-less.
+/// The remaining ~25 `CEMod` variants are still only honored by bespoke closure
+/// `ContinuousInstance`s on cards, not by this IR path (see DESIGN.org 2026-06-20).
 fn apply_cemod_to_spell_def(def: &mut CardDef, cemod: &CEMod) {
     use crate::catalog::{AlternateCost, ProhibitionDef};
     use crate::ir::ce::CostSpec;
@@ -1153,6 +1150,104 @@ fn apply_cemod_to_spell_def(def: &mut CardDef, cemod: &CEMod) {
             _ => {}
         },
         _ => {}
+    }
+}
+
+/// The CEMod-intrinsic half of a continuous instance: which CR-613 sublayer it
+/// lives in, what characteristic axes it reads/writes (for recompute dependency
+/// ordering), and the modifier that mutates a materialised `CardDef`. The CI's
+/// *extrinsic* half — filter (scope), expiry, timestamp, source, controller — is
+/// supplied by the caller (the Static path, the `ApplyCE` arm, …).
+pub(crate) struct CeBuild {
+    pub layer: ContinuousLayer,
+    pub reads: Vec<crate::CeReads>,
+    pub writes: Vec<crate::CeWrites>,
+    pub modifier: crate::ContinuousModFn,
+}
+
+/// Single source of truth: `CEMod` → `CeBuild`. Both IR continuous-effect entry
+/// points (the `AbilityKind::Static` path via `cemod_to_ci`, and the one-shot
+/// `Action::ApplyCE` arm) route through this, so a CEMod is implemented once and
+/// every path gains it. `env`/`state` let value-carrying mods (e.g. `PumpPT`'s
+/// `Expr` deltas — Toxic Deluge's −X/−X) evaluate against the live binding frame
+/// and bake concrete amounts into the modifier; mods with no dynamic operand
+/// ignore them. Returns `None` for CEMods with no recompute-time modifier yet
+/// (the standing CE breadth gap — see DESIGN.org 2026-06-20).
+pub(crate) fn cemod_to_modifier(
+    cemod: &CEMod,
+    env: &BindEnv,
+    state: &SimState,
+) -> Option<CeBuild> {
+    use crate::ir::ce::BasicLandType;
+    use crate::{CeReads, CeWrites};
+    match cemod {
+        CEMod::SetBasicLandType(kind) => {
+            let kind: BasicLandType = *kind;
+            Some(CeBuild {
+                layer: ContinuousLayer::L4TypeEffects,
+                reads: vec![CeReads::Supertypes],
+                writes: vec![CeWrites::LandTypes, CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_set_basic_land_type(def, kind);
+                }),
+            })
+        }
+        CEMod::AddBasicLandType(kind) => {
+            let kind: BasicLandType = *kind;
+            Some(CeBuild {
+                layer: ContinuousLayer::L4TypeEffects,
+                reads: vec![CeReads::LandTypes],
+                writes: vec![CeWrites::LandTypes],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_add_basic_land_type(def, kind);
+                }),
+            })
+        }
+        CEMod::PumpPT(p, t) => {
+            // Evaluate the deltas now (env may hold an announced X); bake them in.
+            let pv = expect_num(eval_expr(p, state, env)) as i32;
+            let tv = expect_num(eval_expr(t, state, env)) as i32;
+            Some(CeBuild {
+                layer: ContinuousLayer::L7PowerToughness,
+                reads: vec![],
+                writes: vec![CeWrites::PowerToughness],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.adjust_pt(pv, tv);
+                    }
+                }),
+            })
+        }
+        CEMod::AddKeyword(kw) => {
+            // CR 613.1f layer 6: grant a keyword ability (trample, haste, …).
+            let kw = *kw;
+            Some(CeBuild {
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.keywords.insert(kw);
+                    }
+                }),
+            })
+        }
+        // Cast-permission / rules-text mods (CR 613.1b layer 3): mutate the def
+        // via the shared env-less hook (Uncounterable, CastableFrom, AltCost).
+        CEMod::Uncounterable | CEMod::CastableFrom(_) | CEMod::AltCost(_) => {
+            let cemod = cemod.clone();
+            Some(CeBuild {
+                layer: ContinuousLayer::L3TextEffects,
+                reads: vec![],
+                writes: vec![],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_cemod_to_spell_def(def, &cemod);
+                }),
+            })
+        }
+        // Remaining CEMods have no recompute-time modifier yet — the standing CE
+        // breadth gap. Each lands here as a new arm during the CE migration.
+        _ => None,
     }
 }
 
@@ -1234,6 +1329,13 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         Expr::Attacking(e) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.attacking))
+        }
+        Expr::AttachedTo(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            match state.permanent_bf(o).and_then(|bf| bf.attached_to) {
+                Some(id) => Value::Obj(id),
+                None => Value::Unit,
+            }
         }
         Expr::Unblocked(e) => {
             let o = expect_obj(eval_expr(e, state, env));
@@ -1494,6 +1596,39 @@ pub(crate) fn matches(
     expect_bool(eval_expr(&filter.0, state, &env))
 }
 
+/// Is the player action `kind` on `subject_id` forbidden by an active
+/// `AbilityKind::Restriction` (CR 101.2 "can't")? Walks battlefield sources (a
+/// restriction is active while its source is on the battlefield) and matches each
+/// `Restriction { action: kind, subject }` against `subject_id` (bound as `Ctx::It`,
+/// with the restriction source/controller in scope so "opponent's" works). The legal-
+/// option producers call this as an AND-NOT gate over *permission*, making "can't
+/// beats can" order-independent. The action analogue of the event `Prohibition` walk
+/// in `fire_event` Stage 1.
+pub(crate) fn action_restricted(
+    state: &SimState,
+    kind: crate::ir::ability::ActionKind,
+    subject_id: ObjId,
+) -> bool {
+    use crate::ir::ability::AbilityKind;
+    state.objects.iter().any(|(id, obj)| {
+        if !matches!(obj.zone(), Some(Zone::Battlefield)) {
+            return false;
+        }
+        state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
+            card_def.abilities.iter().any(|ab| {
+                if let AbilityKind::Restriction { action, subject } = &ab.kind {
+                    *action == kind && {
+                        let env = BindEnv::new().with_source(*id).with_controller(obj.controller);
+                        matches(subject, subject_id, state, &env)
+                    }
+                } else {
+                    false
+                }
+            })
+        })
+    })
+}
+
 /// Test whether a filter matches a candidate player. `Ctx::It` binds to the
 /// player; used for trigger actor matching (e.g., "whenever an opponent …").
 pub(crate) fn matches_player(
@@ -1677,6 +1812,20 @@ pub(crate) fn match_event_pattern(
                     .with_var("triggered_obj", Value::Obj(*card_id))
                     .with_var("triggered_actor", Value::Player(*caster))
                     .with_var("triggered_mana_spent", Value::Bool(*mana_spent)),
+            )
+        }
+
+        EventPattern::SpellBeingCountered { spell_filter } => {
+            let crate::GameEvent::SpellBeingCountered { card_id, caster } = event else {
+                return None;
+            };
+            if !matches(spell_filter, *card_id, state, env) {
+                return None;
+            }
+            Some(
+                env.clone()
+                    .with_var("triggered_obj", Value::Obj(*card_id))
+                    .with_var("triggered_actor", Value::Player(*caster)),
             )
         }
 
@@ -2107,10 +2256,10 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::PT);
             walk_reads(e, out);
         }
-        Expr::Attacking(e) | Expr::Unblocked(e) => {
-            // Battlefield-state projection — no CE axis applies (combat
-            // state isn't a continuous-effect surface). Walk the operand
-            // for reads but emit no axis push.
+        Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e) => {
+            // Battlefield-state projection — no CE axis applies (combat /
+            // attachment state isn't a continuous-effect characteristic
+            // surface). Walk the operand for reads but emit no axis push.
             walk_reads(e, out);
         }
         // Mana cost is a printed characteristic; layer 1 copy is the only
@@ -2275,7 +2424,7 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
 
 // ── IR static → ContinuousInstance bridge ────────────────────────────────────
 //
-// Translates an `AbilityKind::Static { mods, scope }` block into the legacy
+// Translates an `AbilityKind::Static { mods, scope, condition }` block into the legacy
 // `ContinuousInstance` records that `recompute` already consumes. One CI per
 // CEMod — each CEMod has a single CR-613 layer.
 //
@@ -2285,66 +2434,56 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
 
 use crate::ir::ability::{Ability, AbilityKind};
 use crate::ir::ce::BasicLandType;
-use crate::{CardDef, CeReads, CeWrites, ContinuousInstance, ContinuousLayer, Expiry};
+use crate::{CardDef, ContinuousInstance, ContinuousLayer, Expiry};
 
 pub(crate) fn ir_static_to_cis(
     source_id: ObjId,
     controller: PlayerId,
     ability: &Ability,
+    state: &SimState,
 ) -> Vec<ContinuousInstance> {
-    let AbilityKind::Static { mods, scope } = &ability.kind else {
+    let AbilityKind::Static { mods, scope, condition } = &ability.kind else {
         return Vec::new();
     };
+    // CR 613 "as long as …" gate: when the condition is false this recompute,
+    // the whole block contributes nothing (Decision 4 — block condition, not a
+    // per-object filter). Evaluated against the source's binding frame.
+    if let Some(cond) = condition {
+        let env = BindEnv::new().with_source(source_id).with_controller(controller);
+        if !expect_bool(eval_expr(cond, state, &env)) {
+            return Vec::new();
+        }
+    }
     mods.iter()
-        .filter_map(|m| cemod_to_ci(source_id, controller, m, scope))
+        .filter_map(|m| cemod_to_ci(source_id, controller, m, scope, state))
         .collect()
 }
 
+/// Wrap a `CEMod` into a *static-ability* `ContinuousInstance` (CR 613): the
+/// CEMod-intrinsic half (layer/reads/writes/modifier) comes from the shared
+/// `cemod_to_modifier`; the static half adds the scope filter and the
+/// "while the source is on the battlefield" expiry. `timestamp` is assigned by
+/// the recompute caller.
 fn cemod_to_ci(
     source_id: ObjId,
     controller: PlayerId,
     cemod: &CEMod,
     scope: &Option<Filter>,
+    state: &SimState,
 ) -> Option<ContinuousInstance> {
-    match cemod {
-        CEMod::SetBasicLandType(kind) => {
-            let filter = build_filter(source_id, controller, scope);
-            let kind = *kind;
-            let modifier: crate::ContinuousModFn = std::sync::Arc::new(move |def, _state| {
-                apply_set_basic_land_type(def, kind);
-            });
-            Some(ContinuousInstance {
-                source_id,
-                controller,
-                layer: ContinuousLayer::L4TypeEffects,
-                reads: vec![CeReads::Supertypes],
-                writes: vec![CeWrites::LandTypes, CeWrites::Abilities],
-                timestamp: 0, // assigned by recompute caller
-                filter,
-                modifier,
-                expiry: Expiry::WhileSourceOnBattlefield,
-            })
-        }
-        CEMod::AddBasicLandType(kind) => {
-            let filter = build_filter(source_id, controller, scope);
-            let kind = *kind;
-            let modifier: crate::ContinuousModFn = std::sync::Arc::new(move |def, _state| {
-                apply_add_basic_land_type(def, kind);
-            });
-            Some(ContinuousInstance {
-                source_id,
-                controller,
-                layer: ContinuousLayer::L4TypeEffects,
-                reads: vec![CeReads::LandTypes], // "already has this type?" check
-                writes: vec![CeWrites::LandTypes],
-                timestamp: 0,
-                filter,
-                modifier,
-                expiry: Expiry::WhileSourceOnBattlefield,
-            })
-        }
-        _ => None, // other CEMods not yet wired through the static recompute path
-    }
+    let env = BindEnv::new().with_source(source_id).with_controller(controller);
+    let build = cemod_to_modifier(cemod, &env, state)?;
+    Some(ContinuousInstance {
+        source_id,
+        controller,
+        layer: build.layer,
+        reads: build.reads,
+        writes: build.writes,
+        timestamp: 0, // assigned by recompute caller
+        filter: build_filter(source_id, controller, scope),
+        modifier: build.modifier,
+        expiry: Expiry::WhileSourceOnBattlefield,
+    })
 }
 
 /// Build a `ContinuousFilterFn` from an optional scope `Filter`. `None`

@@ -603,6 +603,10 @@ pub enum SpellModes {
 
 impl SpellModes {
     /// Construct a modal spell. Panics if fewer than 2 modes are provided.
+    /// Unused since every modal spell moved to IR `AbilityKind::OnResolve { modes }`;
+    /// retained with the rest of the legacy `SpellModes` path (still used by the
+    /// last two single-mode `untargeted_mode` cards) until that path is retired.
+    #[allow(dead_code)]
     pub(crate) fn modal(modes: Vec<SpellMode>) -> Self {
         assert!(modes.len() >= 2, "modal spells require at least 2 modes, got {}", modes.len());
         SpellModes::Modal(modes)
@@ -623,6 +627,7 @@ impl SpellModes {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_modal(&self) -> bool {
         matches!(self, SpellModes::Modal(_))
     }
@@ -1197,15 +1202,6 @@ impl CardDef {
             CardKind::Planeswalker(p) => Some(&mut p.abilities),
             CardKind::Enchantment(e) => Some(&mut e.abilities),
             CardKind::Instant(_) | CardKind::Sorcery(_) => None,
-        }
-    }
-
-    pub(crate) fn mana_abilities_mut(&mut self) -> &mut [ManaAbility] {
-        match &mut self.kind {
-            CardKind::Land(l) => &mut l.mana_abilities,
-            CardKind::Creature(c) => &mut c.mana_abilities,
-            CardKind::Artifact(a) => &mut a.mana_abilities,
-            _ => &mut [],
         }
     }
 
