@@ -2022,10 +2022,25 @@ pub(crate) fn match_event_pattern(
             .iter()
             .find_map(|p| match_event_pattern(p, event, env, state)),
 
+        EventPattern::LandPlayed { who, land_filter } => {
+            let crate::GameEvent::LandPlayed { id, controller: player } = event else {
+                return None;
+            };
+            if !matches_player(who, *player, state, env) {
+                return None;
+            }
+            if !matches(land_filter, *id, state, env) {
+                return None;
+            }
+            Some(
+                env.clone()
+                    .with_var("triggered_obj", Value::Obj(*id))
+                    .with_var("triggered_actor", Value::Player(*player)),
+            )
+        }
+
         // Stage-3+ patterns — not wired yet.
-        EventPattern::DamageDealt { .. }
-        | EventPattern::Blocks { .. }
-        | EventPattern::LandPlayed { .. } => None,
+        EventPattern::DamageDealt { .. } | EventPattern::Blocks { .. } => None,
     }
 }
 

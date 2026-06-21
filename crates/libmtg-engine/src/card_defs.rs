@@ -763,7 +763,11 @@ fn ancient_tomb() -> CardDef {
 }
 
 fn city_of_traitors() -> CardDef {
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = CardDef::new(
         "City of Traitors",
         CardKind::Land(LandData {
             mana_abilities: vec![ManaAbility {
@@ -776,29 +780,34 @@ fn city_of_traitors() -> CardDef {
         }),
         vec![], None,
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, _state, pending| {
-                // "When you play another land, sacrifice City of Traitors."
-                if let GameEvent::LandPlayed { id, controller: ctlr } = event {
-                    if *id != source_id && *ctlr == controller {
-                        pending.push(TriggerContext {
-                            source_name: "City of Traitors".into(),
-                            controller,
-                            target_spec: TargetSpec::None,
-                            effect: Effect(Arc::new(move |state, t, _targets| {
-                                if state.permanent_bf(source_id).is_some() {
-                                    state.log(t, controller, "City of Traitors → sacrifice (another land played)");
-                                    change_zone(source_id, ZoneId::Graveyard, state, t, controller);
-                                }
-                            })),
-                        });
-                    }
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
-        vec![], vec![], vec![],
-    )
+        vec![], vec![], vec![], vec![],
+    );
+    // "When you play another land, sacrifice City of Traitors." `land_filter` is
+    // "another land" (the played land ≠ this one); the condition scopes to "you".
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::LandPlayed {
+                    who: ir_any(),
+                    land_filter: ir_not(ir_self()),
+                },
+                condition: Some(Expr::Eq(
+                    Box::new(Expr::Ctx(Ctx::Var("triggered_actor"))),
+                    Box::new(Expr::Ctx(Ctx::Controller)),
+                )),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sacrifice {
+                who: IrWho::You,
+                filter: ir_self(),
+                count: Expr::Num(1),
+                bind_as: None,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When you play another land, sacrifice City of Traitors."),
+    }];
+    card
 }
 
 fn polluted_delta() -> CardDef {
