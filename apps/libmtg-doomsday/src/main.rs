@@ -187,13 +187,19 @@ fn print_report(s: &GoldfishStats, cutoff: u32) {
 
     if !s.mull_count.is_empty() {
         let kept: u32 = s.mull_count.values().sum();
-        println!("\n  mulligans (kept at each hand size) + avg predicted P(cast by T{cutoff_t}):");
+        println!("\n  mulligans (kept at each hand size) + predicted vs realized P(cast by T{cutoff_t}):");
         for k in 0u8..=3 {
             let n = s.mull_count.get(&k).copied().unwrap_or(0);
             if n == 0 { continue; }
             let avg = s.mull_pred_sum.get(&k).copied().unwrap_or(0.0) / n as f64;
-            println!("    {} cards: {:>6} ({:>4.1}% of keeps)   avg predicted {:.3}",
-                7 - k, n, 100.0 * n as f64 / kept.max(1) as f64, avg);
+            let realized = s.mull_cast.get(&k).copied().unwrap_or(0) as f64 / n as f64;
+            println!("    {} cards: {:>6} ({:>4.1}% of keeps)   pred {:.3}  realized {:.3}",
+                7 - k, n, 100.0 * n as f64 / kept.max(1) as f64, avg, realized);
+        }
+        if s.kept7_count > 0 && s.mull7_count > 0 {
+            println!("    air in opening 7 — kept-at-7: {:.2}   mulliganed: {:.2}",
+                s.kept7_air_sum as f64 / s.kept7_count as f64,
+                s.mull7_air_sum as f64 / s.mull7_count as f64);
         }
         let det = s.deterministic_cast;
         let sto = s.stochastic_cast;

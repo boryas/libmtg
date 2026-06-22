@@ -75,7 +75,7 @@ const AIR: &[&str] = &[
     "Jace, Wielder of Mysteries", "Wasteland", "Cavern of Souls",
 ];
 
-fn is_air(name: &str) -> bool { AIR.contains(&name) }
+pub(crate) fn is_air(name: &str) -> bool { AIR.contains(&name) }
 
 /// Explicit, inspectable signals over the opening hand — plain card counts plus one
 /// trustworthy deterministic-solver fact. No `p_cast_by`. Named-air cards (see [`AIR`])

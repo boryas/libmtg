@@ -76,6 +76,16 @@ pub struct GoldfishStats {
     /// mulligans-taken → Σ of the kept hand's predicted P(cast by cutoff); divide by
     /// `mull_count` for the average predicted probability at that hand size.
     pub mull_pred_sum: BTreeMap<u8, f64>,
+    /// mulligans-taken → number of those kept games that actually CAST by the cutoff;
+    /// divide by `mull_count` for the realized P(cast | kept at this hand size).
+    pub mull_cast: BTreeMap<u8, u32>,
+    /// Air content of the FIRST opening 7, split by its fate — Σ air cards + #hands for
+    /// the 7s that were KEPT at 7 vs the 7s that were MULLIGANED. Lets us ask, within one
+    /// deck, "do air-heavier 7s get thrown back?" (the Wasteland-is-air mull, isolated).
+    pub kept7_air_sum: u64,
+    pub kept7_count: u64,
+    pub mull7_air_sum: u64,
+    pub mull7_count: u64,
     /// Games that cast by the cutoff whose OPENING hand already had a guaranteed
     /// (no-draw) line by the cutoff.
     pub deterministic_cast: u32,
@@ -213,6 +223,17 @@ where
             let cast_turn = state.terminal.then_some(state.current_turn as u32);
             stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn });
         }
+        // Air content of the FIRST opening 7, by its fate. If no mulligan was taken the
+        // kept hand IS that 7; otherwise the first thrown-back hand is. (Isolates whether
+        // air-heavier sevens get mulliganed, within a fixed deck.)
+        let air = |h: &[String]| h.iter().filter(|c| mull::is_air(c)).count() as u64;
+        if let Some(first_mull) = state.mulliganed_hands_us.first() {
+            stats.mull7_air_sum += air(first_mull);
+            stats.mull7_count += 1;
+        } else if !state.opening_hand_us.is_empty() {
+            stats.kept7_air_sum += air(&state.opening_hand_us);
+            stats.kept7_count += 1;
+        }
         let cast_by_cutoff = state.terminal && cutoff > 0 && state.current_turn <= cutoff;
         if state.terminal {
             *stats.cast_turn.entry(state.current_turn).or_insert(0) += 1;
@@ -229,6 +250,9 @@ where
         if let Some((mull, pred, det)) = parse_stats_line(&state.decision_log) {
             *stats.mull_count.entry(mull).or_insert(0) += 1;
             *stats.mull_pred_sum.entry(mull).or_insert(0.0) += pred;
+            if cast_by_cutoff {
+                *stats.mull_cast.entry(mull).or_insert(0) += 1;
+            }
             if cast_by_cutoff {
                 if det {
                     stats.deterministic_cast += 1;
