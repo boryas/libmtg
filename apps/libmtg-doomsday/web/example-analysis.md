@@ -14,7 +14,7 @@ The doomsday goldfish simulator allows us to understand how likely various confi
   plan-coverage rule (keep a hand iff it has a viable gameplan, like a fast flipped tamiyo or cantrips and interaction, not just "fast" hands). How the
   mulligan strategy *itself* changes the numbers is a separate question for another
   article.
-- **All runs:** 5000 goldfish games on variants of post Flow State tempo Doomsday.
+- **All runs:** 5000–10000 goldfish games on variants of post Flow State tempo Doomsday (tight-margin questions re-run at 10000).
 
 ---
 
@@ -24,11 +24,11 @@ Trade Ponder (premier cantrip) for Wasteland (utility land), total held at 6.
 
 | Build         | P(DD<=T3) |
 |---------------|--------------|
-| 2 Pon / 4 Wst | 58.9% |
-| 3 Pon / 3 Wst | 59.2% |
-| 4 Pon / 2 Wst | 60.1% |
+| 2 Pon / 4 Wst | 61.6% |
+| 3 Pon / 3 Wst | 61.8% |
+| 4 Pon / 2 Wst | 61.5% |
 
-- Per-card slope: **≈ +0.6% / Ponder** — a gentle, monotone climb.
+- Per-card slope: **≈ flat** — all three land at ~61.6% (10000 games); the Ponder count barely moves the T3 rate.
 
 **Takeaway:** The marginal selection of the 4th ponder does not substantially improve the probability of a T3 doomsday. It can, of course, still be optimal to play 4 Ponder for other harder to quantify benefits like cantripping into lands, enabling Flow State, etc.
 
@@ -40,11 +40,11 @@ Vary the total number of Lotus Petals in the deck, swapping for cards that don't
 
 | Lotus Petals       | P(DD<=T3) |
 |---------|--------------|
-| 0 | 56.0%  |
-| 1 | 57.9%  |
-| 2 | 58.8% |
-| 3 | 62.3% |
-| 4 | 65.1% |
+| 0 | 56.8%  |
+| 1 | 59.8%  |
+| 2 | 62.1% |
+| 3 | 63.3% |
+| 4 | 65.4% |
 
 - Per-card slope: **≈ +2% / Petal**.
 
@@ -60,12 +60,12 @@ The deck's 2 stock Petals are always kept; the table varies the **total** Petal 
 
 | Flex fill            | Total Petal / PT | P(DD<=T3) |
 |----------------------|------------------|----------|
-| 2 Wasteland (stock)  | 2 Petal / 0 PT   | 60.0%  |
-| +2 Petal             | 4 Petal / 0 PT   | 63.9%  |
-| +1 Petal +1 PT       | 3 Petal / 1 PT   | 66.3%  |
-| +2 PT                | 2 Petal / 2 PT   | 68.5%  |
+| 2 Wasteland (stock)  | 2 Petal / 0 PT   | 62.2%  |
+| +2 Petal             | 4 Petal / 0 PT   | 65.8%  |
+| +1 Petal +1 PT       | 3 Petal / 1 PT   | 68.0%  |
+| +2 PT                | 2 Petal / 2 PT   | 69.2%  |
 
-- Slopes here: **≈ +4% / PT** vs **≈ +2% / Petal** (still ~additive: 1/1 predicts 66.2, measures 66.3)
+- Slopes here: **≈ +3.5% / PT** vs **≈ +1.8% / Petal** (still ~additive: 1/1 predicts 67.5, measures 68.0)
 
 **Takeaway:** On pure speed, Personal Tutor yields almost double the effect of Lotus Petal. This is not too surprising, as the deck already has more mana (lands, rituals, and petals) than Doomsdays, so Doomsdays ought to be the main limiting factor.
 
@@ -73,7 +73,7 @@ The deck's 2 stock Petals are always kept; the table varies the **total** Petal 
 
 ## Conclusion
 
-If optimizing for straightline speed, Personal Tutor has the highest gain of the available options. The 4th Ponder has a marginal impact on pure speed. My personal conclusion is that Tempo Doomsday should forgo the ~8% boost to the probability of a <=T3 DD to play Wasteland, which synergizes heavily with the deck's tempo gameplans and pivots. Wasteland also has non-trivial applications tapping for mana to crack clues, cast Flow States and Barrowgoyfs, etc.
+If optimizing for straightline speed, Personal Tutor has the highest gain of the available options. The 4th Ponder has a marginal impact on pure speed. My personal conclusion is that Tempo Doomsday should forgo the ~7% boost to the probability of a <=T3 DD to play Wasteland, which synergizes heavily with the deck's tempo gameplans and pivots. Wasteland also has non-trivial applications tapping for mana to crack clues, cast Flow States and Barrowgoyfs, etc.
 
 ## Method footnotes _(optional, for the curious)_
 

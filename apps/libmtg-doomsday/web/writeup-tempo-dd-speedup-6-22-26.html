@@ -73,7 +73,8 @@
         plan-coverage rule (keep a hand iff it has a viable gameplan, like a fast flipped Tamiyo or
         cantrips and interaction, not just "fast" hands). How the mulligan strategy <em>itself</em>
         changes the numbers is a separate question for another article.</li>
-      <li><b>All runs:</b> 5000 goldfish games on variants of post-Flow-State tempo Doomsday.</li>
+      <li><b>All runs:</b> 5000–10000 goldfish games on variants of post-Flow-State tempo Doomsday
+        (the tight-margin questions were re-run at 10000).</li>
     </ul>
   </div>
 
@@ -81,12 +82,12 @@
   <p>Trade Ponder (premier cantrip) for Wasteland (utility land), total held at 6.</p>
   <table>
     <tr><th>Build</th><th class="num">P(DD&le;T3)</th></tr>
-    <tr><td>2 Pon / 4 Wst</td><td class="num">58.9%</td></tr>
-    <tr><td>3 Pon / 3 Wst</td><td class="num">59.2%</td></tr>
-    <tr><td>4 Pon / 2 Wst</td><td class="num">60.1%</td></tr>
+    <tr><td>2 Pon / 4 Wst</td><td class="num">61.6%</td></tr>
+    <tr><td>3 Pon / 3 Wst</td><td class="num">61.8%</td></tr>
+    <tr><td>4 Pon / 2 Wst</td><td class="num">61.5%</td></tr>
   </table>
-  <p class="slope">Per-card slope: <b>≈ +0.6% / Ponder</b> — a gentle, monotone climb
-    (20000 games; at 5000 the middle build dipped, but that was Monte-Carlo noise).</p>
+  <p class="slope">Per-card slope: <b>≈ flat</b> — all three land at ~61.6% (10000 games); the
+    Ponder count barely moves the T3 rate at all.</p>
   <div class="takeaway"><b>Takeaway:</b> The marginal selection of the 4th ponder does not
     substantially improve the probability of a T3 doomsday. It can, of course, still be optimal to
     play 4 Ponder for other harder to quantify benefits like cantripping into lands, enabling Flow
@@ -97,11 +98,11 @@
     doomsdays, like interaction pieces.</p>
   <table>
     <tr><th>N</th><th class="num">P(DD&le;T3)</th></tr>
-    <tr><td>0 Petal</td><td class="num">56.0%</td></tr>
-    <tr><td>1 Petal</td><td class="num">57.9%</td></tr>
-    <tr><td>2 Petal</td><td class="num">58.8%</td></tr>
-    <tr><td>3 Petal</td><td class="num">62.3%</td></tr>
-    <tr><td>4 Petal</td><td class="num">65.1%</td></tr>
+    <tr><td>0 Petal</td><td class="num">56.8%</td></tr>
+    <tr><td>1 Petal</td><td class="num">59.8%</td></tr>
+    <tr><td>2 Petal</td><td class="num">62.1%</td></tr>
+    <tr><td>3 Petal</td><td class="num">63.3%</td></tr>
+    <tr><td>4 Petal</td><td class="num">65.4%</td></tr>
   </table>
   <p class="slope">Per-card slope: <b>≈ +2% / Petal</b>.</p>
   <div class="takeaway"><b>Takeaway:</b> Marginal fast mana helps us much more than Ponders to get to
@@ -117,13 +118,13 @@
     as the two ex-Wasteland slots are filled.</p>
   <table>
     <tr><th>Flex fill</th><th>Total Petal / PT</th><th class="num">P(DD&le;T3)</th></tr>
-    <tr><td>2 Wasteland (stock)</td><td>2 Petal / 0 PT</td><td class="num">60.0%</td></tr>
-    <tr><td>+2 Petal</td><td>4 Petal / 0 PT</td><td class="num">63.9%</td></tr>
-    <tr><td>+1 Petal +1 PT</td><td>3 Petal / 1 PT</td><td class="num">66.3%</td></tr>
-    <tr><td>+2 PT</td><td>2 Petal / 2 PT</td><td class="num">68.5%</td></tr>
+    <tr><td>2 Wasteland (stock)</td><td>2 Petal / 0 PT</td><td class="num">62.2%</td></tr>
+    <tr><td>+2 Petal</td><td>4 Petal / 0 PT</td><td class="num">65.8%</td></tr>
+    <tr><td>+1 Petal +1 PT</td><td>3 Petal / 1 PT</td><td class="num">68.0%</td></tr>
+    <tr><td>+2 PT</td><td>2 Petal / 2 PT</td><td class="num">69.2%</td></tr>
   </table>
-  <p class="slope">Slopes here: <b>≈ +4% / PT</b> vs <b>≈ +2% / Petal</b> (still ~additive: 1/1
-    predicts 66.2, measures 66.3).</p>
+  <p class="slope">Slopes here: <b>≈ +3.5% / PT</b> vs <b>≈ +1.8% / Petal</b> (still ~additive: 1/1
+    predicts 67.5, measures 68.0).</p>
   <div class="takeaway"><b>Takeaway:</b> On pure speed, Personal Tutor yields almost double the effect
     of Lotus Petal. This is not too surprising, as the deck already has more mana (lands, rituals, and
     petals) than Doomsdays, so Doomsdays ought to be the main limiting factor.</div>
@@ -131,7 +132,7 @@
   <h2>Conclusion</h2>
   <p>If optimizing for straightline speed, Personal Tutor has the highest gain of the available
     options. The 4th Ponder has a marginal impact on pure speed. My personal conclusion is that Tempo
-    Doomsday should forgo the ~8% boost to the probability of a &le;T3 DD to play Wasteland, which
+    Doomsday should forgo the ~7% boost to the probability of a &le;T3 DD to play Wasteland, which
     synergizes heavily with the deck's tempo gameplans and pivots. Wasteland also has non-trivial
     applications tapping for mana to crack clues, cast Flow States and Barrowgoyfs, etc.</p>
 
