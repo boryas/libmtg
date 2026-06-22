@@ -44,7 +44,7 @@ The mechanism shows up in three numbers.
 
 In every build the hands you throw back carry markedly more air. That is the "Wasteland = air" mulligan, isolated: holding a Wasteland makes a seven likelier to be junked.
 
-**The air-heavy deck mulligans more.** Because it opens more air, the 2-Ponder build keeps only 65.7% of its sevens; the 4-Ponder build keeps 70.6%. The worse deck throws back more hands, and each mulligan is another chance to find a plan.
+**The air-heavy deck mulligans more.** Because it opens more air, the 2-Ponder build keeps only 65.7% of its sevens; the 4-Ponder build keeps 70.6%. The slower wasteland heavy deck throws back more hands, and each mulligan is another chance to find a plan.
 
 | Build | keeps at 7 | at 6 | at 5 | at 4 |
 |---------------|------|------|------|------|
