@@ -77,7 +77,7 @@
   <h2>The mulligan erases it</h2>
   <p>Now turn the mulligan strategy back on (<b>Realistic</b> = keep only hands with a viable plan):</p>
   <table>
-    <tr><th>Build</th><th class="num">Keep7</th><th class="num">Realistic</th><th class="num">mull lift</th></tr>
+    <tr><th>Build</th><th class="num">Keep7</th><th class="num">Realistic</th><th class="num">mulligan lift</th></tr>
     <tr><td>2 Pon / 4 Wst</td><td class="num">50.2%</td><td class="num">61.5%</td><td class="lift">+11.3</td></tr>
     <tr><td>3 Pon / 3 Wst</td><td class="num">51.6%</td><td class="num">61.9%</td><td class="lift">+10.3</td></tr>
     <tr><td>4 Pon / 2 Wst</td><td class="num">53.1%</td><td class="num">60.9%</td><td class="lift">+7.8</td></tr>
@@ -131,9 +131,14 @@
 
   <h2>Future Work</h2>
   <p>Since there is no discernable effect on speed from Ponders with realistic mulligans, the place we
-    would expect it to really shine is in hand <em>quality</em> when we Doomsday. Sure, we can paper
+    would expect it to really shine is in hand <em>quality</em> when we Doomsday. Sure we can paper
     over our Ponders with London mulligans, but we are much less likely to still have that Force of
     Will to back up the Doomsday if we had to mull to 5 to find it.</p>
+  <p>If we can expand the simulator to try to also optimize for and measure the valid interaction it
+    layered in with the Doomsday presented, then we are likely to see the beneficial effects of
+    Ponder. The naive treatment bolted on to the sim currently, which doesn't really optimize for
+    keeping interaction, does not yet show this effect (protection counts are relatively flat across
+    the builds).</p>
 
   <details>
     <summary>Method footnotes (optional, for the curious)</summary>
