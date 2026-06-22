@@ -32,6 +32,8 @@ Trade Ponder (premier cantrip) for Wasteland (utility land), total held at 6.
 
 **Takeaway:** The marginal selection of the 4th ponder does not substantially improve the probability of a T3 doomsday. It can, of course, still be optimal to play 4 Ponder for other harder to quantify benefits like cantripping into lands, enabling Flow State, etc.
 
+If this result is surprising, check out [The London Ponder Paradox](../london-ponder-paradox-6-22-26/).
+
 ---
 
 ## Question 2 — Effect of more Lotus Petals
