@@ -28,7 +28,7 @@ Trade Ponder (premier cantrip) for Wasteland (utility land), total held at 6.
 | 3 Pon / 3 Wst | 59.2% |
 | 4 Pon / 2 Wst | 60.1% |
 
-- Per-card slope: **≈ +0.6% / Ponder** — a gentle, monotone climb. (20000 games here; at 5000 the middle build dipped, but that was Monte-Carlo noise.)
+- Per-card slope: **≈ +0.6% / Ponder** — a gentle, monotone climb.
 
 **Takeaway:** The marginal selection of the 4th ponder does not substantially improve the probability of a T3 doomsday. It can, of course, still be optimal to play 4 Ponder for other harder to quantify benefits like cantripping into lands, enabling Flow State, etc.
 
@@ -38,13 +38,13 @@ Trade Ponder (premier cantrip) for Wasteland (utility land), total held at 6.
 
 Vary the total number of Lotus Petals in the deck, swapping for cards that don't affect fast doomsdays, like interaction pieces.
 
-| N       | P(DD<=T3) |
+| Lotus Petals       | P(DD<=T3) |
 |---------|--------------|
-| 0 Petal | 56.0%  |
-| 1 Petal | 57.9%  |
-| 2 Petal | 58.8% |
-| 3 Petal | 62.3% |
-| 4 Petal | 65.1% |
+| 0 | 56.0%  |
+| 1 | 57.9%  |
+| 2 | 58.8% |
+| 3 | 62.3% |
+| 4 | 65.1% |
 
 - Per-card slope: **≈ +2% / Petal**.
 

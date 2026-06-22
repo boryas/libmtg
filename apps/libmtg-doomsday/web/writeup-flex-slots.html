@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>What goes in the flex slots? — Doomsday writeups</title>
+  <title>Assessing marginal speed-ups for Tempo Doomsday — Doomsday writeups</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif;
@@ -21,6 +21,7 @@
     table { border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; min-width: 18rem; }
     th, td { padding: 0.35rem 0.9rem; text-align: left; border-bottom: 1px solid #0f3460; }
     th { color: #888; font-weight: normal; }
+    th.num { text-align: right; }
     td.num { color: #f5b041; font-weight: bold; text-align: right; font-variant-numeric: tabular-nums; }
     .slope { font-size: 0.9rem; color: #9aa; margin: 0.3rem 0 0.8rem; }
     .slope b { color: #5dade2; }
@@ -45,27 +46,22 @@
 <div class="wrap">
   <div class="nav"><a href="../../">&larr; Doomsday</a> &nbsp;·&nbsp; <a href="../">Writeups</a> &nbsp;·&nbsp; <a href="../../goldfish/">Goldfish simulator</a></div>
 
-  <h1>What goes in the flex slots?</h1>
+  <h1>Assessing marginal speed-ups for Tempo Doomsday</h1>
 
-  <p>The tempo doomsday list built by Eureka22422 that has been showing results recently can be
-    found <a href="https://www.mtggoldfish.com/deck/7813548#paper">here</a>. Notably, it contains 3
-    wastelands and 3 ponders. This "heresy" against ponder, especially with 4 flow state to fuel, had
-    a lot of people wondering questions about the best use of the flex slots in the tempo doomsday
-    shell. Since the printing of flow state, tempo doomsday plays a very lean package of both tempo
-    and doomsday cards. There is the bare minimum of combo cards (2 wincons, 2 cyclers, 2 petals), and
-    no more Orcish Bowmasters alongside Tamiyo and Murktide as the tempo threats. There are only 4
-    interaction spells (3 Thoughtseize, 1 Daze) to back up the 4 Force of Wills. So really, there just
-    aren't that many flex slots left at all. One big question in the community was around the
-    importance of wasteland, and whether the wastelands could be sacrificed to try to go faster. The
-    two questions this analysis aims to address are: 1. should we play 3 ponder + 3 Wasteland or 4
-    Ponder + 2 Wasteland, and 2. Should we cut the wastelands altogether for more raw speed in the
-    form of petals, street wraiths, personal tutors, etc.</p>
+  <p>A variant of Doomsday that has been consistently putting up results since the printing of Flow
+    State is the <a href="https://www.mtggoldfish.com/deck/7813548#paper">tempo list</a> built by
+    Eureka22422. With slots getting tighter and tigher, that list notably contains only 3 Ponder to
+    make room for the third Wasteland. This "heresy" got me thinking about the effect of the 4th
+    Ponder and was a large part of my motivation for building the
+    <a href="../../goldfish/">doomsday goldfish simulator</a>. In this article, I will attempt to
+    analyze the effect of the 4th ponder, as well as the potential speedup benefit from cutting the
+    Wastelands for more "turbo" style cards like Personal Tutor.</p>
 
-  <p>The doomsday goldfish sim will help us understand how quickly can various configurations of the
-    tempo build assemble a T3 doomsday when it decides to dig as hard as possible for the doomsday.
-    This is meant to model a matchup like Boros Energy where we need to cast the Doomsday before the
-    cats tear us to shreds. We will use the goldfish sim to build up our intution about the effect
-    tweaking the numbers of the cards even has, and to try to directly compare the concrete proposed
+  <p>The doomsday goldfish simulator allows us to understand how likely various configurations of the
+    deck are to assemble a T3 doomsday when the pilot decides to dig as hard as possible for the
+    doomsday. This is meant to model a matchup like Boros Energy where we need to cast the Doomsday
+    before the cats tear us to shreds. We will use the goldfish sim to build up our intution about the
+    generic effects of tweaking the deck and to try to directly compare the concrete proposed
     configurations.</p>
 
   <div class="howto">
@@ -74,17 +70,17 @@
       <li><b>Metric:</b> <code>P(cast Doomsday by turn 3)</code> — the chance a solitaire game
         assembles and casts Doomsday by T3.</li>
       <li><b>Mulligan mode:</b> all numbers below use <code>Realistic</code> — a player-faithful
-        plan-coverage rule (keep a hand iff it has a viable plan to the combo). How the mulligan
-        strategy <em>itself</em> changes the numbers is a separate question for another article.</li>
-      <li><b>All runs:</b> 5000 goldfish games on the one deck above (Eureka's list, +1 Ponder /
-        −1 Wasteland to a 4-Ponder base for the sweeps).</li>
+        plan-coverage rule (keep a hand iff it has a viable gameplan, like a fast flipped Tamiyo or
+        cantrips and interaction, not just "fast" hands). How the mulligan strategy <em>itself</em>
+        changes the numbers is a separate question for another article.</li>
+      <li><b>All runs:</b> 5000 goldfish games on variants of post-Flow-State tempo Doomsday.</li>
     </ul>
   </div>
 
   <h2>Question 1 — Ponder vs. Wasteland</h2>
-  <p>Trade Ponder (premier cantrip) ↔ Wasteland (utility land), total held at 6.</p>
+  <p>Trade Ponder (premier cantrip) for Wasteland (utility land), total held at 6.</p>
   <table>
-    <tr><th>Build</th><th>P(DD&le;T3)</th></tr>
+    <tr><th>Build</th><th class="num">P(DD&le;T3)</th></tr>
     <tr><td>2 Pon / 4 Wst</td><td class="num">58.9%</td></tr>
     <tr><td>3 Pon / 3 Wst</td><td class="num">59.2%</td></tr>
     <tr><td>4 Pon / 2 Wst</td><td class="num">60.1%</td></tr>
@@ -92,16 +88,15 @@
   <p class="slope">Per-card slope: <b>≈ +0.6% / Ponder</b> — a gentle, monotone climb
     (20000 games; at 5000 the middle build dipped, but that was Monte-Carlo noise).</p>
   <div class="takeaway"><b>Takeaway:</b> The marginal selection of the 4th ponder does not
-    substantially improve the probability of a T3 doomsday, so that should not be considered the
-    reason to prefer Ponder over Wasteland. It can, of course, still be better to play 4 Ponder for
-    cantripping into lands, enabling Flow State, etc. Also, the Realistic mulligan strategy shows the
-    strongest effects in general, so we will prefer to use it to differentiate builds going
-    forward.</div>
+    substantially improve the probability of a T3 doomsday. It can, of course, still be optimal to
+    play 4 Ponder for other harder to quantify benefits like cantripping into lands, enabling Flow
+    State, etc.</div>
 
   <h2>Question 2 — Effect of more Lotus Petals</h2>
-  <p>N Lotus Petal replacing cards that don't affect fast doomsdays.</p>
+  <p>Vary the total number of Lotus Petals in the deck, swapping for cards that don't affect fast
+    doomsdays, like interaction pieces.</p>
   <table>
-    <tr><th>N</th><th>P(DD&le;T3)</th></tr>
+    <tr><th>N</th><th class="num">P(DD&le;T3)</th></tr>
     <tr><td>0 Petal</td><td class="num">56.0%</td></tr>
     <tr><td>1 Petal</td><td class="num">57.9%</td></tr>
     <tr><td>2 Petal</td><td class="num">58.8%</td></tr>
@@ -109,17 +104,19 @@
     <tr><td>4 Petal</td><td class="num">65.1%</td></tr>
   </table>
   <p class="slope">Per-card slope: <b>≈ +2% / Petal</b>.</p>
-  <div class="takeaway"><b>Takeaway:</b> Marginal fast mana helps us much more than a Ponder to get to
+  <div class="takeaway"><b>Takeaway:</b> Marginal fast mana helps us much more than Ponders to get to
     Doomsday+BBB before T3, and does meaningfully increase the speed of the deck.</div>
 
   <h2>Question 3 — What about Personal Tutor?</h2>
-  <p>Assuming we cut wasteland, I imagine we revert to playing 4 Ponder again (maybe that is a bad
-    assumption?) so we consider the other 2 Wastelands the 2 flex slots. Compare Lotus Petal vs
-    Personal Tutor in those slots:</p>
+  <p>Now suppose we cut wasteland and go back to a more traditional 4 Ponder. We could use those
+    extra slots for more interaction, or we can use them to try to speed up the deck. Supposing we
+    want to speed up the deck to help tempo doomsday take on the "turbo" role a little more readily,
+    what is the best use of those two slots? Let's compare two plausible options: Lotus Petal for more
+    black mana and Personal Tutor for more shots at Doomsday.</p>
   <p>The deck's 2 stock Petals are always kept; the table varies the <b>total</b> Petal and PT counts
     as the two ex-Wasteland slots are filled.</p>
   <table>
-    <tr><th>Flex fill</th><th>Total Petal / PT</th><th>P(DD&le;T3)</th></tr>
+    <tr><th>Flex fill</th><th>Total Petal / PT</th><th class="num">P(DD&le;T3)</th></tr>
     <tr><td>2 Wasteland (stock)</td><td>2 Petal / 0 PT</td><td class="num">60.0%</td></tr>
     <tr><td>+2 Petal</td><td>4 Petal / 0 PT</td><td class="num">63.9%</td></tr>
     <tr><td>+1 Petal +1 PT</td><td>3 Petal / 1 PT</td><td class="num">66.3%</td></tr>
@@ -127,31 +124,22 @@
   </table>
   <p class="slope">Slopes here: <b>≈ +4% / PT</b> vs <b>≈ +2% / Petal</b> (still ~additive: 1/1
     predicts 66.2, measures 66.3).</p>
-  <div class="takeaway"><b>Takeaway:</b> On pure speed Personal Tutor yields almost double the effect
-    of Lotus Petal. This is predictable as the deck already has more mana (lands, rituals, and petals)
-    than Doomsdays.</div>
+  <div class="takeaway"><b>Takeaway:</b> On pure speed, Personal Tutor yields almost double the effect
+    of Lotus Petal. This is not too surprising, as the deck already has more mana (lands, rituals, and
+    petals) than Doomsdays, so Doomsdays ought to be the main limiting factor.</div>
 
   <h2>Conclusion</h2>
   <p>If optimizing for straightline speed, Personal Tutor has the highest gain of the available
     options. The 4th Ponder has a marginal impact on pure speed. My personal conclusion is that Tempo
-    Doomsday should give up the ~8% chance of a T3 DD to play Wasteland, which synergizes heavily with
-    the decks tempo gameplans and pivots. It also has non-trivial application tapping for mana to
-    crack clues, cast Flow States and Barrowgoyfs, etc.</p>
+    Doomsday should forgo the ~8% boost to the probability of a &le;T3 DD to play Wasteland, which
+    synergizes heavily with the deck's tempo gameplans and pivots. Wasteland also has non-trivial
+    applications tapping for mana to crack clues, cast Flow States and Barrowgoyfs, etc.</p>
 
   <details>
     <summary>Method footnotes (optional, for the curious)</summary>
     <div class="body"><ul>
-      <li>The strategy employed in the simulations has a deterministic Doomsday line solver and can
-        also predict a minimal time to Doomsday under perfect draws. When digging for Doomsday, it
-        uses these to drive cantripping / shuffling / Personal Tutor decisions to attempt to put a
-        Doomsday on the stack by the cutoff turn (in this case T3).</li>
-      <li>The sim stops at the cutoff turn, so cast turns are only meaningful up to T3 — there's no
-        separate "eventual" speed past the cut-off.</li>
-      <li>Jace, Wielder of Mysteries (the alt wincon) isn't modeled; it's treated as an inert blank
-        card. It never helps cast Doomsday, so this only costs it its deck slot — which is the honest
-        cost of a do-nothing-for-the-combo card.</li>
-      <li>More information on the simulator, goldfish strategy, etc. can be found at the
-        <a href="../../goldfish/">goldfish simulator</a> and in the code repo at
+      <li>More information on the simulator, goldfish strategy, etc. can be found at
+        <a href="../../goldfish/">the goldfish simulator</a> and in the code repo at
         <a href="https://github.com/boryas/libmtg">github.com/boryas/libmtg</a>.</li>
     </ul></div>
   </details>
