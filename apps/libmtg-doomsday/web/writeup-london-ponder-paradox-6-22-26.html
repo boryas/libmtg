@@ -102,34 +102,31 @@
   <p>So as we increase the count of Wastelands, our mulligans tend to contain more air on average.</p>
 
   <p><b>The air-heavy deck mulligans more.</b> Because it opens more air, the 2-Ponder build keeps
-    only 65.7% of its sevens while the 4-Ponder build keeps 70.6%. The slower wasteland heavy deck throws back more hands,
-    and each mulligan is another chance to find a plan.</p>
+    only 65.7% of its sevens while the 4-Ponder build keeps 70.6%. The slower wasteland heavy deck
+    throws back more hands, and each mulligan is another chance to find a plan.</p>
   <table>
     <tr><th>Build</th><th class="num">keeps at 7</th><th class="num">at 6</th><th class="num">at 5</th><th class="num">at 4</th></tr>
     <tr><td>2 Pon / 4 Wst</td><td class="num">65.7%</td><td class="num">23.7%</td><td class="num">7.6%</td><td class="num">3.0%</td></tr>
     <tr><td>4 Pon / 2 Wst</td><td class="num">70.6%</td><td class="num">21.2%</td><td class="num">6.4%</td><td class="num">1.8%</td></tr>
   </table>
 
-  <p><b>And the hands that survive are equally good.</b> The realized P(cast by T3) of a <em>kept</em>
-    seven barely moves across the three decks — about 62% whether the deck runs 2 or 4 Ponder:</p>
+  <p><b>The hands that survive are equally fast.</b> The P(cast by T3) of a <em>kept</em> hand barely
+    moves across the three decks — about 62% whether the deck runs 2 or 4 Ponder:</p>
   <table>
-    <tr><th>Build</th><th class="num">realized P(cast) of a kept 7</th></tr>
+    <tr><th>Build</th><th class="num">P(cast) of a keep</th></tr>
     <tr><td>2 Pon / 4 Wst</td><td class="num">62.5%</td></tr>
     <tr><td>3 Pon / 3 Wst</td><td class="num">62.9%</td></tr>
     <tr><td>4 Pon / 2 Wst</td><td class="num">61.6%</td></tr>
   </table>
   <p>The keep bar is a quality floor, and every deck mulligans until it clears it. As a result, the
-    decks differ in how often they have to mulligan, not in how fast the keeps are.</p>
-
-  <h2>Takeaways</h2>
-  <div class="takeaway"><b>A good mulligan is a substitute for raw card quality.</b> The extra Ponders
-    are genuinely worth ~1.5% each in a vacuum. Since our mulligan heuristics properly value Ponder's
-    digging power, the 4th Ponder's speed contribution is nearly redundant: replacing Ponders for
-    Wastelands leads to more mulligans, and thus more fast hands.</div>
+    decks differ in how often they have to mulligan, not in how fast the keeps are. We are likely
+    enough to find a functionally equivalent 5 (most hands have a couple cards that don't end up
+    contributing to finding or casting the Doomsday) that this doesn't actually reduce our chance of a
+    Doomsday by T3.</p>
 
   <h2>Future Work</h2>
-  <p>Since there is no discernable effect on speed from Ponders with realistic mulligans, the place we
-    would expect it to really shine is in hand <em>quality</em> when we Doomsday. Sure we can paper
+  <p>Since there is no discernable effect on speed from Ponders with Realistic mulligans, the place we
+    would expect them to really shine is in hand <em>quality</em> when we Doomsday. Sure, we can paper
     over our Ponders with London mulligans, but we are much less likely to still have that Force of
     Will to back up the Doomsday if we had to mull to 5 to find it.</p>
   <p>If we can expand the simulator to try to also optimize for and measure the valid interaction it
@@ -142,11 +139,9 @@
     <summary>Method footnotes (optional, for the curious)</summary>
     <div class="body">
       <ul>
-        <li>Goldfish = solitaire Monte-Carlo, no opponent; metric = <code>P(cast Doomsday by turn 3)</code>.</li>
-        <li>10000 games per cell. <b>Keep7</b> keeps every opening seven; <b>Realistic</b> keeps only
-          hands with a viable plan (cantrips + a black source + a payoff route, a fast Tamiyo, and so on).</li>
+        <li>Goldfish = solitaire Monte-Carlo, 10k games per cell.</li>
         <li>"Air" = cards that contribute to no realistic plan in the keep logic: extra mana, LED,
-          Edge of Autumn, Jace, Thassa, Wasteland, and so on.</li>
+          Edge of Autumn, Jace, Thassa, Wasteland, etc.</li>
         <li>Simulator and code: <a href="../../goldfish/">bur.io/doomsday/goldfish</a>,
           <a href="https://github.com/boryas/libmtg">github.com/boryas/libmtg</a>.</li>
       </ul>

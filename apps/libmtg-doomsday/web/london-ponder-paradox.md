@@ -51,24 +51,23 @@ So as we increase the count of Wastelands, our mulligans tend to contain more ai
 | 2 Pon / 4 Wst | 65.7% | 23.7% | 7.6% | 3.0% |
 | 4 Pon / 2 Wst | 70.6% | 21.2% | 6.4% | 1.8% |
 
-**And the hands that survive are equally good.** The realized P(cast by T3) of a *kept* seven barely moves across the three decks — about 62% whether the deck runs 2 or 4 Ponder:
+**The hands that survive are equally fast.** The P(cast by T3) of a *kept* hand barely moves across the three decks — about 62% whether the deck runs 2 or 4 Ponder:
 
-| Build | realized P(cast) of a kept 7 |
+| Build | P(cast) of a keep |
 |---------------|--------------|
 | 2 Pon / 4 Wst | 62.5% |
 | 3 Pon / 3 Wst | 62.9% |
 | 4 Pon / 2 Wst | 61.6% |
 
-The keep bar is a quality floor, and every deck mulligans until it clears it. As a result, the decks differ in how often they have to mulligan, not in how fast the keeps are. We are likely enough to find a functionally equivalent 5 that this doesn't actually reduce our chance of a Doomsday by T3.
+The keep bar is a quality floor, and every deck mulligans until it clears it. As a result, the decks differ in how often they have to mulligan, not in how fast the keeps are. We are likely enough to find a functionally equivalent 5 (most hands have a couple cards that don't end up contributing to finding or casting the Doomsday) that this doesn't actually reduce our chance of a Doomsday by T3.
 
 ## Future Work
-Since there is no discernable effect on speed from Ponders with realistic mulligans, the place we would expect it to really shine is in hand *quality* when we Doomsday. Sure we can paper over our Ponders with London mulligans, but we are much less likely to still have that Force of Will to back up the Doomsday if we had to mull to 5 to find it.
+Since there is no discernable effect on speed from Ponders with Realistic mulligans, the place we would expect them to really shine is in hand *quality* when we Doomsday. Sure, we can paper over our Ponders with London mulligans, but we are much less likely to still have that Force of Will to back up the Doomsday if we had to mull to 5 to find it.
 
 If we can expand the simulator to try to also optimize for and measure the valid interaction it layered in with the Doomsday presented, then we are likely to see the beneficial effects of Ponder. The naive treatment bolted on to the sim currently which doesn't really optimize for keeping interaction does not yet show this effect (protection counts are relatively flat across the builds).
 
 ## Method footnotes
 
-- Goldfish = solitaire Monte-Carlo, no opponent; metric = P(cast Doomsday by turn 3).
-- 10000 games per cell. **Keep7** keeps every opening seven; **Realistic** keeps only hands with a viable plan (cantrips + a black source + a payoff route, a fast Tamiyo, and so on).
+- Goldfish = solitaire Monte-Carlo, 10k games per cell.
 - "Air" = cards that contribute to no realistic plan in the keep logic; Extra mana, LED, Edge of Autumn, Jace, Thassa, Wasteland, etc.
 - Simulator and code: bur.io/doomsday/goldfish, github.com/boryas/libmtg
