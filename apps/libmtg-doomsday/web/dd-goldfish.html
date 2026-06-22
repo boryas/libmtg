@@ -79,6 +79,25 @@
     .seg.det b { color: #6fcf6f; }
     .seg.sto b { color: #5dade2; }
     .seg.miss b { color: #cf6f6f; }
+    details.sec { border-top: 1px solid #0f3460; }
+    details.sec > summary { cursor: pointer; color: #5dade2; font-size: 0.95rem; font-weight: 600;
+      padding: 0.6rem 0 0.4rem; list-style-position: inside; }
+    details.sec > summary::-webkit-details-marker { color: #5dade2; }
+    details.sec .sec-body { padding: 0 0 0.6rem; }
+    table.breakdown-tbl { max-width: 24rem; }
+    table.breakdown-tbl td.pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: bold; }
+    table.breakdown-tbl td.pct.det { color: #6fcf6f; }
+    table.breakdown-tbl td.pct.sto { color: #5dade2; }
+    table.breakdown-tbl td.pct.miss { color: #cf6f6f; }
+    table.breakdown-tbl tr.sub td { border-bottom: none; color: #889; font-size: 0.82em; padding: 1px 0.4rem; }
+    table.breakdown-tbl tr.sub td:first-child { padding-left: 1.5rem; }
+    table.breakdown-tbl tr.sub td.pct { color: #889; font-weight: normal; }
+    .sample { border-bottom: 1px solid #0f3460; padding: 0.35rem 0; }
+    .sample:last-child { border-bottom: none; }
+    .srow { font-size: 0.74rem; margin: 0.12rem 0; word-break: break-word; }
+    .srow .tag { display: inline-block; min-width: 3.4rem; font-size: 0.68rem; color: #889; }
+    .srow.mull .tag { color: #cf8f6f; }
+    .srow .tag.keep { color: #6fcf9f; }
   </style>
 </head>
 <body>
@@ -187,8 +206,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260622-cabal-cutoff';
-    const WASM_VER = '20260622-cabal-cutoff';
+      from '../pkg/libmtg_doomsday.js?v=20260622-samples';
+    const WASM_VER = '20260622-samples';
 
     const REPO = 'boryas/libmtg';
 
@@ -332,13 +351,15 @@
     function emptyStats() {
       return { games: 0, fails: 0, cast_turn: {}, protection: {},
                cutoff: 0, mull_count: {}, mull_pred_sum: {}, deterministic_cast: 0, stochastic_cast: 0,
-               samples: [] };
+               miss_mana: 0, miss_payoff: 0, miss_both: 0, miss_neither: 0, samples: [] };
     }
     function mergeStats(a, p) {
       a.games += p.games; a.fails += p.fails;
       a.cutoff = p.cutoff || a.cutoff;
       a.deterministic_cast += (p.deterministic_cast || 0);
       a.stochastic_cast += (p.stochastic_cast || 0);
+      a.miss_mana += (p.miss_mana || 0); a.miss_payoff += (p.miss_payoff || 0);
+      a.miss_both += (p.miss_both || 0); a.miss_neither += (p.miss_neither || 0);
       if (!a.samples) a.samples = [];
       if (p.samples && a.samples.length < 8) a.samples.push(...p.samples.slice(0, 8 - a.samples.length));
       for (const [k, v] of Object.entries(p.cast_turn)) a.cast_turn[k] = (a.cast_turn[k] || 0) + v;
@@ -363,13 +384,19 @@
       const successes = s.games - s.fails;
       const turns = Object.keys(s.cast_turn).map(Number).sort((a, b) => a - b);
       const maxT = cutoff; // sim is capped at the cut-off, so that's the last turn
-      let castSum = 0, weighted = 0;
-      for (const t of turns) { castSum += s.cast_turn[t]; weighted += t * s.cast_turn[t]; }
+      let weighted = 0;
+      for (const t of turns) weighted += t * s.cast_turn[t];
       const meanCast = successes ? (weighted / successes) : NaN;
       let protW = 0, protN = 0;
       for (const [p, c] of Object.entries(s.protection)) { protW += Number(p) * c; protN += c; }
       const meanProt = protN ? (protW / protN) : NaN;
       const pByCutoff = castBy(s, cutoff);
+      const pct = (x) => (100 * x / Math.max(1, s.games)).toFixed(1);
+
+      // Each result block is its own collapsible <details> section.
+      const section = (title, body, open = true) =>
+        `<details class="sec"${open ? ' open' : ''}><summary>${title}</summary>`
+        + `<div class="sec-body">${body}</div></details>`;
 
       let cum = 0;
       const pdfRows = [], cdfRows = [];
@@ -386,34 +413,40 @@
       const pilot = 'cast-ASAP solver &middot; ' +
         ({ realistic: 'Realistic mull', keep7: 'Keep-7', aggressive: 'Aggressive mull' }[mull] || mull);
 
-      // A few sample games for flavor: kept opener → outcome.
-      let samplesHtml = '';
-      if (s.samples && s.samples.length) {
-        const rows = s.samples.map(g => {
-          const kept = g.mulls ? `mull&rarr;${7 - g.mulls}` : 'keep 7';
-          const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
-          const outcome = cast ? `cast T${g.cast_turn}` : 'no cast';
-          return `<tr><td class="muted">${kept}</td><td>${g.hand.join(', ')}</td>`
-            + `<td><span class="seg ${cast ? 'det' : 'miss'}">${outcome}</span></td></tr>`;
-        }).join('');
-        samplesHtml = `<h2>Sample games <span class="muted">&mdash; a few openers + outcomes</span></h2>`
-          + `<table class="samples">${rows}</table>`;
-      }
-
-      // ASAP-only rich stats (the strategy emits the per-game STATS line).
       const hasRich = s.mull_count && Object.keys(s.mull_count).length > 0;
-      let breakdownHtml = '', mullHtml = '';
+      let secs = '';
+
       if (hasRich) {
         const det = s.deterministic_cast || 0, sto = s.stochastic_cast || 0;
         const miss = Math.max(0, s.games - det - sto);
-        const pct = (x) => (100 * x / Math.max(1, s.games)).toFixed(1);
-        breakdownHtml = `
-          <h2>How the combo came together (by T${cutoff})</h2>
-          <div class="breakdown">
-            <span class="seg det">guaranteed line in opening hand <b>${pct(det)}%</b></span>
-            <span class="seg sto">drew / cantripped into it <b>${pct(sto)}%</b></span>
-            <span class="seg miss">not by the cut-off <b>${pct(miss)}%</b></span>
-          </div>`;
+        const mm = s.miss_mana || 0, mp = s.miss_payoff || 0, mb = s.miss_both || 0, mn = s.miss_neither || 0;
+        const sub = (label, x) => `<tr class="sub"><td>${label}</td><td class="pct">${pct(x)}%</td></tr>`;
+        let bd = `<table class="breakdown-tbl">
+          <tr><td>guaranteed line in opening hand</td><td class="pct det">${pct(det)}%</td></tr>
+          <tr><td>drew / cantripped into it</td><td class="pct sto">${pct(sto)}%</td></tr>
+          <tr><td>not by the cut-off</td><td class="pct miss">${pct(miss)}%</td></tr>`;
+        if (mm + mp + mb + mn > 0) {
+          bd += sub('&rarr; missing mana (no BBB)', mm) + sub('&rarr; missing payoff (no DD)', mp)
+              + sub('&rarr; missing both', mb) + (mn ? sub('&rarr; had both (timing)', mn) : '');
+        }
+        bd += `</table>`;
+        secs += section(`How the combo came together (by T${cutoff})`, bd, true);
+      }
+
+      // Sample games: a few openers — thrown-back mulligans + the kept hand + outcome.
+      if (s.samples && s.samples.length) {
+        const body = s.samples.map(g => {
+          const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
+          const outcome = `<span class="seg ${cast ? 'det' : 'miss'}">${cast ? `cast T${g.cast_turn}` : 'no cast'}</span>`;
+          const mulls = (g.mulligans || []).map(h =>
+            `<div class="srow mull"><span class="tag">mull</span> ${h.join(', ')}</div>`).join('');
+          return `<div class="sample">${mulls}`
+            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${g.hand.join(', ')} &rarr; ${outcome}</div></div>`;
+        }).join('');
+        secs += section(`Sample games <span class="muted">&mdash; openers + outcomes</span>`, body, false);
+      }
+
+      if (hasRich) {
         const totalKeeps = Object.values(s.mull_count).reduce((a, b) => a + b, 0) || 1;
         const mullRows = [];
         for (let k = 0; k <= 3; k++) {
@@ -423,10 +456,13 @@
           mullRows.push(`<tr><td>${7 - k} cards${k ? ` <span class="muted">(${k} mull)</span>` : ''}</td>`
             + `<td>${bar(n / totalKeeps)}</td><td class="muted">avg predicted ${(avg * 100).toFixed(0)}%</td></tr>`);
         }
-        mullHtml = `
-          <h2>Mulligans &mdash; kept hand size + avg predicted P(cast by T${cutoff})</h2>
-          <table>${mullRows.join('')}</table>`;
+        secs += section(`Mulligans &mdash; kept hand size + avg predicted P(cast by T${cutoff})`,
+          `<table>${mullRows.join('')}</table>`, true);
       }
+
+      secs += section(`P(Doomsday cast on turn t) &mdash; density (PDF)`, `<table>${pdfRows.join('')}</table>`, true);
+      secs += section(`P(Doomsday cast by turn t) &mdash; cumulative (CDF)`, `<table>${cdfRows.join('')}</table>`, true);
+      secs += section(`Protection layers in hand at cast`, `<table>${protRows.join('')}</table>`, false);
 
       $('results').className = '';
       $('results').innerHTML = `
@@ -435,19 +471,10 @@
           <div class="headline">P(cast Doomsday by T${cutoff}) <b>${(pByCutoff * 100).toFixed(1)}%</b>
             <span class="muted">&mdash; the cut-off objective</span></div>
           <div class="summary">
-            <div class="stat">cast eventually <b>${(successes / s.games * 100).toFixed(1)}%</b> <span class="muted">(${successes}/${s.games})</span></div>
             <div class="stat">mean cast turn <b>${meanCast.toFixed(2)}</b></div>
             <div class="stat">mean protection <b>${meanProt.toFixed(2)}</b></div>
           </div>
-          ${breakdownHtml}
-          ${samplesHtml}
-          <h2>P(Doomsday cast on turn t) &mdash; density (PDF)</h2>
-          <table>${pdfRows.join('')}</table>
-          <h2>P(Doomsday cast by turn t) &mdash; cumulative (CDF)</h2>
-          <table>${cdfRows.join('')}</table>
-          ${mullHtml}
-          <h2>Protection layers in hand at cast</h2>
-          <table>${protRows.join('')}</table>
+          ${secs}
         </div>`;
     }
 
