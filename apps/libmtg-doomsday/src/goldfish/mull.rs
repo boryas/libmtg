@@ -10,9 +10,10 @@
 //!   do-nothing hands. Built and validated card-by-card against human judgement (see
 //!   the `sample_hands` example). It deliberately does NOT consult `p_cast_by` — every
 //!   keep/mull names an inspectable reason.
-//! - [`MullMode::Aggressive`] — the original race bar: a high threshold on the solver's
-//!   `p_cast_by`, loosening as you mulligan. Optimal-ish but fanatical; it ships almost
-//!   every imperfect 7 and so flattens deck-speed differences.
+//! - [`MullMode::Aggressive`] — the fanatical race bar: keep only a guaranteed-or-nearly
+//!   guaranteed fast Doomsday — a DETERMINISTIC line by the cutoff, or Doomsday + BB +
+//!   a castable cantrip to dig the last black. No `p_cast_by`; speculative cantrip hands
+//!   are thrown back, so it rewards decks with more fast enablers (rituals/petals/tutors).
 //!
 //! The `Realistic` rule is the load-bearing one. Its logic (the "G1 / blind" checklist):
 //!
@@ -43,7 +44,7 @@ pub enum MullMode {
     Keep7,
     /// Player-heuristic "keep a real plan" rule (the default).
     Realistic,
-    /// High `p_cast_by` bar, loosening as you mulligan (the original behaviour).
+    /// Keep only a deterministic Doomsday line by the cutoff (the fanatical race bar).
     Aggressive,
 }
 
@@ -217,17 +218,17 @@ pub fn realistic_keep(s: &HandSignals) -> bool {
     false
 }
 
-/// The original Aggressive bar: a high threshold on the solver's `p_cast_by`, loosening
-/// as you mulligan. `KEEP7` env retained for the apples-to-apples gameplay experiment.
-pub fn aggressive_keep(state: &SimState, who: PlayerId, cutoff: u32, mulligans_taken: u32) -> bool {
+/// Aggressive: the fanatical race bar. Keep only a hand that is a guaranteed-or-nearly
+/// guaranteed fast Doomsday, mulliganing anything speculative. Two ways in:
+///   1. a DETERMINISTIC line by the cutoff (the solver guarantees it); or
+///   2. near-deterministic: Doomsday in hand + **BB** (two black units — lands/petals)
+///      + a castable cantrip to dig the third black / the finisher.
+/// No `p_cast_by`. (`KEEP7` env retained for the apples-to-apples gameplay experiment.)
+pub fn aggressive_keep(state: &SimState, who: PlayerId, cutoff: u32) -> bool {
     if std::env::var("KEEP7").is_ok() { return true; }
-    let p = recipe::p_cast_by(state, who, cutoff);
-    let threshold = match mulligans_taken {
-        0 => 0.55,
-        1 => 0.38,
-        _ => 0.20,
-    };
-    p >= threshold
+    let s = hand_signals(state, who, cutoff);
+    if s.det_line { return true; }
+    s.has_dd && (s.black_lands + s.petals) >= 2 && s.castable_looks >= 1
 }
 
 /// Whether to MULLIGAN this hand under `mode`. Always keep at 4 cards
@@ -243,7 +244,7 @@ pub fn should_mulligan(
     let keep = match mode {
         MullMode::Keep7 => true,
         MullMode::Realistic => realistic_keep(&hand_signals(state, who, cutoff)),
-        MullMode::Aggressive => aggressive_keep(state, who, cutoff, mulligans_taken),
+        MullMode::Aggressive => aggressive_keep(state, who, cutoff),
     };
     !keep
 }
