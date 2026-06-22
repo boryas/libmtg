@@ -203,14 +203,25 @@ fn print_report(s: &GoldfishStats, cutoff: u32) {
         println!("    drew / cantripped into it:          {:>6} ({:.1}%)", sto, 100.0 * sto as f64 / g);
         println!("    not by cutoff:                      {:>6} ({:.1}%)",
             s.games - det - sto, 100.0 * (s.games - det - sto) as f64 / g);
+        let (mm, mp, mb, mn) = (s.miss_mana, s.miss_payoff, s.miss_both, s.miss_neither);
+        if mm + mp + mb + mn > 0 {
+            println!("      \u{21b3} missing mana (no BBB):  {:>6} ({:.1}%)", mm, 100.0 * mm as f64 / g);
+            println!("      \u{21b3} missing payoff (no DD): {:>6} ({:.1}%)", mp, 100.0 * mp as f64 / g);
+            println!("      \u{21b3} missing both:           {:>6} ({:.1}%)", mb, 100.0 * mb as f64 / g);
+            if mn > 0 {
+                println!("      \u{21b3} had both (timing gap):  {:>6} ({:.1}%)", mn, 100.0 * mn as f64 / g);
+            }
+        }
     }
 
     if !s.samples.is_empty() {
-        println!("\n  sample games (kept opening hand → outcome):");
+        println!("\n  sample games (mulligans + kept opening hand → outcome):");
         for g in &s.samples {
-            let kept = if g.mulls == 0 { "keep 7".to_string() } else { format!("mull→{}", 7 - g.mulls) };
+            for m in &g.mulligans {
+                println!("    [ mull ] {}", m.join(", "));
+            }
             let outcome = g.cast_turn.map_or("no cast".to_string(), |t| format!("cast T{t}"));
-            println!("    [{:>6}] {}  →  {}", kept, g.hand.join(", "), outcome);
+            println!("    [keep {}] {}  →  {}", 7 - g.mulls, g.hand.join(", "), outcome);
         }
     }
 

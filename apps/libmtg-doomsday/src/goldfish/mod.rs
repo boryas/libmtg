@@ -82,6 +82,13 @@ pub struct GoldfishStats {
     /// Games that cast by the cutoff by DRAWING / cantripping into the line (opening
     /// hand had no guaranteed line).
     pub stochastic_cast: u32,
+    /// Among games that MISSED the cutoff (ASAP, didn't cast): what the cutoff-state
+    /// hand was missing — mana (couldn't make BBB this turn), the payoff (no Doomsday
+    /// in hand), both, or neither (had both but didn't cast — a sequencing/timing gap).
+    pub miss_mana: u32,
+    pub miss_payoff: u32,
+    pub miss_both: u32,
+    pub miss_neither: u32,
     /// A handful of sample games (the first few of the run) for flavor: the kept
     /// opening hand, mulligans taken, and the cast turn (or none = never cast).
     pub samples: Vec<SampleGame>,
@@ -94,6 +101,8 @@ pub struct SampleGame {
     pub mulls: u8,
     /// The kept opening hand (catalog keys), post-mulligan.
     pub hand: Vec<String>,
+    /// Hands thrown back before the keep (each the 7 seen), in order.
+    pub mulligans: Vec<Vec<String>>,
     /// Turn Doomsday resolved, or None if it never did by the cutoff.
     pub cast_turn: Option<u32>,
 }
@@ -199,9 +208,10 @@ where
         const SAMPLE_LIMIT: usize = 8;
         if stats.samples.len() < SAMPLE_LIMIT {
             let hand = state.opening_hand_us.clone();
-            let mulls = 7u8.saturating_sub(hand.len() as u8);
+            let mulligans = state.mulliganed_hands_us.clone();
+            let mulls = mulligans.len() as u8;
             let cast_turn = state.terminal.then_some(state.current_turn as u32);
-            stats.samples.push(SampleGame { mulls, hand, cast_turn });
+            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn });
         }
         let cast_by_cutoff = state.terminal && cutoff > 0 && state.current_turn <= cutoff;
         if state.terminal {
@@ -224,6 +234,14 @@ where
                     stats.deterministic_cast += 1;
                 } else {
                     stats.stochastic_cast += 1;
+                }
+            } else {
+                use recipe::MissingElement;
+                match recipe::missing_element(&state, PlayerId::Us) {
+                    MissingElement::Mana => stats.miss_mana += 1,
+                    MissingElement::Payoff => stats.miss_payoff += 1,
+                    MissingElement::Both => stats.miss_both += 1,
+                    MissingElement::Neither => stats.miss_neither += 1,
                 }
             }
         }
