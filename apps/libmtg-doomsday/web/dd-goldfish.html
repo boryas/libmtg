@@ -43,6 +43,8 @@
     .stat { font-size: 0.85rem; }
     .stat b { color: #5dade2; font-size: 1.1rem; }
     table { border-collapse: collapse; font-size: 0.8rem; width: 100%; max-width: 30rem; }
+    table.samples { max-width: 46rem; }
+    table.samples td { font-size: 0.72rem; word-break: break-word; vertical-align: top; padding: 2px 6px; }
     td, th { padding: 0.15rem 0.4rem; text-align: left; }
     th { color: #888; font-weight: normal; border-bottom: 1px solid #0f3460; }
     .bar { background: #0f3460; height: 0.9rem; border-radius: 2px; display: inline-block; vertical-align: middle; }
@@ -185,8 +187,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260620-realistic';
-    const WASM_VER = '20260620-realistic';
+      from '../pkg/libmtg_doomsday.js?v=20260622-cabal-cutoff';
+    const WASM_VER = '20260622-cabal-cutoff';
 
     const REPO = 'boryas/libmtg';
 
@@ -212,9 +214,11 @@
         <i>supporter</i> is interaction or a threat body (Tamiyo / Murktide / …).</p>`,
       keep7: `<p>Never mulligans &mdash; it always keeps the opening seven. This shows the deck's
         raw speed, with no mulligan decisions mixed in.</p>`,
-      aggressive: `<p>Mulligans whenever the solver's estimate of <code>P(cast by the cut-off)</code>
-        falls below a threshold: 0.55 on seven cards, 0.38 on six, and 0.20 on five. It always keeps
-        at four cards.</p>`,
+      aggressive: `<p>The fanatical race bar: keep only a guaranteed-or-nearly-guaranteed fast
+        Doomsday, and mulligan anything speculative. A hand stays if the solver finds a
+        <em>deterministic</em> line by the cut-off, or if it holds Doomsday + two black sources +
+        a castable cantrip to dig the last black. No probability threshold; it always keeps at four
+        cards.</p>`,
     };
 
     // Default deck: the sample Doomsday list (so the page works out of the box).
@@ -326,13 +330,16 @@
     // GoldfishStats are additive counts, so a big run = sum of small batches.
     function emptyStats() {
       return { games: 0, fails: 0, cast_turn: {}, protection: {},
-               cutoff: 0, mull_count: {}, mull_pred_sum: {}, deterministic_cast: 0, stochastic_cast: 0 };
+               cutoff: 0, mull_count: {}, mull_pred_sum: {}, deterministic_cast: 0, stochastic_cast: 0,
+               samples: [] };
     }
     function mergeStats(a, p) {
       a.games += p.games; a.fails += p.fails;
       a.cutoff = p.cutoff || a.cutoff;
       a.deterministic_cast += (p.deterministic_cast || 0);
       a.stochastic_cast += (p.stochastic_cast || 0);
+      if (!a.samples) a.samples = [];
+      if (p.samples && a.samples.length < 8) a.samples.push(...p.samples.slice(0, 8 - a.samples.length));
       for (const [k, v] of Object.entries(p.cast_turn)) a.cast_turn[k] = (a.cast_turn[k] || 0) + v;
       for (const [k, v] of Object.entries(p.protection)) a.protection[k] = (a.protection[k] || 0) + v;
       for (const [k, v] of Object.entries(p.mull_count || {})) a.mull_count[k] = (a.mull_count[k] || 0) + v;
@@ -378,6 +385,20 @@
       const pilot = 'cast-ASAP solver &middot; ' +
         ({ realistic: 'Realistic mull', keep7: 'Keep-7', aggressive: 'Aggressive mull' }[mull] || mull);
 
+      // A few sample games for flavor: kept opener → outcome.
+      let samplesHtml = '';
+      if (s.samples && s.samples.length) {
+        const rows = s.samples.map(g => {
+          const kept = g.mulls ? `mull&rarr;${7 - g.mulls}` : 'keep 7';
+          const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
+          const outcome = cast ? `cast T${g.cast_turn}` : 'no cast';
+          return `<tr><td class="muted">${kept}</td><td>${g.hand.join(', ')}</td>`
+            + `<td><span class="seg ${cast ? 'det' : 'miss'}">${outcome}</span></td></tr>`;
+        }).join('');
+        samplesHtml = `<h2>Sample games <span class="muted">&mdash; a few openers + outcomes</span></h2>`
+          + `<table class="samples">${rows}</table>`;
+      }
+
       // ASAP-only rich stats (the strategy emits the per-game STATS line).
       const hasRich = s.mull_count && Object.keys(s.mull_count).length > 0;
       let breakdownHtml = '', mullHtml = '';
@@ -418,6 +439,7 @@
             <div class="stat">mean protection <b>${meanProt.toFixed(2)}</b></div>
           </div>
           ${breakdownHtml}
+          ${samplesHtml}
           <h2>P(Doomsday cast on turn t) &mdash; density (PDF)</h2>
           <table>${pdfRows.join('')}</table>
           <h2>P(Doomsday cast by turn t) &mdash; cumulative (CDF)</h2>

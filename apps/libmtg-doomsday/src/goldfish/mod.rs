@@ -82,6 +82,20 @@ pub struct GoldfishStats {
     /// Games that cast by the cutoff by DRAWING / cantripping into the line (opening
     /// hand had no guaranteed line).
     pub stochastic_cast: u32,
+    /// A handful of sample games (the first few of the run) for flavor: the kept
+    /// opening hand, mulligans taken, and the cast turn (or none = never cast).
+    pub samples: Vec<SampleGame>,
+}
+
+/// One sample game for display: the kept opening hand and its outcome.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SampleGame {
+    /// Mulligans taken (0..=3); the kept hand has 7 − this many cards.
+    pub mulls: u8,
+    /// The kept opening hand (catalog keys), post-mulligan.
+    pub hand: Vec<String>,
+    /// Turn Doomsday resolved, or None if it never did by the cutoff.
+    pub cast_turn: Option<u32>,
 }
 
 impl GoldfishStats {
@@ -181,6 +195,14 @@ where
             on_play: None,
         };
         let state = run_game(scenario, &mut rng);
+        // Keep a few sample games (the first handful) for flavor: opening hand + outcome.
+        const SAMPLE_LIMIT: usize = 8;
+        if stats.samples.len() < SAMPLE_LIMIT {
+            let hand = state.opening_hand_us.clone();
+            let mulls = 7u8.saturating_sub(hand.len() as u8);
+            let cast_turn = state.terminal.then_some(state.current_turn as u32);
+            stats.samples.push(SampleGame { mulls, hand, cast_turn });
+        }
         let cast_by_cutoff = state.terminal && cutoff > 0 && state.current_turn <= cutoff;
         if state.terminal {
             *stats.cast_turn.entry(state.current_turn).or_insert(0) += 1;

@@ -205,6 +205,15 @@ fn print_report(s: &GoldfishStats, cutoff: u32) {
             s.games - det - sto, 100.0 * (s.games - det - sto) as f64 / g);
     }
 
+    if !s.samples.is_empty() {
+        println!("\n  sample games (kept opening hand → outcome):");
+        for g in &s.samples {
+            let kept = if g.mulls == 0 { "keep 7".to_string() } else { format!("mull→{}", 7 - g.mulls) };
+            let outcome = g.cast_turn.map_or("no cast".to_string(), |t| format!("cast T{t}"));
+            println!("    [{:>6}] {}  →  {}", kept, g.hand.join(", "), outcome);
+        }
+    }
+
     println!("\n  cast-turn distribution:");
     let max_c = s.cast_turn.values().copied().max().unwrap_or(1);
     for t in 1..=cutoff_t {

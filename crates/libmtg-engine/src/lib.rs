@@ -1568,6 +1568,9 @@ pub struct SimState {
     /// Set when the active `Objective` decides the run has ended (e.g. Doomsday
     /// resolved). Replaces the former `success` flag / `Action::EndSimulation` sentinel.
     pub terminal: bool,
+    /// Snapshot of `us`'s post-mulligan opening hand (catalog keys), for sample-game
+    /// reporting. Populated by `run_game` once mulligans + the London bottom are done.
+    pub opening_hand_us: Vec<String>,
     /// App-supplied objective: observes the event stream and decides termination.
     /// `None` for bare test states with no objective installed.
     pub(crate) objective: Option<Box<dyn crate::objective::Objective>>,
@@ -1661,6 +1664,7 @@ impl SimState {
             decision_log: Vec::new(),
             winner: None,
             terminal: false,
+            opening_hand_us: Vec::new(),
             objective: None,
             life_before_dd: None,
             casting_spell: None,
@@ -4280,6 +4284,9 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
         }
         state.player_mut(who).draws_this_turn = 0;
     }
+
+    // Snapshot the kept opening hand (post-mulligan) for sample reporting.
+    state.opening_hand_us = state.hand_of(PlayerId::Us).map(|c| c.catalog_key.clone()).collect();
 
     let us_hand = state.hand_size(PlayerId::Us);
     let opp_hand = state.hand_size(PlayerId::Opp);
