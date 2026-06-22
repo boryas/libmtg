@@ -59,11 +59,7 @@ So as we increase the count of Wastelands, our mulligans tend to contain more ai
 | 3 Pon / 3 Wst | 62.9% |
 | 4 Pon / 2 Wst | 61.6% |
 
-The keep bar — "does this hand have a plan?" — is a quality floor, and every deck mulligans until it clears it. The decks differ in how often they have to mulligan, not in how fast the keeps are.
-
-## Takeaways
-
-**A good mulligan is a substitute for raw card quality.** The extra Ponders are genuinely worth ~1.5% each in a vacuum. Since our mulligan heuristics properly value Ponder's digging power, the 4th Ponder's speed contribution is nearly redundant: replacing Ponders for Wastelands leads to more mulligans, and thus more fast hands.
+The keep bar is a quality floor, and every deck mulligans until it clears it. As a result, the decks differ in how often they have to mulligan, not in how fast the keeps are. We are likely enough to find a functionally equivalent 5 that this doesn't actually reduce our chance of a Doomsday by T3.
 
 ## Future Work
 Since there is no discernable effect on speed from Ponders with realistic mulligans, the place we would expect it to really shine is in hand *quality* when we Doomsday. Sure we can paper over our Ponders with London mulligans, but we are much less likely to still have that Force of Will to back up the Doomsday if we had to mull to 5 to find it.
