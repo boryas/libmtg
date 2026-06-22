@@ -16,9 +16,9 @@ I re-ran the same three builds under a trivial mulligan strategy, **Keep7**, whi
 | 3 Pon / 3 Wst | 51.6% |
 | 4 Pon / 2 Wst | 53.1% |
 
-About **+1.5% per Ponder**. So selection is genuinely worth something: the extra Ponders dig you to Doomsday faster when you are forced to play whatever you are dealt. The intuition is vindicated, and the strategy is able to take advantage of Ponders to dig for Doomsdays. A Ponder isn't quite as good as a Personal Tutor, but it is very helpful.
+About **+1.5% per Ponder**. So selection is genuinely worth something: the extra Ponders dig you to Doomsday faster when you are forced to play whatever you are dealt. The intuition that Ponder should help dig is vindicated, and we confirm that the strategy really is able to take advantage of Ponders to dig for Doomsdays. A Ponder isn't quite as good as a Personal Tutor, but it is very helpful.
 
-## The mulligan erases it
+## The mulligan erases the speed-up of Ponder
 
 Now turn the mulligan strategy back on (**Realistic** = keep only hands with a viable plan):
 
@@ -28,9 +28,9 @@ Now turn the mulligan strategy back on (**Realistic** = keep only hands with a v
 | 3 Pon / 3 Wst | 51.6% | 61.9% | **+10.3** |
 | 4 Pon / 2 Wst | 53.1% | 60.9% | **+7.8** |
 
-Two things jump out. The mulligan adds a lot (~+10 points). And the lift it adds *shrinks* as the deck gets better at finding Doomsday — **+11.3 for the slowest deck, +7.8 for the fastest**. The mulligan works hardest on the deck that needs it most, and the result is a flat realistic curve.
+Two things jump out. The mulligan adds a lot (~+10 points). And the lift it adds *shrinks* as the deck gets better at finding Doomsday — **+11.3 for the slowest deck, +7.8 for the fastest**.
 
-## Why: the mulligan is a quality filter
+## We mulligan the hands with wastelands!
 
 The mechanism shows up in three numbers.
 
@@ -59,7 +59,7 @@ In every build the hands you throw back carry markedly more air. That is the "Wa
 | 3 Pon / 3 Wst | 62.9% |
 | 4 Pon / 2 Wst | 61.6% |
 
-The keep bar — "does this hand have a plan?" — is a quality floor, and every deck mulligans until it clears it. The decks differ in *how often* they have to mulligan, not in *what they keep*.
+The keep bar — "does this hand have a plan?" — is a quality floor, and every deck mulligans until it clears it. The decks differ in how often they have to mulligan, not in how fast the keeps are.
 
 ## Takeaways
 
