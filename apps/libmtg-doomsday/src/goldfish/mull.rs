@@ -94,9 +94,16 @@ pub struct HandSignals {
     pub petals: u32,
     /// Dark Ritual: needs a black seed, so not a base source either.
     pub rituals: u32,
-    /// "Looks" you can actually pay for: cast-to-dig cantrips that have blue available,
-    /// plus free cycling cantrips (Street Wraith) which are always castable.
-    pub castable_looks: u32,
+    /// DEEP looks — cast-to-dig cantrips with a blue land available (Ponder, Brainstorm,
+    /// Consider, Flow State): real selection.
+    pub deep_looks: u32,
+    /// MARGINAL looks — shallow selection: a free cycler (Street Wraith), a surveil land
+    /// (Undercity Sewers), or a fetch while holding >= 2 lands. Worth at most 1 (no time
+    /// to dig shallow twice by the cutoff).
+    pub marginal_looks: u32,
+    /// Named-air cards in hand (see [`AIR`]) — bottomable junk; feeds the post-bottom
+    /// flood check (air competes with excess lands for the London bottoms).
+    pub named_air: u32,
     /// Doomsday (or a tutor that finds it) in hand.
     pub has_dd: bool,
     /// Tamiyo, Inquisitive Student in hand.
@@ -114,16 +121,21 @@ pub struct HandSignals {
 }
 
 impl HandSignals {
-    /// A STABLE blue source — a blue land. A lone Petal does NOT count: casting a cantrip
-    /// by burning your only one-shot isn't a reliable dig (the difference between a Swamp
-    /// hand and an Underground Sea hand).
-    fn stable_blue(&self) -> bool { self.blue_lands >= 1 }
     /// A real mana base: at least one colored LAND (one-shots don't count).
     fn mana_base(&self) -> bool { self.colored_lands >= 1 }
     /// A real black source toward BBB (land or Petal — a bare Ritual needs a seed).
     fn black_src(&self) -> bool { self.black_lands >= 1 || self.petals >= 1 }
-    /// Flooded — too many real (non-air) colored lands; excess lands are dead weight.
-    fn flooded(&self) -> bool { self.colored_lands >= 4 }
+    /// BB — two black units (lands and/or Petals).
+    fn bb(&self) -> bool { self.black_lands + self.petals >= 2 }
+    /// Effective look count: deep looks plus AT MOST one marginal look (no time to dig
+    /// shallow twice before the cutoff).
+    fn looks(&self) -> u32 { self.deep_looks + self.marginal_looks.min(1) }
+    /// Flooded AFTER the London bottom: you bottom named-air first, then excess lands, so
+    /// you're only truly clogged if >= 4 lands remain once you've shed what you can.
+    fn flooded(&self, mulligans_taken: u32) -> bool {
+        let land_bottoms = mulligans_taken.saturating_sub(self.named_air);
+        self.colored_lands.saturating_sub(land_bottoms) >= 4
+    }
 }
 
 /// Does `def` tap for `color` from the battlefield UNCONDITIONALLY (default timing,
@@ -138,11 +150,28 @@ fn taps_for(def: &CardDef, color: Color) -> bool {
     })
 }
 
-/// A castable card-selection "look": a cast-to-dig cantrip (Ponder/Brainstorm/Consider)
-/// only when there's a STABLE blue source to cast it off (a blue land, not a one-shot
-/// Petal), or a free cycling cantrip (Street Wraith) regardless of mana.
-fn is_castable_look(def: &CardDef, stable_blue: bool) -> bool {
-    (def.digs_on_resolve() && stable_blue) || def.has_cycling_draw()
+/// Castability coverage: can the hand pay `def`'s mana cost off STABLE sources — lands
+/// only, not one-shot Petals? Generic pips come from any land; a coloured pip needs a
+/// land of that colour. So Ponder `{U}` wants one blue land, but Flow State `{1}{U}`
+/// wants two lands (one blue) — a lone Sea can't cast it, and an uncastable cantrip is
+/// dead, not a look.
+fn stably_castable(s: &HandSignals, def: &CardDef) -> bool {
+    let (mut blue, mut black, mut generic, mut num) = (0u32, 0u32, 0u32, 0u32);
+    for ch in def.mana_cost().trim().chars() {
+        if let Some(d) = ch.to_digit(10) {
+            num = num * 10 + d;
+            continue;
+        }
+        generic += std::mem::take(&mut num);
+        match ch {
+            'U' => blue += 1,
+            'B' => black += 1,
+            'W' | 'R' | 'G' | 'C' => generic += 1,
+            _ => {}
+        }
+    }
+    generic += num;
+    s.colored_lands >= blue + black + generic && s.blue_lands >= blue && s.black_lands >= black
 }
 
 /// Compute the [`HandSignals`] for `who`'s current hand at the given cutoff. Named-air
@@ -154,9 +183,9 @@ pub fn hand_signals(state: &SimState, who: PlayerId, cutoff: u32) -> HandSignals
         tami_fast_flip: recipe::tamiyo_flip_turn(state, who, 2).is_some(),
         ..Default::default()
     };
-    // Pass 1: mana base (so `can_blue` is known before classifying looks). Skip air.
+    // Pass 1: mana base (so colours are known before classifying looks). Count + skip air.
     for card in state.hand_of(who) {
-        if is_air(&card.catalog_key) { continue; }
+        if is_air(&card.catalog_key) { s.named_air += 1; continue; }
         let role = recipe::card_role(state, who, card.id);
         let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
         if def.is_land() {
@@ -176,44 +205,71 @@ pub fn hand_signals(state: &SimState, who: PlayerId, cutoff: u32) -> HandSignals
             _ => {}
         }
         if card.catalog_key == "Tamiyo, Inquisitive Student" { s.has_tamiyo = true; }
-        // A "supporter" = a real card that isn't mana, a dig, or the payoff: i.e.
-        // interaction (Force/Daze/Thoughtseize) or a threat body (Tamiyo/Murktide/…).
+        // A "supporter" = a real NON-LAND, non-dig, non-payoff card: interaction
+        // (Force/Daze/Thoughtseize), a threat body (Tamiyo/Murktide/…), OR an accelerant
+        // (Ritual/Petal) — going faster dodges Wasteland / the counter window, so speed
+        // is soft protection, the same category of resilience as hard interaction.
         let is_dig = def.digs_on_resolve() || def.has_cycling_draw();
-        let is_mana = def.is_land() || matches!(role, CardRole::Ritual | CardRole::Petal);
         let is_payoff = matches!(role, CardRole::Payoff | CardRole::PayoffTutor);
-        if !is_dig && !is_mana && !is_payoff { s.supporters += 1; }
+        let is_accelerant = matches!(role, CardRole::Ritual | CardRole::Petal);
+        if !is_dig && !def.is_land() && !is_payoff && !is_accelerant { s.supporters += 1; }
     }
-    // Pass 2: castable looks (needs the mana base from pass 1). Skip air. A blue cantrip
-    // counts only off a STABLE blue source (a blue land), not a one-shot Petal.
-    let stable_blue = s.stable_blue();
+    // Accelerants don't scale (ritual+ritual < ritual): one is a weak second piece for
+    // the dig plan (handled in `realistic_keep`); any BEYOND the first are AIR — they
+    // join the bottomable pool. (Interaction is the opposite: daze+daze > daze, so real
+    // supporters are counted in full above.)
+    s.named_air += (s.petals + s.rituals).saturating_sub(1);
+    // Pass 2: classify looks (needs pass-1 mana base). DEEP = a cast-to-dig cantrip you
+    // can stably pay for; MARGINAL = a free cycler (Street Wraith), a surveil land
+    // (Undercity Sewers), or a fetch backed by a second land.
+    let have_2_lands = s.lands >= 2;
     for card in state.hand_of(who) {
         if is_air(&card.catalog_key) { continue; }
-        if let Some(def) = state.catalog.get(&card.catalog_key) {
-            if is_castable_look(def, stable_blue) { s.castable_looks += 1; }
+        let Some(def) = state.catalog.get(&card.catalog_key) else { continue };
+        if def.digs_on_resolve() {
+            if stably_castable(&s, def) { s.deep_looks += 1; }
+        } else if def.has_cycling_draw() {
+            s.marginal_looks += 1;
+        } else {
+            let role = recipe::card_role(state, who, card.id);
+            if matches!(role, CardRole::BlackLandTapped)
+                || (matches!(role, CardRole::Fetch) && have_2_lands)
+            {
+                s.marginal_looks += 1;
+            }
         }
     }
     s
 }
 
-/// The "Realistic" keep decision for an opening hand — keep iff the (air-filtered) hand
-/// has a viable plan. Returns true to KEEP. Mulligan-depth handling (always keep at 4)
-/// is applied by [`should_mulligan`]. The plans:
-/// - **fast dd**: a guaranteed line, or Doomsday + a black source + a dig for the mana;
-/// - **tami flip**: a deterministic Tamiyo flip by turn 2;
-/// - **dig**: a black source + either two castable looks, or one look backed by a real
-///   supporter on a stable (≥2-land) base — both only if not flooded.
-pub fn realistic_keep(s: &HandSignals) -> bool {
-    // Strong combo plans — keep regardless of air.
+/// The "Realistic" keep decision at mulligan depth `mulligans_taken` — keep iff the best
+/// `7 − k` cards (named-air + excess lands bottomed) hold a viable plan. Returns true to
+/// KEEP; the always-keep-at-4 floor is applied by [`should_mulligan`]. The plans:
+/// - **deterministic line** — the solver guarantees Doomsday by the cutoff;
+/// - **fast dd** — Doomsday + a black source + a deep look (or BB + any look);
+/// - **tami flip** — a deterministic Tamiyo flip by turn 2;
+/// - **dig** — a deep look + a second piece (another look, or a supporter / accelerant),
+///   unless flooded once the excess lands are bottomed.
+pub fn realistic_keep(s: &HandSignals, mulligans_taken: u32) -> bool {
     if s.det_line { return true; }
     if !s.mana_base() { return false; } // no real colored land → nothing to cast off
-    if s.has_dd && s.black_src() && s.castable_looks >= 1 { return true; } // fast dd (have payoff)
-    if s.tami_fast_flip { return true; } // tami flip
-    // Dig plans — need a black source and a non-flooded mana base.
-    if s.black_src() && !s.flooded() {
-        if s.castable_looks >= 2 { return true; } // enough dig to find the combo
-        // one look is enough with real backup (interaction / a threat body); a thin dig
-        // with no support (just mana) isn't a plan.
-        if s.castable_looks >= 1 && s.supporters >= 1 { return true; }
+    // Fast DD: have the payoff + a route to BBB. A lone black source needs a deep (real)
+    // look; BB lets a marginal look finish the third black.
+    if s.has_dd && s.black_src() && (s.deep_looks >= 1 || (s.bb() && s.looks() >= 1)) {
+        return true;
+    }
+    if s.tami_fast_flip { return true; }
+    // Dig: a deep look + a SECOND PIECE, scaled by hand size. At the opening 7 the second
+    // piece must be STRONG — a 2nd deep look, or a real supporter (interaction / threat).
+    // After a mulligan the bar relaxes (you bottom the air, so the kept hand is leaner):
+    // a marginal look or a single accelerant is enough. Only if not flooded post-bottom.
+    if s.black_src() && !s.flooded(mulligans_taken) && s.deep_looks >= 1 {
+        let strong = s.deep_looks >= 2 || s.supporters >= 1;
+        let relaxed = strong || s.marginal_looks >= 1 || (s.petals + s.rituals) >= 1;
+        let second_piece = if mulligans_taken == 0 { strong } else { relaxed };
+        if second_piece {
+            return true;
+        }
     }
     false
 }
@@ -228,7 +284,7 @@ pub fn aggressive_keep(state: &SimState, who: PlayerId, cutoff: u32) -> bool {
     if std::env::var("KEEP7").is_ok() { return true; }
     let s = hand_signals(state, who, cutoff);
     if s.det_line { return true; }
-    s.has_dd && (s.black_lands + s.petals) >= 2 && s.castable_looks >= 1
+    s.has_dd && s.bb() && (s.deep_looks + s.marginal_looks) >= 1
 }
 
 /// Whether to MULLIGAN this hand under `mode`. Always keep at 4 cards
@@ -243,7 +299,7 @@ pub fn should_mulligan(
     if mulligans_taken >= 3 { return false; } // always keep the 4-card hand
     let keep = match mode {
         MullMode::Keep7 => true,
-        MullMode::Realistic => realistic_keep(&hand_signals(state, who, cutoff)),
+        MullMode::Realistic => realistic_keep(&hand_signals(state, who, cutoff), mulligans_taken),
         MullMode::Aggressive => aggressive_keep(state, who, cutoff),
     };
     !keep
@@ -269,8 +325,10 @@ mod tests {
     ];
 
     /// Build an opening-hand state (hand in hand, the rest of the tempo deck in
-    /// library) and return the `Realistic` keep decision.
-    fn realistic_keeps(hand: &[&str]) -> bool {
+    /// library) and return the `Realistic` keep decision (at the opening 7).
+    fn realistic_keeps(hand: &[&str]) -> bool { realistic_keeps_at(hand, 0) }
+    /// As above, but at mulligan depth `mulls` (keeping `7 − mulls` after the London bottom).
+    fn realistic_keeps_at(hand: &[&str], mulls: u32) -> bool {
         let catalog = build_catalog();
         let mut pool: Vec<String> = Vec::new();
         for (n, q) in TEMPO { for _ in 0..*q { pool.push((*n).to_string()); } }
@@ -281,7 +339,7 @@ mod tests {
         s.catalog = catalog;
         for h in hand { s.place_card(PlayerId::Us, h, Zone::Hand { known: false }); }
         for n in &pool { s.place_card(PlayerId::Us, n, Zone::Library); }
-        realistic_keep(&hand_signals(&s, PlayerId::Us, 4))
+        realistic_keep(&hand_signals(&s, PlayerId::Us, 4), mulls)
     }
 
     /// Every opening hand we hand-judged during design, with the human "blind" verdict.
@@ -331,6 +389,25 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "Realistic rule disagreed with human calls:\n{}", wrong.join("\n"));
+    }
+
+    /// Hand-size scaling: a thin dig (deep look backed only by marginal looks / a single
+    /// accelerant) is bad at 7 but a keep once the air is bottomed. And no deep look is
+    /// never a dig, regardless of marginal looks or support.
+    #[test]
+    fn realistic_scales_with_hand_size() {
+        // r4-#13: Ponder (deep) + 2 fetches (marginal) + 2 Petals + Dark Ritual — no
+        // real supporter, no second deep look. Mull at 7, keep at 5.
+        let thin = &["Scalding Tarn", "Ponder", "Lotus Petal", "Wasteland",
+                     "Misty Rainforest", "Lotus Petal", "Dark Ritual"];
+        assert!(!realistic_keeps_at(thin, 0), "thin dig is a mull at the 7");
+        assert!(realistic_keeps_at(thin, 2), "thin dig is a keep at the 5 (air bottomed)");
+        // Marginal looks (Sewers + Street Wraith) + interaction, but NO deep look — not a
+        // dig at any size; we wouldn't keep sewers+wraith as if it were ponder+brainstorm.
+        let no_deep = &["Undercity Sewers", "Street Wraith", "Underground Sea",
+                        "Force of Will", "Daze", "Thoughtseize", "Murktide Regent"];
+        assert!(!realistic_keeps_at(no_deep, 0), "no deep look ⇒ no dig at 7");
+        assert!(!realistic_keeps_at(no_deep, 2), "no deep look ⇒ no dig at 5");
     }
 
     #[test]

@@ -97,7 +97,7 @@ fn main() {
         let s = hand_signals(&state, PlayerId::Us, cutoff);
         if !raw && s.det_line { continue; } // study the middle by default
         shown += 1;
-        let keep = realistic_keep(&s);
+        let keep = realistic_keep(&s, 0);
         if keep { keeps += 1; }
 
         println!("── hand #{shown} ──");
@@ -106,9 +106,9 @@ fn main() {
             println!("    {:<30} [{}]", card.catalog_key, tag(&card.catalog_key, role));
         }
         println!(
-            "    sources U-land:{} B-land:{} colored:{} | petals:{} rituals:{} looks:{} | DD:{} Tamiyo:{} det-line:{}",
+            "    sources U-land:{} B-land:{} colored:{} | petals:{} rituals:{} deep:{} marginal:{} support:{} | DD:{} Tamiyo:{} det-line:{}",
             s.blue_lands, s.black_lands, s.colored_lands, s.petals, s.rituals,
-            s.castable_looks, yn(s.has_dd), yn(s.has_tamiyo), yn(s.det_line),
+            s.deep_looks, s.marginal_looks, s.supporters, yn(s.has_dd), yn(s.has_tamiyo), yn(s.det_line),
         );
         println!("    Realistic → {}\n", if keep { "KEEP" } else { "MULL" });
     }
