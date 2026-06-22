@@ -84,8 +84,8 @@
       padding: 0.6rem 0 0.4rem; list-style-position: inside; }
     details.sec > summary::-webkit-details-marker { color: #5dade2; }
     details.sec .sec-body { padding: 0 0 0.6rem; }
-    table.breakdown-tbl { max-width: 24rem; }
-    table.breakdown-tbl td.pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: bold; }
+    table.breakdown-tbl { width: auto; max-width: 24rem; }
+    table.breakdown-tbl td.pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: bold; white-space: nowrap; }
     table.breakdown-tbl td.pct.det { color: #6fcf6f; }
     table.breakdown-tbl td.pct.sto { color: #5dade2; }
     table.breakdown-tbl td.pct.miss { color: #cf6f6f; }
@@ -430,8 +430,11 @@
               + sub('&rarr; missing both', mb) + (mn ? sub('&rarr; had both (timing)', mn) : '');
         }
         bd += `</table>`;
-        secs += section(`How the combo came together (by T${cutoff})`, bd, true);
+        secs += section(`Outcomes (by T${cutoff})`, bd, true);
       }
+
+      secs += section(`P(Doomsday cast on turn t) &mdash; density (PDF)`, `<table>${pdfRows.join('')}</table>`, true);
+      secs += section(`P(Doomsday cast by turn t) &mdash; cumulative (CDF)`, `<table>${cdfRows.join('')}</table>`, true);
 
       // Sample games: a few openers — thrown-back mulligans + the kept hand + outcome.
       if (s.samples && s.samples.length) {
@@ -457,11 +460,9 @@
             + `<td>${bar(n / totalKeeps)}</td><td class="muted">avg predicted ${(avg * 100).toFixed(0)}%</td></tr>`);
         }
         secs += section(`Mulligans &mdash; kept hand size + avg predicted P(cast by T${cutoff})`,
-          `<table>${mullRows.join('')}</table>`, true);
+          `<table>${mullRows.join('')}</table>`, false);
       }
 
-      secs += section(`P(Doomsday cast on turn t) &mdash; density (PDF)`, `<table>${pdfRows.join('')}</table>`, true);
-      secs += section(`P(Doomsday cast by turn t) &mdash; cumulative (CDF)`, `<table>${cdfRows.join('')}</table>`, true);
       secs += section(`Protection layers in hand at cast`, `<table>${protRows.join('')}</table>`, false);
 
       $('results').className = '';
