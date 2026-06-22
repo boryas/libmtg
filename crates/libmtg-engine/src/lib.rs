@@ -1571,6 +1571,9 @@ pub struct SimState {
     /// Snapshot of `us`'s post-mulligan opening hand (catalog keys), for sample-game
     /// reporting. Populated by `run_game` once mulligans + the London bottom are done.
     pub opening_hand_us: Vec<String>,
+    /// Hands `us` mulliganed away (each a snapshot of the 7 seen, in order), for
+    /// sample-game reporting. Populated by `run_game` during the mulligan loop.
+    pub mulliganed_hands_us: Vec<Vec<String>>,
     /// App-supplied objective: observes the event stream and decides termination.
     /// `None` for bare test states with no objective installed.
     pub(crate) objective: Option<Box<dyn crate::objective::Objective>>,
@@ -1665,6 +1668,7 @@ impl SimState {
             winner: None,
             terminal: false,
             opening_hand_us: Vec::new(),
+            mulliganed_hands_us: Vec::new(),
             objective: None,
             life_before_dd: None,
             casting_spell: None,
@@ -4264,6 +4268,11 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
             state.decision_log.extend(decisions);
             if !take { break; }
             mulligans[i] += 1;
+            if who == PlayerId::Us {
+                // Snapshot the thrown-back hand for sample reporting.
+                let h: Vec<String> = state.hand_of(who).map(|c| c.catalog_key.clone()).collect();
+                state.mulliganed_hands_us.push(h);
+            }
             // Return hand to library via set_card_zone (maintains library_order).
             let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
             for id in hand_ids { state.set_card_zone(id, Zone::Library); }

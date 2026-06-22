@@ -496,6 +496,29 @@ pub fn sufficient(state: &SimState, who: PlayerId) -> bool {
     has_dd && bbb_on_turn(&c, 1, c.pool)
 }
 
+/// What a not-yet-combo'd hand is missing RIGHT NOW: the payoff (no Doomsday in hand),
+/// the mana (can't make BBB this turn), both, or neither (has both but hasn't cast — a
+/// sequencing/timing gap). Used to decompose the games that miss the cutoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingElement {
+    Mana,
+    Payoff,
+    Both,
+    Neither,
+}
+
+pub fn missing_element(state: &SimState, who: PlayerId) -> MissingElement {
+    let dd = state.hand_of(who).any(|c| c.catalog_key == DOOMSDAY);
+    let c = project(state, who);
+    let mana = bbb_on_turn(&c, 1, c.pool);
+    match (mana, dd) {
+        (true, true) => MissingElement::Neither,
+        (true, false) => MissingElement::Payoff,
+        (false, true) => MissingElement::Mana,
+        (false, false) => MissingElement::Both,
+    }
+}
+
 /// The earliest turn (1-based; turn 1 = now) by which `who` can cast Doomsday
 /// using ONLY the current hand+board — no *blind* draws relied upon. PASS untaps
 /// and grants a land drop each turn (so taplands come online, and lands
