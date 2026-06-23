@@ -474,6 +474,7 @@ fn walk(
         | Action::ForEach { .. }
         | Action::OrderTop { .. }
         | Action::Dig { .. }
+        | Action::RecordEtbChoice { .. }
         | Action::MayDo { .. } => Some(()),
     }
 }

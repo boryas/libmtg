@@ -60,6 +60,16 @@ pub struct ChoiceOption {
     pub action: Box<Action>,
 }
 
+/// The closed vocabulary of "as ~ enters, choose ..." ETB choices (CR 614.12).
+/// Maps to a `ChoiceRequest` when the action runs; the result is stored in the
+/// permanent's `etb_choice` and read back via `Expr::ChosenColor`/`ChosenName`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EtbChoiceKind {
+    Color,
+    CreatureType,
+    CardName,
+}
+
 /// One-shot mutations.
 #[derive(Clone)]
 pub enum Action {
@@ -282,6 +292,11 @@ pub enum Action {
         /// effect-resolution case — the chooser is asked via `resolve_choice`.
         bind_as: Option<&'static str>,
     },
+    /// "As ~ enters, choose a color/creature type/card name" (CR 614.12). Asks
+    /// the source's controller for the choice and records it in the source
+    /// permanent's `etb_choice`. Used inside a self-entry `Replacement` body
+    /// (after the `Move`), so the permanent is on the battlefield to store on.
+    RecordEtbChoice { kind: EtbChoiceKind },
 
     // ── scheduling ───────────────────────────────────────────────────────
     /// Register a delayed trigger that fires at some future event.

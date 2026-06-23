@@ -713,6 +713,26 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::RecordEtbChoice { kind } => {
+            // "As ~ enters, choose ..." (CR 614.12): ask the source's controller
+            // and record the result on the source permanent's `etb_choice`, read
+            // back by `Expr::ChosenColor`/`ChosenName`. Runs after the entry Move,
+            // so the permanent is on the battlefield to store on.
+            use crate::ir::action::EtbChoiceKind;
+            if let Some(src) = env.source {
+                let request = match kind {
+                    EtbChoiceKind::Color => ChoiceRequest::Color,
+                    EtbChoiceKind::CreatureType => ChoiceRequest::CreatureType,
+                    EtbChoiceKind::CardName => ChoiceRequest::CardName,
+                };
+                let result = state.with_strategy(actor, |s, st| s.resolve_choice(src, &request, st));
+                if let Some(bf) = state.permanent_bf_mut(src) {
+                    bf.etb_choice = Some(result);
+                }
+            }
+            ExecResult::Ok
+        }
+
         Action::Choose { who, prompt: _, options, bind_as } => {
             let who = resolve_who(who, state, env, actor);
             let src = env.source.unwrap_or(ObjId::default());

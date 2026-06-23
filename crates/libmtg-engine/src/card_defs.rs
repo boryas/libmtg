@@ -945,15 +945,7 @@ fn arid_mesa() -> CardDef {
 /// {T}: Add {C}.
 /// {T}: Add one mana of any color (TODO: restrict to spells of the named type; mana is uncounterable).
 fn cavern_of_souls() -> CardDef {
-    let repl = etb_self_replacement(|source_id, id, controller, state, t| {
-        let ChoiceResult::CreatureType(chosen_type) =
-            state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::CreatureType, st)) else { return };
-        if let Some(bf) = state.permanent_bf_mut(id) {
-            bf.etb_choice = Some(ChoiceResult::CreatureType(chosen_type.clone()));
-        }
-        state.log(t, controller, format!("Cavern of Souls names \"{}\"", chosen_type));
-    });
-    CardDef::new(
+    let mut def = CardDef::new(
         "Cavern of Souls",
         CardKind::Land(LandData {
             // {T}: Add {C} — colorless
@@ -990,10 +982,18 @@ fn cavern_of_souls() -> CardDef {
         Some(50),
         vec![Supertype::Legendary], CardLayout::Normal, None,
         vec![],
-        vec![repl],
+        vec![], // ETB creature-type choice is now an IR Replacement (below)
         vec![],
         vec![],
-    )
+    );
+    // ETB (CR 614.12 "as ~ enters, choose a creature type"). Stored in
+    // `etb_choice`; the colored-mana ability's type gate is coarsened to
+    // "is creature" today, but the named type is recorded for when it tightens.
+    def.abilities = vec![etb_choice_replacement(
+        crate::ir::action::EtbChoiceKind::CreatureType,
+        "As Cavern of Souls enters the battlefield, choose a creature type.",
+    )];
+    def
 }
 
 // ── Artifacts ─────────────────────────────────────────────────────────────────
@@ -3982,14 +3982,6 @@ fn painters_servant() -> CardDef {
     use crate::ir::context::Ctx;
     use crate::ir::expr::Expr;
 
-    // ETB (CR 614.12 "as ~ enters, choose a color") — store the choice only.
-    let repl = etb_self_replacement(|source_id, id, controller, state, _t| {
-        let ChoiceResult::Color(chosen) =
-            state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::Color, st)) else { return };
-        if let Some(bf) = state.permanent_bf_mut(id) {
-            bf.etb_choice = Some(ChoiceResult::Color(chosen));
-        }
-    });
     let mut def = CardDef::new(
         "Painter's Servant",
         CardKind::Creature(CreatureData::new("2", 1, 3)),
@@ -3997,21 +3989,28 @@ fn painters_servant() -> CardDef {
         Some(40),
         vec![], CardLayout::Normal, None,
         vec![],
-        vec![repl],
+        vec![], // ETB color choice is now an IR Replacement (below)
         vec![],
         vec![],
     );
-    // "All cards, spells, and permanents are the chosen color in addition to their
-    // other colors." An L5 IR Static (scope None = every object) that adds the color
-    // read from this Painter's own ETB choice. Expires with the source by default.
-    def.abilities = vec![Ability {
-        kind: AbilityKind::Static {
-            mods: vec![CEMod::AddColor(Expr::ChosenColor(Box::new(Expr::Ctx(Ctx::Source))))],
-            scope: None,
-            condition: None,
+    // ETB (CR 614.12 "as ~ enters, choose a color"); then "all cards, spells, and
+    // permanents are the chosen color in addition to their other colors" — an L5
+    // IR Static (scope None = every object) that adds the color read from this
+    // Painter's own ETB choice. Expires with the source by default.
+    def.abilities = vec![
+        etb_choice_replacement(
+            crate::ir::action::EtbChoiceKind::Color,
+            "As Painter's Servant enters the battlefield, choose a color.",
+        ),
+        Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::AddColor(Expr::ChosenColor(Box::new(Expr::Ctx(Ctx::Source))))],
+                scope: None,
+                condition: None,
+            },
+            text: Some("All cards, spells, and permanents are the chosen color in addition to their other colors."),
         },
-        text: Some("All cards, spells, and permanents are the chosen color in addition to their other colors."),
-    }];
+    ];
     // Painter's Servant is an Artifact Creature; the constructor derives only one type from
     // CardKind, so we push the second type explicitly.
     def.types.push(CardType::Artifact);
@@ -4075,15 +4074,7 @@ fn disruptor_flute() -> CardDef {
         Some(40),
         vec![], CardLayout::Normal, None,
         vec![],  // no trigger_defs
-        // ETB (CR 614.12 "as ~ enters, choose a card name") — store the choice in
-        // etb_choice; the ongoing effects below read it. No CE pushed here anymore.
-        vec![etb_self_replacement(|source_id, id, controller, state, _t| {
-            let ChoiceResult::CardName(chosen) =
-                state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::CardName, st)) else { return };
-            if let Some(bf) = state.permanent_bf_mut(id) {
-                bf.etb_choice = Some(ChoiceResult::CardName(chosen));
-            }
-        })],
+        vec![],  // ETB card-name choice is now an IR Replacement (below)
         vec![],  // no prohibition_defs
         vec![],  // ongoing effects are IR abilities (below)
     );
@@ -4097,6 +4088,12 @@ fn disruptor_flute() -> CardDef {
     );
 
     card.abilities = vec![
+        // ETB (CR 614.12 "as ~ enters, choose a card name") — recorded in
+        // etb_choice; the two ongoing clauses below read it via ChosenName.
+        etb_choice_replacement(
+            crate::ir::action::EtbChoiceKind::CardName,
+            "As Disruptor Flute enters the battlefield, choose a card name.",
+        ),
         // "Spells with the chosen name cost {3} more to cast." A casting-cost
         // surcharge CE (recompute writes casting_cost_modifier += 3 on matches).
         Ability {
@@ -5337,6 +5334,40 @@ fn cant_be_countered_self() -> crate::ir::ability::Ability {
             active_zone: None,
         },
         text: Some("This spell can't be countered."),
+    }
+}
+
+/// "As ~ enters the battlefield, choose a color/creature type/card name"
+/// (CR 614.12). A self-entry `Replacement` re-does the entry (`Move`) then
+/// records the choice in the permanent's `etb_choice` via `RecordEtbChoice`;
+/// the card's ongoing abilities read it back with `ChosenColor`/`ChosenName`.
+fn etb_choice_replacement(
+    kind: crate::ir::action::EtbChoiceKind,
+    text: &'static str,
+) -> crate::ir::ability::Ability {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, ReplacementBody};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    Ability {
+        kind: AbilityKind::Replacement {
+            matches: EventPattern::EntersZone {
+                obj_filter: ir_self(),
+                zone_kind: ZoneKindSel::Battlefield,
+            },
+            condition: None,
+            body: ReplacementBody::Replace(Action::Sequence(vec![
+                Action::Move {
+                    what: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+                Action::RecordEtbChoice { kind },
+            ])),
+            active_zone: None, // self-entry replacement
+        },
+        text: Some(text),
     }
 }
 

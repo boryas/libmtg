@@ -1326,11 +1326,12 @@ impl CardDef {
 ///
 /// Signature: `extra(source_id, id, controller, state, t)`
 ///
-/// Still used by the "as ~ enters, choose a name/color/type" cards (Cavern of
-/// Souls, Pithing Needle, …), where the ETB stores an explicit player choice
-/// that isn't derivable from the log. Cost-context ETBs (Engineered Explosives'
-/// sunburst X, Murktide's delve count) are now IR `Replacement`s reading the
-/// cast via `Ctx::ThisCast`.
+/// Now used only by `replacement_planeswalker_etb` (a planeswalker enters with
+/// its starting loyalty). The card-specific ETB replacements have all moved to
+/// IR `AbilityKind::Replacement`: cost-context ETBs (Engineered Explosives,
+/// Murktide) read the cast via `Ctx::ThisCast`, and "as ~ enters, choose ..."
+/// ETBs (Painter's Servant, Cavern of Souls, Disruptor Flute) use
+/// `Action::RecordEtbChoice`.
 pub(crate) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
 where
     F: Fn(ObjId, ObjId, PlayerId, &mut SimState, u8) + Send + Sync + 'static,
