@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::{dd_card_evaluator, DoomsdayStrategy, MatchupInfo};
 use libmtg_engine::{
-    build_catalog, run_game, AlwaysPass, GameEvent, ObjId, Objective, PlayerId, Scenario, SimState,
-    Strategy,
+    build_catalog, run_game, AlwaysPass, GameEvent, ObjId, Objective, PlayerId, PlayerState,
+    Scenario, SimState, Strategy, Zone,
 };
 use rand::SeedableRng;
 use serde::Serialize;
@@ -343,6 +343,89 @@ pub fn run_goldfish_asap_mode(
         dd_goldfish_evaluator(),
         on_play,
     )
+}
+
+/// Emit a labeled keep-all-7 dataset for the mulligan-learning bake-off. Runs `games`
+/// **Keep7** games (keep every dealt 7, on the play) and writes one CSV row per game:
+/// the count of each distinct deck card in the opening 7, plus the solver-only signals
+/// (`det_line`, `tami_flip`, `p_cast`) computed on that opening hand, plus the realized
+/// `win` (cast Doomsday by `cutoff`). The property tags are derived downstream (Python)
+/// from the card-name counts, so the tag table can be iterated without re-running.
+pub fn run_goldfish_dump(deck: &[(String, i32, String)], games: u32, cutoff: u32) -> String {
+    let catalog = build_catalog();
+    let opp_deck: Vec<(String, i32, String)> =
+        vec![("Island".to_string(), 60, "main".to_string())];
+    let mut cards: Vec<String> = deck.iter().map(|(n, _, _)| n.clone()).collect();
+    cards.sort();
+    cards.dedup();
+    // Full deck as a flat multiset (for reconstructing the post-keep library).
+    let full: Vec<String> = deck
+        .iter()
+        .flat_map(|(n, q, _)| std::iter::repeat(n.clone()).take((*q).max(0) as usize))
+        .collect();
+    let cutoff_u8 = (cutoff.min(u8::MAX as u32) as u8).max(1);
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+
+    let mut out = String::new();
+    // Quote card names — some (Jace, Tamiyo) contain commas.
+    let header: Vec<String> = cards.iter().map(|c| format!("\"{c}\"")).collect();
+    out.push_str(&header.join(","));
+    out.push_str(",det_line,tami_flip,p_cast,win\n");
+
+    for _ in 0..games {
+        let scenario = Scenario {
+            us_label: "doomsday".to_string(),
+            opp_label: "goldfish".to_string(),
+            catalog: catalog.clone(),
+            us_deck: deck.to_vec(),
+            opp_deck: opp_deck.clone(),
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, MullMode::Keep7)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective::default()),
+            max_turns: cutoff_u8,
+            on_play: Some(true), // labels are on the play
+        };
+        let state = run_game(scenario, &mut rng);
+        let hand = state.opening_hand_us.clone();
+        if hand.is_empty() {
+            continue;
+        }
+        let win = u8::from(state.terminal && state.current_turn <= cutoff_u8);
+
+        // Reconstruct opening hand + remaining library to compute the solver signals on
+        // the *opening* hand (det_line / p_cast_by are draw-order-independent).
+        let mut s2 = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s2.catalog = catalog.clone();
+        for h in &hand {
+            s2.place_card(PlayerId::Us, h, Zone::Hand { known: false });
+        }
+        let mut lib = full.clone();
+        for h in &hand {
+            if let Some(i) = lib.iter().position(|c| c == h) {
+                lib.remove(i);
+            }
+        }
+        for c in &lib {
+            s2.place_card(PlayerId::Us, c, Zone::Library);
+        }
+        let sig = mull::hand_signals(&s2, PlayerId::Us, cutoff);
+        let p = recipe::p_cast_by(&s2, PlayerId::Us, cutoff);
+
+        let counts: Vec<String> = cards
+            .iter()
+            .map(|c| hand.iter().filter(|h| h.as_str() == c).count().to_string())
+            .collect();
+        out.push_str(&counts.join(","));
+        out.push_str(&format!(
+            ",{},{},{:.4},{}\n",
+            u8::from(sig.det_line),
+            u8::from(sig.tami_fast_flip),
+            p,
+            win
+        ));
+    }
+    out
 }
 
 /// Debug A/B: run `games` SEEDED cast-ASAP games in compare mode and return a log

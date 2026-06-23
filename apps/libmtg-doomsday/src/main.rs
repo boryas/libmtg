@@ -67,6 +67,10 @@ struct Args {
     /// Force on the play (no turn-1 draw). Default randomizes play/draw 50/50.
     #[arg(long)]
     play: bool,
+    /// Emit a labeled keep-all-7 CSV (card-name counts + solver signals + realized win)
+    /// to stdout for the mulligan-learning bake-off. Uses Keep7 + on-the-play.
+    #[arg(long)]
+    dump_keep_data: bool,
     /// A/B debug: print, for a few SEEDED games, every decision where the principled
     /// policy disagrees with the reference value-table heuristic.
     #[arg(long)]
@@ -95,13 +99,22 @@ fn main() -> ExitCode {
     };
 
     // Surface cards the engine can't simulate (dropped / inert) before running.
-    warn_unimplemented_cards(&deck, "deck", &build_catalog());
+    // Skip for --dump-keep-data: that emits machine-readable CSV to stdout.
+    if !args.dump_keep_data {
+        warn_unimplemented_cards(&deck, "deck", &build_catalog());
+    }
 
     if std::env::var("AUDIT_DET").is_ok() {
         eprintln!("Auditing deterministic-but-failed games (seed {}, cutoff T{})…", args.seed, args.cutoff);
         for line in libmtg_doomsday::run_goldfish_audit_det(&deck, args.cutoff, args.seed, args.games, 3) {
             println!("{line}");
         }
+        return ExitCode::SUCCESS;
+    }
+
+    if args.dump_keep_data {
+        eprintln!("Dumping {} keep-all-7 rows (Keep7, on the play, cutoff T{})…", args.games, args.cutoff);
+        print!("{}", libmtg_doomsday::run_goldfish_dump(&deck, args.games, args.cutoff));
         return ExitCode::SUCCESS;
     }
 
