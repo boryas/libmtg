@@ -218,10 +218,17 @@ pub fn run_goldfish_asap_web(
     games: u32,
     cutoff: u32,
     mull_mode: &str,
+    play_draw: &str,
 ) -> String {
     let deck = Decklist::parse_text(deck_text).to_engine_deck();
     let mode = MullMode::from_str_or_default(mull_mode);
-    let stats = run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, cutoff, mode);
+    // "play" / "draw" force it; anything else (default "random") randomizes 50/50.
+    let on_play = match play_draw {
+        "play" => Some(true),
+        "draw" => Some(false),
+        _ => None,
+    };
+    let stats = run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, cutoff, mode, on_play);
     serde_json::to_string(&stats).unwrap()
 }
 

@@ -61,6 +61,12 @@ struct Args {
     /// Cutoff turn for the cast-ASAP objective `P(cast by cutoff)`.
     #[arg(long, default_value_t = DEFAULT_CUTOFF)]
     cutoff: u32,
+    /// Force on the draw (draw a card on turn 1). Default randomizes play/draw 50/50.
+    #[arg(long)]
+    draw: bool,
+    /// Force on the play (no turn-1 draw). Default randomizes play/draw 50/50.
+    #[arg(long)]
+    play: bool,
     /// A/B debug: print, for a few SEEDED games, every decision where the principled
     /// policy disagrees with the reference value-table heuristic.
     #[arg(long)]
@@ -135,6 +141,7 @@ fn main() -> ExitCode {
         StrategyKind::Baseline => run_goldfish(&deck, args.games, DEFAULT_PROTECTION, args.cutoff),
         StrategyKind::Asap => run_goldfish_asap_mode(
             &deck, args.games, DEFAULT_PROTECTION, args.cutoff, args.mull_mode.into(),
+            if args.play { Some(true) } else if args.draw { Some(false) } else { None },
         ),
         StrategyKind::BaselineAggro => libmtg_doomsday::run_goldfish_baseline_aggro(
             &deck, args.games, DEFAULT_PROTECTION, args.cutoff,

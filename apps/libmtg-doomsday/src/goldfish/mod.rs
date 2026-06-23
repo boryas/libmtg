@@ -183,6 +183,7 @@ fn run_goldfish_inner<F>(
     cutoff: u8,
     make_us: F,
     evaluator: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync>,
+    on_play: Option<bool>, // None = randomize 50/50 per game (the default)
 ) -> GoldfishStats
 where
     F: Fn() -> Box<dyn Strategy>,
@@ -211,7 +212,7 @@ where
             // The cutoff IS the horizon: there is no reason to simulate past the turn
             // by which the objective is judged. (`.max(1)` guards a degenerate 0.)
             max_turns: cutoff.max(1),
-            on_play: None,
+            on_play,
         };
         let state = run_game(scenario, &mut rng);
         // Keep a few sample games (the first handful) for flavor: opening hand + outcome.
@@ -306,6 +307,7 @@ pub fn run_goldfish(
         cutoff.min(u8::MAX as u32) as u8,
         || Box::new(DoomsdayStrategy::new(MatchupInfo::default())),
         evaluator,
+        None, // randomized play/draw (default)
     )
 }
 
@@ -319,7 +321,7 @@ pub fn run_goldfish_asap(
     protection: &[&str],
     cutoff: u32,
 ) -> GoldfishStats {
-    run_goldfish_asap_mode(deck, games, protection, cutoff, MullMode::default())
+    run_goldfish_asap_mode(deck, games, protection, cutoff, MullMode::default(), None)
 }
 
 /// Like [`run_goldfish_asap`], but with an explicit opening-hand [`MullMode`]
@@ -330,6 +332,7 @@ pub fn run_goldfish_asap_mode(
     protection: &[&str],
     cutoff: u32,
     mode: MullMode,
+    on_play: Option<bool>,
 ) -> GoldfishStats {
     run_goldfish_inner(
         deck,
@@ -338,6 +341,7 @@ pub fn run_goldfish_asap_mode(
         cutoff.min(u8::MAX as u32) as u8,
         move || Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, mode)),
         dd_goldfish_evaluator(),
+        on_play,
     )
 }
 
@@ -405,6 +409,7 @@ pub fn run_goldfish_baseline_aggro(
             cutoff,
         )),
         dd_card_evaluator(MatchupInfo::default()),
+        None, // randomized play/draw (default)
     )
 }
 

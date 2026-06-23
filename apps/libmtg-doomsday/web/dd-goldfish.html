@@ -188,6 +188,12 @@
           cut-off, and otherwise develops a black source and digs toward the combo.</p>
         </div>
       </details>
+      <label for="onplay">Play / draw</label>
+      <select id="onplay">
+        <option value="random" selected>Random &mdash; 50/50 (matches the writeups)</option>
+        <option value="play">On the play &mdash; no turn-1 draw</option>
+        <option value="draw">On the draw &mdash; +1 card on turn 1</option>
+      </select>
       <label for="games">Games <span class="muted">(±~1.4% at 1000)</span></label>
       <input type="number" id="games" value="1000" min="1" max="50000">
       <br>
@@ -206,8 +212,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260622-mull-redesign';
-    const WASM_VER = '20260622-mull-redesign';
+      from '../pkg/libmtg_doomsday.js?v=20260623-playdraw';
+    const WASM_VER = '20260623-playdraw';
 
     const REPO = 'boryas/libmtg';
 
@@ -484,9 +490,10 @@
       const games = $('games').valueAsNumber || 2000;
       const mull = $('mull').value;
       const cutoff = $('cutoff').valueAsNumber || 3;
+      const playDraw = $('onplay').value;
       // The objective is P(cast by the cut-off), and the sim's turn cap IS the cut-off
       // (no reason to simulate past the turn the objective is judged on).
-      const sim = (n) => run_goldfish_asap_web(deck, n, cutoff, mull);
+      const sim = (n) => run_goldfish_asap_web(deck, n, cutoff, mull, playDraw);
       const btn = $('run'), prog = $('progress'), fill = $('progress-fill'), plabel = $('progress-label');
       btn.disabled = true; btn.textContent = 'Simulating…';
       prog.hidden = false; fill.style.width = '0'; plabel.textContent = '';
