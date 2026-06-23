@@ -7458,12 +7458,12 @@
         state.catalog = test_catalog();
 
         let def = catalog_card("Mishra's Bauble");
-        let _bauble_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        let bauble_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
         recompute(&mut state);
 
-        // Activate the ability (tap + sac → create delayed trigger).
+        // Activate the ability (tap + sac → schedule delayed trigger).
         let ability = &def.abilities()[0];
-        let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
+        let eff = build_ability_effect(ability, PlayerId::Us, bauble_id);
         eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.trigger_instances.len(), 1,
@@ -7478,7 +7478,7 @@
         );
         assert_eq!(state.pending_triggers.len(), 1,
             "upkeep should produce one draw trigger");
-        assert_eq!(state.pending_triggers[0].source_name, "Mishra's Bauble (delayed draw)");
+        assert_eq!(state.pending_triggers[0].source_name, "Mishra's Bauble (delayed)");
         assert!(state.trigger_instances.is_empty(),
             "OneShot trigger should be removed after firing");
 

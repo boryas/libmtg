@@ -5413,36 +5413,32 @@ fn brazen_borrower() -> CardDef {
 /// {T}, Sacrifice: Look at the top card of target player's library.
 /// Draw a card at the beginning of the next turn's upkeep.
 fn mishras_bauble() -> CardDef {
-    simple("Mishra's Bauble", CardKind::Artifact(ArtifactData {
+    use crate::ir::ability::{Ability, AbilityKind, StepScope, TriggerSpec};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = simple("Mishra's Bauble", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
-        abilities: vec![AbilityDef {
-            costs: ir_seq(vec![act_tap_source(), act_sac_self("$bauble_self")]),
-            ability_factory: Some(Arc::new(|who, _source_id| {
-                Effect(Arc::new(move |state, t, _targets| {
-                    // "Look at the top card" — informational only in the sim.
-                    // Delayed trigger: draw a card at the beginning of the next upkeep.
-                    state.trigger_instances.push(TriggerInstance {
-                        source_id: ObjId::UNSET,
-                        controller: who,
-                        check: Arc::new(move |event, _source_id, controller, _state, pending| {
-                            if let GameEvent::EnteredStep { step: StepKind::Upkeep, .. } = event {
-                                pending.push(TriggerContext {
-                                    source_name: "Mishra's Bauble (delayed draw)".into(),
-                                    controller,
-                                    target_spec: TargetSpec::None,
-                                    effect: eff_draw(controller, 1),
-                                });
-                            }
-                        }),
-                        expiry: Some(Expiry::OneShot),
-                    });
-                    state.log(t, who, "Mishra's Bauble → draw at next upkeep".to_string());
-                }))
-            })),
-            ..Default::default()
-        }],
         ..Default::default()
-    }), vec![], Some(25))
+    }), vec![], Some(25));
+    // "{T}, Sacrifice Mishra's Bauble: Look at the top card of any library. Draw a
+    //  card at the beginning of the next turn's upkeep." The look is informational
+    //  in the sim; the draw is a delayed trigger fired at the next upkeep.
+    card.abilities.push(Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_seq(vec![act_tap_source(), act_sac_self("$bauble_self")]),
+            target_spec: TargetSpec::None,
+            choice_spec: None,
+            body: Action::ScheduleDelayedTrigger {
+                fires: TriggerSpec::AtStep { step: StepKind::Upkeep, who: StepScope::EachPlayer, condition: None },
+                action: Box::new(Action::Draw { who: IrWho::You, n: Expr::Num(1) }),
+            },
+            timing: ActivationTiming::Default,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("{T}, Sacrifice Mishra's Bauble: Look at the top card of any library. Draw a card at the beginning of the next turn's upkeep."),
+    });
+    card
 }
 
 /// Containment Priest — {1}{W} Creature — Human Cleric 2/2. Flash.
