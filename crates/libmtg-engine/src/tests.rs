@@ -3451,8 +3451,8 @@
             CardKind::Artifact(a) => &a.abilities[0],
             _ => panic!("Batterskull is an artifact"),
         };
-        let factory = ability.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, bs_id).call(&mut state, 1, &[]);
+        let eff = build_ability_effect(ability, PlayerId::Us, bs_id);
+        eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.objects[&bs_id].zone(), Some(Zone::Hand { known: false }),
             "Batterskull should be in its owner's hand");
@@ -3690,8 +3690,8 @@
             CardKind::Artifact(a) => &a.abilities[0],
             _ => panic!("Meteor Sword is an artifact"),
         };
-        let factory = ability.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, sword_id).call(&mut state, 1, &[ours]);
+        let eff = build_ability_effect(ability, PlayerId::Us, sword_id);
+        eff.call(&mut state, 1, &[ours]);
         assert_eq!(state.permanent_bf(sword_id).and_then(|bf| bf.attached_to), Some(ours),
             "Meteor Sword attached to our creature");
 
@@ -3949,8 +3949,8 @@
             CardKind::Artifact(a) => &a.abilities[0],
             _ => panic!("Cryptic Coat is an artifact"),
         };
-        let factory = bounce.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, coat_id).call(&mut state, 1, &[]);
+        let eff = build_ability_effect(bounce, PlayerId::Us, coat_id);
+        eff.call(&mut state, 1, &[]);
         assert!(state.objects[&coat_id].in_zone(Zone::Hand { known: false }),
             "Cryptic Coat returned to owner's hand");
     }

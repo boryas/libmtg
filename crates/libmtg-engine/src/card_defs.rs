@@ -696,36 +696,54 @@ fn wasteland() -> CardDef {
 }
 
 fn karakas() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let legend_creature = ir_and(
         ir_type(CardType::Creature),
         ir_supertype(Supertype::Legendary),
     );
-    CardDef::new(
+    let mut card = CardDef::new(
         "Karakas",
         CardKind::Land(LandData {
             mana_abilities: vec![tap_produces("W")],
-            abilities: vec![AbilityDef {
-                costs: ir_tap_source(),
-                target_spec: TargetSpec::Union(vec![
-                    TargetSpec::ObjectInZone {
-                        controller: Who::Actor,
-                        zone: ZoneId::Battlefield,
-                        filter: legend_creature.clone(),
-                    },
-                    TargetSpec::ObjectInZone {
-                        controller: Who::Opp,
-                        zone: ZoneId::Battlefield,
-                        filter: legend_creature,
-                    },
-                ]),
-                ability_factory: Some(Arc::new(|who, _| eff_bounce_target(who))),
-                ..Default::default()
-            }],
+            abilities: vec![], // bounce is now an IR Activated ability (below)
             ..Default::default()
         }),
         vec![], None, vec![Supertype::Legendary], CardLayout::Normal, None,
         vec![], vec![], vec![], vec![],
-    )
+    );
+    // "{T}: Return target legendary creature to its owner's hand."
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_tap_source(),
+            target_spec: TargetSpec::Union(vec![
+                TargetSpec::ObjectInZone {
+                    controller: Who::Actor,
+                    zone: ZoneId::Battlefield,
+                    filter: legend_creature.clone(),
+                },
+                TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Battlefield,
+                    filter: legend_creature,
+                },
+            ]),
+            choice_spec: None,
+            body: Action::Move {
+                what: Expr::Ctx(Ctx::Var("target")),
+                to: ZoneKindSel::Hand,
+                to_owner: None,
+                bind_as: None,
+            },
+            timing: ActivationTiming::Default,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("{T}: Return target legendary creature to its owner's hand."),
+    }];
+    card
 }
 
 fn ancient_tomb() -> CardDef {
@@ -4452,6 +4470,60 @@ fn equipped_creature_ce(mods: Vec<crate::ir::ce::CEMod>, text: &'static str) -> 
     }
 }
 
+/// "Equip [cost]" (CR 702.6) as a reusable IR activated ability: pay `cost`,
+/// target a creature you control, attach this Equipment to it. Sorcery-speed.
+fn ir_equip(cost: &'static str, text: &'static str) -> crate::ir::ability::Ability {
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_pay_mana_str(cost),
+            target_spec: TargetSpec::ObjectInZone {
+                controller: Who::Actor,
+                zone: ZoneId::Battlefield,
+                filter: ir_type(CardType::Creature),
+            },
+            choice_spec: None,
+            body: Action::Attach {
+                what: Expr::Ctx(Ctx::Source),
+                to: Expr::Ctx(Ctx::Var("target")),
+            },
+            timing: ActivationTiming::Sorcery,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some(text),
+    }
+}
+
+/// "[cost]: Return this Equipment to its owner's hand." A reusable bounce-self
+/// activated ability (Batterskull, Cryptic Coat). Instant speed.
+fn ir_bounce_self(cost: &'static str, text: &'static str) -> crate::ir::ability::Ability {
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_pay_mana_str(cost),
+            target_spec: TargetSpec::None,
+            choice_spec: None,
+            body: Action::Move {
+                what: Expr::Ctx(Ctx::Source),
+                to: ZoneKindSel::Hand,
+                to_owner: None,
+                bind_as: None,
+            },
+            timing: ActivationTiming::Default,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some(text),
+    }
+}
+
 fn cori_steel_cutter() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
     use crate::ir::action::{Action, TokenSpec, Who as IrWho};
@@ -4464,23 +4536,7 @@ fn cori_steel_cutter() -> CardDef {
         CardKind::Artifact(ArtifactData {
             mana_cost: "1R".to_string(),
             subtypes: vec!["Equipment".into()],
-            abilities: vec![AbilityDef {
-                // Equip {1}{R} — sorcery-speed, targets a creature you control.
-                costs: ir_pay_mana_str("1R"),
-                target_spec: TargetSpec::ObjectInZone {
-                    controller: Who::Actor,
-                    zone: ZoneId::Battlefield,
-                    filter: ir_type(CardType::Creature),
-                },
-                ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, _t, targets| {
-                        let Some(&creature_id) = targets.first() else { return };
-                        do_attach(state, who, source_id, creature_id);
-                    }))
-                })),
-                timing: ActivationTiming::Sorcery,
-                ..Default::default()
-            }],
+            abilities: vec![], // equip is now an IR Activated ability (below)
             mana_abilities: vec![],
         }),
         parse_colors("R", false, false),
@@ -4551,6 +4607,7 @@ fn cori_steel_cutter() -> CardDef {
     // Equipped creature gets +1/+1 and has trample and haste.
     card.abilities = vec![
         flurry,
+        ir_equip("1R", "Equip {1}{R}"),
         equipped_creature_ce(
             vec![
                 CEMod::PumpPT(Expr::Num(1), Expr::Num(1)),
@@ -4580,37 +4637,7 @@ fn batterskull() -> CardDef {
         CardKind::Artifact(ArtifactData {
             mana_cost: "5".to_string(),
             subtypes: vec!["Equipment".into()],
-            abilities: vec![
-                // {3}: Return this Equipment to its owner's hand.
-                AbilityDef {
-                    costs: ir_pay_mana_str("3"),
-                    ability_factory: Some(Arc::new(|who, source_id| {
-                        Effect(Arc::new(move |state, t, _targets| {
-                            let owner = state.objects.get(&source_id).map(|o| o.owner).unwrap_or(who);
-                            change_zone(source_id, ZoneId::Hand, state, t, owner);
-                            state.log(t, who, "Batterskull → bounced to hand".to_string());
-                        }))
-                    })),
-                    ..Default::default()
-                },
-                // Equip {5} — sorcery-speed, targets a creature you control.
-                AbilityDef {
-                    costs: ir_pay_mana_str("5"),
-                    target_spec: TargetSpec::ObjectInZone {
-                        controller: Who::Actor,
-                        zone: ZoneId::Battlefield,
-                        filter: ir_type(CardType::Creature),
-                    },
-                    ability_factory: Some(Arc::new(|who, source_id| {
-                        Effect(Arc::new(move |state, _t, targets| {
-                            let Some(&creature_id) = targets.first() else { return };
-                            do_attach(state, who, source_id, creature_id);
-                        }))
-                    })),
-                    timing: ActivationTiming::Sorcery,
-                    ..Default::default()
-                },
-            ],
+            abilities: vec![], // bounce + equip are now IR Activated abilities (below)
             mana_abilities: vec![],
         }),
         vec![], None,
@@ -4659,6 +4686,8 @@ fn batterskull() -> CardDef {
     // Equipped creature gets +4/+4 and has vigilance and lifelink.
     card.abilities = vec![
         living_weapon,
+        ir_bounce_self("3", "{3}: Return Batterskull to its owner's hand."),
+        ir_equip("5", "Equip {5}"),
         equipped_creature_ce(
             vec![
                 CEMod::PumpPT(Expr::Num(4), Expr::Num(4)),
@@ -4676,10 +4705,11 @@ fn batterskull() -> CardDef {
 /// "Equipped creature gets +3/+3."
 /// "Equip {3}"
 fn meteor_sword() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
     use crate::ir::action::Action;
     use crate::ir::ce::CEMod;
     use crate::ir::context::Ctx;
-    use crate::ir::expr::Expr;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let any_permanent_target = TargetSpec::Union(vec![
         TargetSpec::ObjectInZone {
             controller: Who::Actor,
@@ -4697,39 +4727,37 @@ fn meteor_sword() -> CardDef {
         CardKind::Artifact(ArtifactData {
             mana_cost: "7".to_string(),
             subtypes: vec!["Equipment".into()],
-            abilities: vec![AbilityDef {
-                // Equip {3} — sorcery-speed, targets a creature you control.
-                costs: ir_pay_mana_str("3"),
-                target_spec: TargetSpec::ObjectInZone {
-                    controller: Who::Actor,
-                    zone: ZoneId::Battlefield,
-                    filter: ir_type(CardType::Creature),
-                },
-                ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, _t, targets| {
-                        let Some(&creature_id) = targets.first() else { return };
-                        do_attach(state, who, source_id, creature_id);
-                    }))
-                })),
-                timing: ActivationTiming::Sorcery,
-                ..Default::default()
-            }],
+            abilities: vec![], // equip is now an IR Activated ability (below)
             mana_abilities: vec![],
         }),
         vec![], None,
         vec![], CardLayout::Normal, None,
-        // ETB: destroy target permanent.
-        vec![etb_self_trigger("Meteor Sword", any_permanent_target,
-            |source_id, controller| eff_ir_targeted(controller, source_id,
-                Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) }))],
+        vec![], // ETB destroy is now an IR Triggered ability (below)
         vec![], vec![],
         vec![], // static CE now IR (card.abilities below)
     );
+    // ETB: destroy target permanent.
+    let etb_destroy = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: None,
+            },
+            target_spec: any_permanent_target,
+            body: Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Meteor Sword enters, destroy target permanent."),
+    };
     // Equipped creature gets +3/+3.
-    card.abilities = vec![equipped_creature_ce(
-        vec![CEMod::PumpPT(Expr::Num(3), Expr::Num(3))],
-        "Equipped creature gets +3/+3.",
-    )];
+    card.abilities = vec![
+        etb_destroy,
+        ir_equip("3", "Equip {3}"),
+        equipped_creature_ce(
+            vec![CEMod::PumpPT(Expr::Num(3), Expr::Num(3))],
+            "Equipped creature gets +3/+3.",
+        ),
+    ];
     card
 }
 
@@ -4749,23 +4777,7 @@ fn pre_war_formalwear() -> CardDef {
         CardKind::Artifact(ArtifactData {
             mana_cost: "2W".to_string(),
             subtypes: vec!["Equipment".into()],
-            abilities: vec![AbilityDef {
-                // Equip {3} — sorcery-speed, targets a creature you control.
-                costs: ir_pay_mana_str("3"),
-                target_spec: TargetSpec::ObjectInZone {
-                    controller: Who::Actor,
-                    zone: ZoneId::Battlefield,
-                    filter: ir_type(CardType::Creature),
-                },
-                ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, _t, targets| {
-                        let Some(&creature_id) = targets.first() else { return };
-                        do_attach(state, who, source_id, creature_id);
-                    }))
-                })),
-                timing: ActivationTiming::Sorcery,
-                ..Default::default()
-            }],
+            abilities: vec![], // equip is now an IR Activated ability (below)
             mana_abilities: vec![],
         }),
         parse_colors("2W", false, false), None,
@@ -4807,6 +4819,7 @@ fn pre_war_formalwear() -> CardDef {
     // Equipped creature gets +2/+2 and has vigilance.
     card.abilities = vec![
         reanimate,
+        ir_equip("3", "Equip {3}"),
         equipped_creature_ce(
             vec![
                 CEMod::PumpPT(Expr::Num(2), Expr::Num(2)),
@@ -4843,20 +4856,7 @@ fn cryptic_coat() -> CardDef {
         CardKind::Artifact(ArtifactData {
             mana_cost: "2U".to_string(),
             subtypes: vec!["Equipment".into()],
-            abilities: vec![
-                // {1}{U}: Return this Equipment to its owner's hand.
-                AbilityDef {
-                    costs: ir_pay_mana_str("1U"),
-                    ability_factory: Some(Arc::new(|who, source_id| {
-                        Effect(Arc::new(move |state, t, _targets| {
-                            let owner = state.objects.get(&source_id).map(|o| o.owner).unwrap_or(who);
-                            change_zone(source_id, ZoneId::Hand, state, t, owner);
-                            state.log(t, who, "Cryptic Coat → bounced to hand".to_string());
-                        }))
-                    })),
-                    ..Default::default()
-                },
-            ],
+            abilities: vec![], // bounce is now an IR Activated ability (below)
             mana_abilities: vec![],
         }),
         parse_colors("U", false, false), None,
@@ -4902,6 +4902,7 @@ fn cryptic_coat() -> CardDef {
     // Equipped creature gets +1/+0. ("can't be blocked" omitted — no keyword.)
     card.abilities = vec![
         cloak,
+        ir_bounce_self("1U", "{1}{U}: Return Cryptic Coat to its owner's hand."),
         equipped_creature_ce(
             vec![CEMod::PumpPT(Expr::Num(1), Expr::Num(0))],
             "Equipped creature gets +1/+0.",
@@ -5196,15 +5197,26 @@ fn quantum_riddler() -> CardDef {
 /// Griselbrand — {4}{B}{B}{B}{B} Legendary 7/7 Demon.
 /// Flying, lifelink. Pay 7 life: Draw seven cards.
 fn griselbrand() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut data = CreatureData::new("4BBBB", 7, 7);
     data.legendary = true;
     data.keywords = Keywords::from_slice(&[Keyword::Flying, Keyword::Lifelink]);
-    data.abilities = vec![AbilityDef {
-        costs: ir_pay_life(7),
-        ability_factory: Some(Arc::new(|who, _| eff_draw(who, 7))),
-        ..Default::default()
-    }];
-    simple("Griselbrand", CardKind::Creature(data), parse_colors("4BBBB", false, false), None)
+    let mut card = simple("Griselbrand", CardKind::Creature(data), parse_colors("4BBBB", false, false), None);
+    card.abilities.push(Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_pay_life(7),
+            target_spec: TargetSpec::None,
+            choice_spec: None,
+            body: Action::Draw { who: IrWho::You, n: Expr::Num(7) },
+            timing: ActivationTiming::Default,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("Pay 7 life: Draw seven cards."),
+    });
+    card
 }
 
 /// Emrakul, the Aeons Torn — {15} Legendary 15/15 Eldrazi.
