@@ -32,8 +32,11 @@ pub struct BindEnv {
     /// `ManaSpec::AnyOneColor`. Set by the activated-ability dispatch when
     /// the strategy picks a color; consumed by the AddMana executor arm.
     pub(crate) chosen_color: Option<crate::Color>,
-    // Triggering/ThisCast event fields left as TODOs for now — they require
-    // the EventLog wired through. Added with the mutation slice.
+    /// The event that triggered/replaced us, projected by `Ctx::Triggering`.
+    /// Captured at match time (so it survives to a triggered ability's deferred
+    /// resolution) and during a replacement's synchronous body. `ThisCast` does
+    /// not use this — it scans the log for the source's own `SpellCast`.
+    pub(crate) triggering_event: Option<crate::GameEvent>,
 }
 
 impl BindEnv {
@@ -63,6 +66,11 @@ impl BindEnv {
 
     pub(crate) fn with_chosen_color(mut self, c: Option<crate::Color>) -> Self {
         self.chosen_color = c;
+        self
+    }
+
+    pub(crate) fn with_triggering_event(mut self, e: crate::GameEvent) -> Self {
+        self.triggering_event = Some(e);
         self
     }
 
@@ -1644,6 +1652,7 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             Value::SubtypeSet(v) => v.len() as i64,
             _ => 0,
         }),
+        Expr::CountWhere { set, bind, body } => Value::Num(count_set(state, env, set, bind, body)),
         Expr::Any { set, bind, body } => Value::Bool(fold_set(
             state,
             env,
@@ -1880,6 +1889,10 @@ pub(crate) fn match_event_pattern(
     state: &SimState,
 ) -> Option<BindEnv> {
     use crate::ir::ability::EventPattern;
+    // Carry the matched event so `Ctx::Triggering` can project its fields; every
+    // arm builds its result from this enriched base via `env.clone()`.
+    let enriched = env.clone().with_triggering_event(event.clone());
+    let env = &enriched;
     match pattern {
         EventPattern::Any => Some(env.clone()),
 
@@ -2084,7 +2097,7 @@ pub(crate) fn match_event_pattern(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn eval_ctx(c: &Ctx, _state: &SimState, env: &BindEnv) -> Value {
+fn eval_ctx(c: &Ctx, state: &SimState, env: &BindEnv) -> Value {
     match c {
         Ctx::Source => env
             .source
@@ -2096,9 +2109,50 @@ fn eval_ctx(c: &Ctx, _state: &SimState, env: &BindEnv) -> Value {
             .unwrap_or(Value::Unit),
         Ctx::It => env.subj.clone().unwrap_or(Value::Unit),
         Ctx::Var(name) => env.get(name).cloned().unwrap_or(Value::Unit),
-        // TODO(stage-2 slice 2): resolve Triggering/ThisCast against the
-        // active event-log frame. Returning Unit keeps the evaluator total.
-        Ctx::Triggering(_) | Ctx::ThisCast(_) => Value::Unit,
+        // The event that fired this ability (carried in the env from match time).
+        Ctx::Triggering(field) => env
+            .triggering_event
+            .as_ref()
+            .map(|e| project_event_field(e, *field))
+            .unwrap_or(Value::Unit),
+        // This spell's own cast: the most recent `SpellCast` in the log whose
+        // card_id is the source object (an object keeps its id stack→battlefield,
+        // so an ETB replacement on the entering permanent finds its own cast).
+        Ctx::ThisCast(field) => {
+            let Some(src) = env.source else { return Value::Unit };
+            state
+                .event_log
+                .entries
+                .iter()
+                .rev()
+                .find_map(|logged| match &logged.event {
+                    crate::GameEvent::SpellCast { card_id, .. } if *card_id == src => {
+                        Some(project_event_field(&logged.event, *field))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(Value::Unit)
+        }
+    }
+}
+
+/// Project a single `EventField` off a logged `GameEvent` (CR-meaningful cast /
+/// event properties). Unmapped (event, field) pairs return `Unit`; new arms are
+/// added demand-driven as cards need them.
+fn project_event_field(event: &crate::GameEvent, field: crate::ir::context::EventField) -> Value {
+    use crate::ir::context::EventField as F;
+    use crate::GameEvent as E;
+    match (event, field) {
+        // Spell-cast properties.
+        (E::SpellCast { mana_spent, .. }, F::ManaSpent) => Value::Bool(*mana_spent),
+        (E::SpellCast { alt_cost, .. }, F::AltCost) => Value::Bool(*alt_cost),
+        (E::SpellCast { x, .. }, F::X) => Value::Num(*x as i64),
+        (E::SpellCast { delved, .. }, F::DelvedExiled) => Value::ObjSet(delved.clone()),
+        // Zone-change properties (useful to `Triggering` in replacement bodies).
+        (E::ZoneChange { id, .. }, F::ObjMoved) => Value::Obj(*id),
+        (E::ZoneChange { from, .. }, F::ZoneFrom) => Value::Zone(*from),
+        (E::ZoneChange { to, .. }, F::ZoneTo) => Value::Zone(*to),
+        _ => Value::Unit,
     }
 }
 
@@ -2220,6 +2274,29 @@ fn fold_set(
         }
     }
     is_all
+}
+
+/// Count elements of `set` for which `body` holds (`bind` names the element).
+/// The counting sibling of `fold_set`.
+fn count_set(
+    state: &SimState,
+    env: &BindEnv,
+    set: &Expr,
+    bind: &'static str,
+    body: &Expr,
+) -> i64 {
+    let elements = match eval_expr(set, state, env) {
+        Value::ObjSet(v) => v.into_iter().map(Value::Obj).collect::<Vec<_>>(),
+        Value::PlayerSet(v) => v.into_iter().map(Value::Player).collect::<Vec<_>>(),
+        _ => return 0,
+    };
+    elements
+        .into_iter()
+        .filter(|elem| {
+            let sub_env = env.clone().with_var(bind, elem.clone()).with_subj(elem.clone());
+            expect_bool(eval_expr(body, state, &sub_env))
+        })
+        .count() as i64
 }
 
 fn enumerate_zone(state: &SimState, env: &BindEnv, zone: &ZoneSel) -> Vec<ObjId> {
@@ -2540,7 +2617,9 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
 
         // ── folds / binding ───────────────────────────────────────────────
         Expr::Count(a) => walk_reads(a, out),
-        Expr::Any { set, bind: _, body } | Expr::All { set, bind: _, body } => {
+        Expr::CountWhere { set, bind: _, body }
+        | Expr::Any { set, bind: _, body }
+        | Expr::All { set, bind: _, body } => {
             walk_reads(set, out);
             walk_reads(body, out);
         }
@@ -2873,6 +2952,7 @@ pub(crate) fn ir_replacement_effect(
     ability: &crate::ir::ability::Ability,
     source_id: ObjId,
     controller: PlayerId,
+    event: &crate::GameEvent,
 ) -> Option<crate::effects::Effect> {
     let AbilityKind::Replacement { body, .. } = &ability.kind else {
         return None;
@@ -2880,6 +2960,9 @@ pub(crate) fn ir_replacement_effect(
     match body {
         ReplacementBody::Replace(action) => {
             let action = action.clone();
+            // A replacement runs *on* the event it replaces, so the body reads
+            // that event's fields via `Ctx::Triggering`.
+            let trig_event = event.clone();
             Some(crate::effects::Effect(std::sync::Arc::new(
                 move |state, _t, targets| {
                     let Some(&id) = targets.first() else {
@@ -2888,6 +2971,7 @@ pub(crate) fn ir_replacement_effect(
                     let mut env = BindEnv::new()
                         .with_source(source_id)
                         .with_controller(controller)
+                        .with_triggering_event(trig_event.clone())
                         .with_var("triggered_obj", Value::Obj(id));
                     execute_mut(&action, state, &mut env);
                 },

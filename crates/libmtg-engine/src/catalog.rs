@@ -1561,11 +1561,17 @@ fn fire_ir_triggered(
     // triggered_mana_spent) so the body can reference them on resolution.
     let match_bindings: Vec<(&'static str, crate::ir::expr::Value)> =
         match_env.bindings.iter().map(|(k, v)| (*k, v.clone())).collect();
+    // Carry the triggering event itself so `Ctx::Triggering` projections resolve
+    // at the ability's (deferred) resolution.
+    let trig_event = event.clone();
     let body = body.clone();
     let effect = Effect(std::sync::Arc::new(move |state: &mut SimState, _t, targets: &[ObjId]| {
         use crate::ir::executor::{execute, BindEnv};
         use crate::ir::expr::Value;
-        let mut env = BindEnv::new().with_source(obj_id).with_controller(controller);
+        let mut env = BindEnv::new()
+            .with_source(obj_id)
+            .with_controller(controller)
+            .with_triggering_event(trig_event.clone());
         for (k, v) in &match_bindings {
             env = env.with_var(k, v.clone());
         }

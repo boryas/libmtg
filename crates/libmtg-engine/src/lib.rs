@@ -423,6 +423,14 @@ pub enum GameEvent {
         /// free-cast …) rather than its mana cost. CR 118.9 / 702.74. Distinct
         /// from `!mana_spent` — a warp/flashback alt cost still spends mana.
         alt_cost: bool,
+        /// The announced X paid for this cast (CR 601.2b), 0 if no X. Read back
+        /// via `Ctx::ThisCast(EventField::X)` — e.g. Engineered Explosives'
+        /// sunburst counters. The log is the durable home for cast-time choices.
+        x: u32,
+        /// Cards exiled to pay delve (CR 702.66), in payment order. Read via
+        /// `Ctx::ThisCast(EventField::DelvedExiled)` — e.g. Murktide Regent
+        /// counts the instant/sorcery cards among them.
+        delved: Vec<ObjId>,
     },
     /// Fired after a spell finishes resolving — its effect has been applied (or it has
     /// become a permanent), just before priority returns. The general "spell resolved"
@@ -2535,7 +2543,7 @@ pub(crate) fn fire_event(
                         ability, &event, *id, obj.controller, state,
                     ) else { continue };
                     let Some(effect) = crate::ir::executor::ir_replacement_effect(
-                        ability, *id, obj.controller,
+                        ability, *id, obj.controller, &event,
                     ) else { continue };
                     found = Some((key, targets, effect));
                     break;
@@ -2903,7 +2911,7 @@ fn cast_spell(
         }
         consume_latent_spell_mod(state, who, card_id);
         let back_mana_spent = mana_value(adv.mana_cost()) > 0;
-        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent, alt_cost: false }, state, t, who);
+        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent, alt_cost: false, x: 0, delved: Vec::new() }, state, t, who);
         return Some(card_id);
     }
 
@@ -3083,7 +3091,10 @@ fn cast_spell(
         None     => mana_value(def.mana_cost()) > 0,
         Some(ac) => ac.costs.includes_mana(),
     };
-    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent, alt_cost: alt_cost.is_some() }, state, t, who);
+    // Cast-time choices recorded on the event so `Ctx::ThisCast` can read them
+    // back at resolution (sunburst X, delve count) without transient ctx state.
+    let delved: Vec<ObjId> = to_exile_ids.iter().map(|(id, _)| *id).collect();
+    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent, alt_cost: alt_cost.is_some(), x: chosen_x, delved }, state, t, who);
 
 
     Some(card_id)

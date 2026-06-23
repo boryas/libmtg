@@ -117,6 +117,10 @@ pub enum Expr {
     },
     /// |set|
     Count(Box<Expr>),
+    /// |{ x ∈ set : body(x) }| — count elements satisfying a predicate. `bind`
+    /// names the element in `body` (e.g. Murktide: instant/sorcery cards among
+    /// the delved ids).
+    CountWhere { set: Box<Expr>, bind: &'static str, body: Box<Expr> },
     /// ∃ x ∈ set. body(x) — `bind` names the element in `body`.
     Any { set: Box<Expr>, bind: &'static str, body: Box<Expr> },
     /// ∀ x ∈ set. body(x)
