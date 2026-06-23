@@ -1326,8 +1326,11 @@ impl CardDef {
 ///
 /// Signature: `extra(source_id, id, controller, state, t)`
 ///
-/// Cards that need pre-fire mutation (e.g. Murktide setting counters before entering) keep their
-/// replacement inline with a custom check fn.
+/// Still used by the "as ~ enters, choose a name/color/type" cards (Cavern of
+/// Souls, Pithing Needle, …), where the ETB stores an explicit player choice
+/// that isn't derivable from the log. Cost-context ETBs (Engineered Explosives'
+/// sunburst X, Murktide's delve count) are now IR `Replacement`s reading the
+/// cast via `Ctx::ThisCast`.
 pub(crate) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
 where
     F: Fn(ObjId, ObjId, PlayerId, &mut SimState, u8) + Send + Sync + 'static,
@@ -1895,18 +1898,6 @@ pub(crate) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: P
 pub(crate) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
     state.objects.get(&id).and_then(|c| c.zone()).map(|z| card_zone_to_id(&z)).unwrap_or(ZoneId::Hand)
 }
-
-// ── Murktide Regent ETB ───────────────────────────────────────────────────────
-
-pub(crate) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
-    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-        if *id == source_id && *ctlr == controller {
-            return Some(vec![*id]);
-        }
-    }
-    None
-}
-
 
 #[cfg(test)]
 mod added_mana_tests {

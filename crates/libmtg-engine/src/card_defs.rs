@@ -1180,9 +1180,9 @@ fn ursas_saga() -> CardDef {
 /// {2}, Sacrifice: destroy each nonland permanent with MV equal to the charge count.
 /// CR 702.43 sunburst, CR 701.7 destroy.
 fn engineered_explosives() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, CostBody};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody, EventPattern, ReplacementBody};
     use crate::ir::action::{Action, MoveVerb};
-    use crate::ir::context::Ctx;
+    use crate::ir::context::{Ctx, EventField};
     use crate::ir::expr::{Expr, Filter, ZoneKindSel};
     let mut def = CardDef::new(
         "Engineered Explosives",
@@ -1195,33 +1195,44 @@ fn engineered_explosives() -> CardDef {
         None,
         vec![], CardLayout::Normal, None,
         vec![],
-        vec![ReplacementDef {
-            check: Arc::new(etb_self_check),
-            make_effect: Arc::new(|_source_id, controller: PlayerId| {
-                Effect(Arc::new(move |state, t, targets| {
-                    let Some(&id) = targets.first() else { return; };
-                    let chosen_x = state.resolving_costs_ctx.chosen_x;
-                    if let Some(obj) = state.objects.get_mut(&id) {
-                        *obj.counters.entry(CounterType::Charge).or_insert(0) = chosen_x;
-                    }
-                    let from = current_zone_id(id, state);
-                    fire_event(
-                        GameEvent::ZoneChange { id, actor: controller, from, to: ZoneId::Battlefield, controller },
-                        state, t, controller,
-                    );
-                }))
-            }),
-            active_when: tp_always(),
-        }],
+        vec![], // sunburst ETB is now an IR Replacement (below)
         vec![],
         vec![],
     );
     def.additional_costs = ir_xmana_cost();
+    // Sunburst (CR 702.43): EE enters with a charge counter for each color of
+    // mana spent — modelled here as the announced X. A self-entry Replacement
+    // re-does the entry (`Move`) then places the counters, reading X off EE's
+    // own logged cast via `ThisCast(X)` (CR 614.1c "enters with counters").
+    def.abilities = vec![Ability {
+        kind: AbilityKind::Replacement {
+            matches: EventPattern::EntersZone {
+                obj_filter: ir_self(),
+                zone_kind: ZoneKindSel::Battlefield,
+            },
+            condition: None,
+            body: ReplacementBody::Replace(Action::Sequence(vec![
+                Action::Move {
+                    what: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+                Action::PutCounters {
+                    on: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    kind: CounterType::Charge,
+                    n: Expr::Ctx(Ctx::ThisCast(EventField::X)),
+                },
+            ])),
+            active_zone: None, // self-entry replacement
+        },
+        text: Some("Engineered Explosives enters with a charge counter on it for each color of mana spent to cast it."),
+    }];
     // "{2}, Sacrifice Engineered Explosives: Destroy each nonland permanent with
     //  mana value equal to the number of charge counters on it." EE is sacrificed as
     //  a cost, so its charge counters persist in the objects map and are read at
     //  resolution via `CountersOn(Source)`.
-    def.abilities = vec![Ability {
+    def.abilities.push(Ability {
         kind: AbilityKind::Activated {
             cost: CostBody::Ir(Action::Sequence(vec![
                 Action::PayMana(parse_mana_cost("2")),
@@ -1253,7 +1264,7 @@ fn engineered_explosives() -> CardDef {
             active_zone: ZoneKindSel::Battlefield,
         },
         text: Some("{2}, Sacrifice Engineered Explosives: Destroy each nonland permanent with mana value equal to the number of charge counters on Engineered Explosives."),
-    }];
+    });
     def
 }
 
@@ -3321,9 +3332,9 @@ fn orcish_bowmasters() -> CardDef {
 /// ETB replacement: enters with counters = # of instants/sorceries in controller's exile.
 /// Trigger: gains +1/+1 counter when a spell is exiled from your graveyard. CR 614.1, CR 603.
 fn murktide_regent() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, ReplacementBody, TriggerSpec};
     use crate::ir::action::Action;
-    use crate::ir::context::Ctx;
+    use crate::ir::context::{Ctx, EventField};
     use crate::ir::expr::{Expr, Filter, ZoneKindSel};
 
     // Filter: triggering object is instant or sorcery.
@@ -3352,44 +3363,55 @@ fn murktide_regent() -> CardDef {
         Some(25),
         vec![], CardLayout::Normal, None,
         vec![],
-        vec![ReplacementDef {
-            check: Arc::new(murktide_etb_check),
-            make_effect: Arc::new(|_source_id, controller: PlayerId| {
-                Effect(Arc::new(move |state, t, targets| {
-                    let Some(&id) = targets.first() else { return; };
-                    // Count instants/sorceries exiled specifically as delve payment (CR 702.66b).
-                    // `resolving_costs_ctx` is set by resolve_top_of_stack before the effect runs.
-                    let delve_ids = state.resolving_costs_ctx.objects_moved.clone();
-                    let exile_count = delve_ids.iter()
-                        .filter(|&&id| {
-                            state.objects.get(&id)
-                                .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
-                                .map_or(false, |d| d.is_instant() || d.is_sorcery())
-                        })
-                        .count() as i32;
-                    if let Some(bf) = state.permanent_bf_mut(id) {
-                        bf.counters = exile_count;
-                    }
-                    fire_event(
-                        GameEvent::ZoneChange {
-                            id,
-                            actor: controller,
-                            from: ZoneId::Stack,
-                            to: ZoneId::Battlefield,
-                            controller,
-                        },
-                        state, t, controller,
-                    );
-                }))
-            }),
-            active_when: tp_always(),
-        }],
+        vec![], // ETB sunburst (delve count) is now an IR Replacement (below)
         vec![],
         vec![],
     );
+    // ETB (CR 614.1c): Murktide enters with a +1/+1 counter for each instant or
+    // sorcery card exiled to delve (CR 702.66b). The self-entry Replacement
+    // re-does the entry, then counts the instant/sorcery cards among this cast's
+    // delved ids — read off Murktide's own logged cast via `ThisCast(DelvedExiled)`.
+    let delved_is_inst_or_sorc = Expr::Or(
+        Box::new(Expr::Contains(
+            Box::new(Expr::TypeLit(CardType::Instant)),
+            Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+        )),
+        Box::new(Expr::Contains(
+            Box::new(Expr::TypeLit(CardType::Sorcery)),
+            Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+        )),
+    );
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Replacement {
+            matches: EventPattern::EntersZone {
+                obj_filter: ir_self(),
+                zone_kind: ZoneKindSel::Battlefield,
+            },
+            condition: None,
+            body: ReplacementBody::Replace(Action::Sequence(vec![
+                Action::Move {
+                    what: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+                Action::PutCounters {
+                    on: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    kind: CounterType::PlusOnePlusOne,
+                    n: Expr::CountWhere {
+                        set: Box::new(Expr::Ctx(Ctx::ThisCast(EventField::DelvedExiled))),
+                        bind: "d",
+                        body: Box::new(delved_is_inst_or_sorc),
+                    },
+                },
+            ])),
+            active_zone: None, // self-entry replacement
+        },
+        text: Some("Murktide Regent enters with a +1/+1 counter on it for each instant and sorcery card exiled with it."),
+    }];
     // IR: "Whenever an instant or sorcery card is put into exile from your
     // graveyard, put a +1/+1 counter on Murktide Regent."
-    card.abilities = vec![Ability {
+    card.abilities.push(Ability {
         kind: AbilityKind::Triggered {
             spec: TriggerSpec::When {
                 pattern: EventPattern::ZoneChange {
@@ -3409,7 +3431,7 @@ fn murktide_regent() -> CardDef {
             active_zone: ZoneKindSel::Battlefield,
         },
         text: Some("Whenever an instant or sorcery card is put into exile from your graveyard, put a +1/+1 counter on Murktide Regent."),
-    }];
+    });
     card
 }
 

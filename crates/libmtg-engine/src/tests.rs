@@ -805,14 +805,13 @@
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, None, &[], 0, 0).unwrap();
-        let spell = state.objects[&card_id].spell().expect("spell state populated").clone();
-        let effect = &spell.effect;
-        let chosen_targets = spell.chosen_targets.clone();
-
-        // Simulate what resolve_top_of_stack does: stash costs_paid_ctx before calling the effect.
-        state.resolving_costs_ctx = spell.costs_paid_ctx.clone();
-        effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets);
-        state.resolving_costs_ctx = CostsPaidCtx::default();
+        // Resolve the permanent spell the way the engine does (CR 608.3b / lib.rs
+        // resolve_top_of_stack): it leaves the stack and enters the battlefield as
+        // the SAME object, so the ETB replacement reads this object's own logged
+        // cast via `ThisCast(DelvedExiled)` — counting the delved instant/sorcery
+        // cards. No transient `resolving_costs_ctx` needed.
+        state.stack.retain(|&x| x != card_id);
+        change_zone(card_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
         let murktide_bf = state.permanents_of(PlayerId::Us).find(|p| p.catalog_key == "Murktide Regent")
             .and_then(|p| p.bf()).expect("Murktide on battlefield");
@@ -5086,8 +5085,6 @@
     fn test_ee_etb_places_charge_counters() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // Simulate casting EE with chosen_x = 2 by setting resolving_costs_ctx before ETB.
-        state.resolving_costs_ctx.chosen_x = 2;
         assert!(state.catalog.contains_key("Engineered Explosives"), "EE must be in catalog");
         let ee_id = state.alloc_id();
         state.objects.insert(ee_id, GameObject {
@@ -5101,12 +5098,18 @@
             ci_timestamp: 0,
             role: ObjectRole::Hand { known: false },
         });
+        // EE was cast with X=2 (sunburst). The announced X lives on the logged
+        // cast; the ETB replacement reads it via `ThisCast(X)`.
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: ee_id, mana_spent: true, alt_cost: false,
+            x: 2, delved: Vec::new(),
+        });
 
         change_zone(ee_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         assert_eq!(
             state.objects[&ee_id].counters.get(&CounterType::Charge).copied().unwrap_or(0),
             2,
-            "EE should enter with 2 charge counters when chosen_x = 2"
+            "EE should enter with 2 charge counters when cast with X = 2"
         );
     }
 
