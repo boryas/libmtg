@@ -35,10 +35,18 @@ pub enum AbilityKind {
     /// bindings — used for "unless X" wording where the replacement only fires
     /// when some game-state condition holds (e.g. Mistrise Village: enters
     /// tapped *unless* you control a Mountain or Forest).
+    ///
+    /// `active_zone` gates the *source* by zone (mirrors `Prohibition`):
+    /// `Some(Battlefield)` for a static permanent whose replacement affects *other*
+    /// objects (Leyline of the Void, Containment Priest), so it only functions in
+    /// play. `None` for a self-entry replacement (Mistrise's "enters tapped"), where
+    /// the source isn't yet on the battlefield when its own entry is replaced and the
+    /// self-scoping `obj_filter` already pins relevance.
     Replacement {
         matches: EventPattern,
         condition: Option<Expr>,
         body: ReplacementBody,
+        active_zone: Option<crate::ir::expr::ZoneKindSel>,
     },
     /// "[x] can't [y]." Prevents matching events from occurring at all.
     /// Consulted in `fire_event` Stage 1; a match suppresses the event (CR 614.17

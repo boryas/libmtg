@@ -514,6 +514,7 @@ fn surveil_dual(name: &'static str, land_types: LandTypes, c1: &str, c2: &str) -
                 },
                 Action::Tap { target: Expr::Ctx(Ctx::Var("triggered_obj")) },
             ])),
+            active_zone: None, // self-entry replacement
         },
         text: Some("~ enters tapped."),
     };
@@ -3456,6 +3457,7 @@ fn dauthi_voidwalker() -> CardDef {
                     n: Expr::Num(1),
                 },
             ])),
+            active_zone: Some(ZoneKindSel::Battlefield), // functions while Dauthi is in play
         },
         text: Some(
             "If a card an opponent owns would be put into a graveyard from anywhere, \
@@ -3996,25 +3998,40 @@ fn painters_servant() -> CardDef {
 
 /// Enchantment for {2BB}. Replacement: any card going to any graveyard goes to exile instead.
 fn leyline_of_the_void() -> CardDef {
-    let replacement = ReplacementDef {
-        check: Arc::new(leyline_check),
-        make_effect: Arc::new(|_source_id, controller: PlayerId| {
-            Effect(Arc::new(move |state, t, targets| {
-                if let Some(&id) = targets.first() {
-                    change_zone(id, ZoneId::Exile, state, t, controller);
-                }
-            }))
-        }),
-        active_when: tp_on_battlefield(),
-    };
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, ReplacementBody};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = CardDef::new(
         "Leyline of the Void",
         CardKind::Enchantment(EnchantmentData::default()),
         parse_colors("2BB", false, true),
         None,
         vec![], CardLayout::Normal, None,
-        vec![], vec![replacement], vec![], vec![],
-    )
+        vec![], vec![], vec![], vec![],
+    );
+    // "If a card would be put into any graveyard from anywhere, exile it instead."
+    // EntersZone(Graveyard) catches the move-to-graveyard from any source zone; the
+    // replacement redirects it to Exile (CR 614.5 self-loop guard means the Exile
+    // move doesn't re-trigger). Functions while Leyline is on the battlefield.
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Replacement {
+            matches: EventPattern::EntersZone {
+                obj_filter: ir_any(),
+                zone_kind: ZoneKindSel::Graveyard,
+            },
+            condition: None,
+            body: ReplacementBody::Replace(Action::Move {
+                what: Expr::Ctx(Ctx::Var("triggered_obj")),
+                to: ZoneKindSel::Exile,
+                to_owner: None,
+                bind_as: None,
+            }),
+            active_zone: Some(ZoneKindSel::Battlefield),
+        },
+        text: Some("If a card would be put into any graveyard from anywhere, exile it instead."),
+    }];
+    card
 }
 
 /// Flash, colorless artifact for {2}.
@@ -4298,6 +4315,7 @@ fn mistrise_village() -> CardDef {
                 },
                 Action::Tap { target: Expr::Ctx(Ctx::Var("triggered_obj")) },
             ])),
+            active_zone: None, // self-entry replacement
         },
         text: Some("~ enters tapped unless you control a Mountain or a Forest."),
     };
@@ -5456,46 +5474,47 @@ fn mishras_bauble() -> CardDef {
 /// If a nontoken creature would enter the battlefield and it wasn't cast,
 /// exile it instead.
 fn containment_priest() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, ReplacementBody};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut data = CreatureData::new("1W", 2, 2);
     data.keywords.insert(Keyword::Flash);
-    CardDef::new(
+    let mut card = CardDef::new(
         "Containment Priest",
         CardKind::Creature(data),
         parse_colors("1W", true, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![],  // no triggers
-        // Replacement: nontoken creature entering BF from non-Stack → exile instead.
-        vec![ReplacementDef {
-            check: Arc::new(|event, source_id, _controller, state| {
-                if let GameEvent::ZoneChange { id, from, to: ZoneId::Battlefield, .. } = event {
-                    // "wasn't cast" = not entering from the stack
-                    if *from == ZoneId::Stack { return None; }
-                    // nontoken
-                    let obj = state.objects.get(id)?;
-                    if obj.is_token { return None; }
-                    // creature
-                    let def = state.catalog.get(&obj.catalog_key)?;
-                    if !def.is_creature() { return None; }
-                    // don't exile itself entering via non-cast
-                    if *id == source_id { return None; }
-                    Some(vec![*id])
-                } else {
-                    None
-                }
+        vec![], vec![], vec![], vec![],
+    );
+    // "If a nontoken creature would enter the battlefield and it wasn't cast, exile
+    //  it instead." obj_filter: a nontoken creature other than Priest itself;
+    //  condition: it entered from a zone other than the stack (= "wasn't cast").
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Replacement {
+            matches: EventPattern::EntersZone {
+                obj_filter: ir_and(
+                    ir_not(ir_token()),
+                    ir_and(ir_type(CardType::Creature), ir_not(ir_self())),
+                ),
+                zone_kind: ZoneKindSel::Battlefield,
+            },
+            condition: Some(Expr::Not(Box::new(Expr::Eq(
+                Box::new(Expr::Ctx(Ctx::Var("triggered_from"))),
+                Box::new(Expr::ZoneLit(ZoneId::Stack)),
+            )))),
+            body: ReplacementBody::Replace(Action::Move {
+                what: Expr::Ctx(Ctx::Var("triggered_obj")),
+                to: ZoneKindSel::Exile,
+                to_owner: None,
+                bind_as: None,
             }),
-            make_effect: Arc::new(|_source_id, controller: PlayerId| {
-                Effect(Arc::new(move |state, t, targets| {
-                    if let Some(&id) = targets.first() {
-                        change_zone(id, ZoneId::Exile, state, t, controller);
-                    }
-                }))
-            }),
-            active_when: tp_on_battlefield(),
-        }],
-        vec![],  // no prohibitions
-        vec![],  // no static abilities
-    )
+            active_zone: Some(ZoneKindSel::Battlefield),
+        },
+        text: Some("If a nontoken creature would enter the battlefield and it wasn't cast, exile it instead."),
+    }];
+    card
 }
 
 // ── Delver of Secrets ────────────────────────────────────────────────────────

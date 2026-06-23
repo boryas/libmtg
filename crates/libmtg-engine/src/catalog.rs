@@ -1872,16 +1872,6 @@ pub(crate) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _c
     }
 }
 
-// ── Leyline of the Void ───────────────────────────────────────────────────────
-
-pub(crate) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
-    if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
-        Some(vec![*id])
-    } else {
-        None
-    }
-}
-
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.

@@ -1887,7 +1887,7 @@ pub(crate) fn match_event_pattern(
             obj_filter,
             zone_kind,
         } => {
-            let crate::GameEvent::ZoneChange { id, to, .. } = event else {
+            let crate::GameEvent::ZoneChange { id, to, from, .. } = event else {
                 return None;
             };
             if zone_id_from_kind(zone_kind.clone()) != *to {
@@ -1896,7 +1896,14 @@ pub(crate) fn match_event_pattern(
             if !matches(obj_filter, *id, state, env) {
                 return None;
             }
-            Some(env.clone().with_var("triggered_obj", Value::Obj(*id)))
+            // `triggered_from` lets a condition test the source zone (e.g. Containment
+            // Priest's "wasn't cast" = entered the battlefield from a zone other than
+            // the stack).
+            Some(
+                env.clone()
+                    .with_var("triggered_obj", Value::Obj(*id))
+                    .with_var("triggered_from", Value::Zone(*from)),
+            )
         }
 
         EventPattern::LeavesZone {

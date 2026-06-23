@@ -2518,8 +2518,16 @@ pub(crate) fn fire_event(
                     None => continue,
                 };
                 for (ab_idx, ability) in card_def.abilities.iter().enumerate() {
-                    if !matches!(ability.kind, crate::ir::ability::AbilityKind::Replacement { .. }) {
+                    let crate::ir::ability::AbilityKind::Replacement { active_zone, .. } = &ability.kind
+                    else {
                         continue;
+                    };
+                    // Zone gate (mirrors the Prohibition walk): a static-permanent
+                    // replacement (Leyline, Containment Priest) only functions while
+                    // its source is on the battlefield; `None` (self-entry) is always
+                    // consulted.
+                    if let Some(z) = active_zone {
+                        if !crate::ir::executor::obj_in_kind(obj, z.clone()) { continue; }
                     }
                     let key = (*id, IR_REPL_KEY_BASE + ab_idx);
                     if state.repl_applied.contains(&key) { continue; }

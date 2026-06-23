@@ -59,44 +59,6 @@ pub(crate) fn eff_ir(who: PlayerId, action: crate::ir::action::Action) -> Effect
     }))
 }
 
-/// Like `eff_ir`, but for a *targeted* ability/trigger body: binds the source
-/// object and `targets[0]` as `Ctx::Var("target")` (a player or object) so the
-/// IR `Action` can reference its target. The bridge for porting targeted ETB
-/// triggers / activated abilities to IR without leaving the closure trigger
-/// plumbing — mirrors the binding `build_spell_effect` does for spell bodies.
-/// An untargeted body (no `targets`) still gets `source`/`controller` bound.
-pub(crate) fn eff_ir_targeted(who: PlayerId, source_id: ObjId, action: crate::ir::action::Action) -> Effect {
-    Effect(Arc::new(move |state, _t, targets| {
-        use crate::ir::expr::Value;
-        let mut env = crate::ir::executor::BindEnv::new()
-            .with_source(source_id)
-            .with_controller(who);
-        if let Some(&tgt) = targets.first() {
-            let v = if tgt == state.us_id || tgt == state.opp_id {
-                Value::Player(state.who_pid(tgt))
-            } else {
-                Value::Obj(tgt)
-            };
-            env = env.with_var("target", v);
-        }
-        crate::ir::executor::execute(&action, state, &env);
-    }))
-}
-
-/// Closure-side convenience: attach `what` to `to` via the IR `Action::Attach`,
-/// controlled by `who`. Used by still-closure equip abilities / Living Weapon so
-/// the `attached_to` write + `BecameAttached` event live in one place.
-pub(crate) fn do_attach(state: &mut SimState, who: PlayerId, what: ObjId, to: ObjId) {
-    let env = crate::ir::executor::BindEnv::new().with_controller(who);
-    crate::ir::executor::execute(
-        &crate::ir::action::Action::Attach {
-            what: crate::ir::expr::Expr::ObjLit(what),
-            to: crate::ir::expr::Expr::ObjLit(to),
-        },
-        state, &env,
-    );
-}
-
 /// Draw `n` cards for `who`.
 pub(crate) fn eff_draw(who: PlayerId, n: usize) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
