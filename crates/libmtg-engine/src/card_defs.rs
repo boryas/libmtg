@@ -1168,6 +1168,7 @@ fn ursas_saga() -> CardDef {
 /// {2}, Sacrifice: destroy each nonland permanent with MV equal to the charge count.
 /// CR 702.43 sunburst, CR 701.7 destroy.
 fn engineered_explosives() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, MoveVerb};
     use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, Filter, ZoneKindSel};
@@ -1175,45 +1176,7 @@ fn engineered_explosives() -> CardDef {
         "Engineered Explosives",
         CardKind::Artifact(ArtifactData {
             mana_cost: "0".to_string(),
-            abilities: vec![AbilityDef {
-                source_zone: SourceZone::Battlefield,
-                // First end-to-end IR migration of an `AbilityDef` cost:
-                // `{2}, Sacrifice ~`. Pays through `pay_ir_cost` via the
-                // `pay_ability_cost` dispatch on `CostBody`. Cost shape is
-                // a Sequence of PayMana(2) and the unified MoveByChoice
-                // (Battlefield → Graveyard, verb=Sacrifice) with the
-                // `It == Source` filter. PayMana drains the pre-tapped
-                // pool (the mana sub-loop has already filled it pre-pay).
-                costs: CostBody::Ir(Action::Sequence(vec![
-                    Action::PayMana(parse_mana_cost("2")),
-                    Action::MoveByChoice {
-                        who: crate::ir::action::Who::You,
-                        from: ZoneKindSel::Battlefield,
-                        to: ZoneKindSel::Graveyard,
-                        verb: MoveVerb::Sacrifice,
-                        filter: Filter(Expr::Eq(
-                            Box::new(Expr::Ctx(Ctx::It)),
-                            Box::new(Expr::Ctx(Ctx::Source)),
-                        )),
-                        count: Expr::Num(1),
-                        bind_as: Some("$ee_self"),
-                    },
-                ])),
-                ability_factory: Some(Arc::new(|who, source_id| {
-                    // EE has been sacrificed; its charge counters persist in the
-                    // objects map, read via `CountersOn(Source)`. Destroy each
-                    // nonland permanent whose MV equals that count.
-                    eff_ir_targeted(who, source_id, ir_for_each_on_battlefield(
-                        ir_and(
-                            ir_not(ir_type(CardType::Land)),
-                            ir_mv_eq_expr(Expr::CountersOn(
-                                Box::new(Expr::Ctx(Ctx::Source)), CounterType::Charge)),
-                        ),
-                        Action::Destroy { target: Expr::Ctx(Ctx::Var("v")) },
-                    ))
-                })),
-                ..Default::default()
-            }],
+            abilities: vec![], // "{2}, Sacrifice ~" is now an IR Activated ability (below)
             ..Default::default()
         }),
         vec![],
@@ -1242,6 +1205,43 @@ fn engineered_explosives() -> CardDef {
         vec![],
     );
     def.additional_costs = ir_xmana_cost();
+    // "{2}, Sacrifice Engineered Explosives: Destroy each nonland permanent with
+    //  mana value equal to the number of charge counters on it." EE is sacrificed as
+    //  a cost, so its charge counters persist in the objects map and are read at
+    //  resolution via `CountersOn(Source)`.
+    def.abilities = vec![Ability {
+        kind: AbilityKind::Activated {
+            cost: CostBody::Ir(Action::Sequence(vec![
+                Action::PayMana(parse_mana_cost("2")),
+                Action::MoveByChoice {
+                    who: crate::ir::action::Who::You,
+                    from: ZoneKindSel::Battlefield,
+                    to: ZoneKindSel::Graveyard,
+                    verb: MoveVerb::Sacrifice,
+                    filter: Filter(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::It)),
+                        Box::new(Expr::Ctx(Ctx::Source)),
+                    )),
+                    count: Expr::Num(1),
+                    bind_as: Some("$ee_self"),
+                },
+            ])),
+            target_spec: TargetSpec::None,
+            choice_spec: None,
+            body: ir_for_each_on_battlefield(
+                ir_and(
+                    ir_not(ir_type(CardType::Land)),
+                    ir_mv_eq_expr(Expr::CountersOn(
+                        Box::new(Expr::Ctx(Ctx::Source)), CounterType::Charge)),
+                ),
+                Action::Destroy { target: Expr::Ctx(Ctx::Var("v")) },
+            ),
+            timing: ActivationTiming::Default,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("{2}, Sacrifice Engineered Explosives: Destroy each nonland permanent with mana value equal to the number of charge counters on Engineered Explosives."),
+    }];
     def
 }
 
@@ -3106,30 +3106,10 @@ fn recruiter_of_the_guard() -> CardDef {
 fn stoneforge_mystic() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
     use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut data = CreatureData::new("1W", 1, 2);
     data.creature_subtypes = vec!["Kor".into(), "Artificer".into()];
-    data.abilities = vec![AbilityDef {
-        // {1}{W}, {T}: put an Equipment card from your hand onto the battlefield.
-        costs: ir_seq(vec![act_pay_mana_str("1W"), act_tap_source()]),
-        choice_spec: Some(ChoiceSpec {
-            controller: Who::Actor,
-            zone: ZoneId::Hand,
-            filter: ir_subtype("Equipment"),
-        }),
-        ability_factory: Some(Arc::new(|who, _source_id| {
-            Effect(Arc::new(move |state, t, targets| {
-                let Some(&equip_id) = targets.first() else { return };
-                let name = state.objects.get(&equip_id)
-                    .map(|c| c.catalog_key.clone())
-                    .unwrap_or_default();
-                state.log(t, who, format!("Stoneforge Mystic → {} onto the battlefield", name));
-                change_zone(equip_id, ZoneId::Battlefield, state, t, who);
-            }))
-        })),
-        timing: ActivationTiming::Sorcery,
-        ..Default::default()
-    }];
     let mut card = CardDef::new(
         "Stoneforge Mystic",
         CardKind::Creature(data),
@@ -3165,6 +3145,29 @@ fn stoneforge_mystic() -> CardDef {
             active_zone: ZoneKindSel::Battlefield,
         },
         text: Some("When Stoneforge Mystic enters, search your library for an Equipment card, reveal it, put it into your hand, then shuffle."),
+    },
+    // "{1}{W}, {T}: You may put an Equipment card from your hand onto the
+    //  battlefield." The chosen Equipment (CR 701.10) is bound as Ctx::Var("target").
+    Ability {
+        kind: AbilityKind::Activated {
+            cost: ir_seq(vec![act_pay_mana_str("1W"), act_tap_source()]),
+            target_spec: TargetSpec::None,
+            choice_spec: Some(ChoiceSpec {
+                controller: Who::Actor,
+                zone: ZoneId::Hand,
+                filter: ir_subtype("Equipment"),
+            }),
+            body: Action::Move {
+                what: Expr::Ctx(Ctx::Var("target")),
+                to: ZoneKindSel::Battlefield,
+                to_owner: None,
+                bind_as: None,
+            },
+            timing: ActivationTiming::Sorcery,
+            activation_condition: None,
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."),
     }];
     card
 }

@@ -3388,11 +3388,11 @@
 
         let equip_id = add_hand_card(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        // Fire the {1}{W}, {T} ability directly via its factory.
+        // Fire the {1}{W}, {T} ability's effect (the put-equipment ability).
         let def = state.catalog["Stoneforge Mystic"].clone();
-        let factory = def.as_creature().unwrap().abilities[0]
-            .ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, sfm_id).call(&mut state, 1, &[equip_id]);
+        let ability = &def.as_creature().unwrap().abilities[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, sfm_id);
+        eff.call(&mut state, 1, &[equip_id]);
 
         assert_eq!(state.objects[&equip_id].zone(), Some(Zone::Battlefield),
             "Equipment should be on the battlefield");
@@ -3781,8 +3781,8 @@
 
         let def = catalog_card("Engineered Explosives");
         let ability = match &def.kind { CardKind::Artifact(a) => &a.abilities[0], _ => panic!("EE is an artifact") };
-        let factory = ability.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, ee_id).call(&mut state, 1, &[]);
+        let eff = build_ability_effect(ability, PlayerId::Us, ee_id);
+        eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.objects[&mv2].zone(), Some(Zone::Graveyard), "MV 2 artifact destroyed (matches 2 charges)");
         assert_eq!(state.objects[&mv0].zone(), Some(Zone::Battlefield), "MV 0 artifact survives");
@@ -5134,11 +5134,10 @@
         };
         let mv3_id = add_perm_with_def(&mut state, PlayerId::Opp, &mv3_def, BattlefieldState::new());
         // Manually fire the ability effect (skip cost payment for the test).
-        let ability_factory = ee_def.abilities().iter()
+        let ability = ee_def.abilities().iter()
             .find(|ab| matches!(ab.source_zone, SourceZone::Battlefield))
-            .and_then(|ab| ab.ability_factory.clone())
             .expect("EE must have a battlefield ability");
-        let eff = ability_factory(PlayerId::Us, ee_id);
+        let eff = build_ability_effect(ability, PlayerId::Us, ee_id);
         eff.call(&mut state, 1, &[]);
         assert_eq!(state.objects[&mv2_id].zone(), Some(Zone::Graveyard),
             "MV 2 permanent should be destroyed by EE[2]");
