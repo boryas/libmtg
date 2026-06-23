@@ -213,6 +213,7 @@ where
             // by which the objective is judged. (`.max(1)` guards a degenerate 0.)
             max_turns: cutoff.max(1),
             on_play,
+            fixed_us_hand: None,
         };
         let state = run_game(scenario, &mut rng);
         // Keep a few sample games (the first handful) for flavor: opening hand + outcome.
@@ -370,7 +371,7 @@ pub fn run_goldfish_dump(deck: &[(String, i32, String)], games: u32, cutoff: u32
     // Quote card names — some (Jace, Tamiyo) contain commas.
     let header: Vec<String> = cards.iter().map(|c| format!("\"{c}\"")).collect();
     out.push_str(&header.join(","));
-    out.push_str(",det_line,tami_flip,p_cast,win\n");
+    out.push_str(",det_line,tami_flip,p_cast,realistic,aggressive,win\n");
 
     for _ in 0..games {
         let scenario = Scenario {
@@ -385,6 +386,7 @@ pub fn run_goldfish_dump(deck: &[(String, i32, String)], games: u32, cutoff: u32
             objective: Box::new(GoldfishObjective::default()),
             max_turns: cutoff_u8,
             on_play: Some(true), // labels are on the play
+            fixed_us_hand: None,
         };
         let state = run_game(scenario, &mut rng);
         let hand = state.opening_hand_us.clone();
@@ -411,6 +413,8 @@ pub fn run_goldfish_dump(deck: &[(String, i32, String)], games: u32, cutoff: u32
         }
         let sig = mull::hand_signals(&s2, PlayerId::Us, cutoff);
         let p = recipe::p_cast_by(&s2, PlayerId::Us, cutoff);
+        let realistic = u8::from(mull::realistic_keep(&sig, 0));
+        let aggressive = u8::from(mull::aggressive_keep(&s2, PlayerId::Us, cutoff));
 
         let counts: Vec<String> = cards
             .iter()
@@ -418,14 +422,55 @@ pub fn run_goldfish_dump(deck: &[(String, i32, String)], games: u32, cutoff: u32
             .collect();
         out.push_str(&counts.join(","));
         out.push_str(&format!(
-            ",{},{},{:.4},{}\n",
+            ",{},{},{:.4},{},{},{}\n",
             u8::from(sig.det_line),
             u8::from(sig.tami_fast_flip),
             p,
+            realistic,
+            aggressive,
             win
         ));
     }
     out
+}
+
+/// Estimate a SPECIFIC opening hand's P(cast DD by `cutoff`) by replaying that exact
+/// 7 under `games` fresh library shuffles (the hand is forced, no mulligan, on the play).
+/// This is the model-free per-hand probability — the ground truth to check the learned
+/// model against. Returns the win fraction.
+pub fn run_goldfish_fixed_hand(
+    deck: &[(String, i32, String)],
+    hand: &[String],
+    cutoff: u32,
+    games: u32,
+) -> f64 {
+    let catalog = build_catalog();
+    let opp_deck: Vec<(String, i32, String)> =
+        vec![("Island".to_string(), 60, "main".to_string())];
+    let cutoff_u8 = (cutoff.min(u8::MAX as u32) as u8).max(1);
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let mut wins = 0u32;
+    for _ in 0..games {
+        let scenario = Scenario {
+            us_label: "doomsday".to_string(),
+            opp_label: "goldfish".to_string(),
+            catalog: catalog.clone(),
+            us_deck: deck.to_vec(),
+            opp_deck: opp_deck.clone(),
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, MullMode::Keep7)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective::default()),
+            max_turns: cutoff_u8,
+            on_play: Some(true),
+            fixed_us_hand: Some(hand.to_vec()),
+        };
+        let state = run_game(scenario, &mut rng);
+        if state.terminal && state.current_turn <= cutoff_u8 {
+            wins += 1;
+        }
+    }
+    wins as f64 / games as f64
 }
 
 /// Debug A/B: run `games` SEEDED cast-ASAP games in compare mode and return a log
@@ -457,6 +502,7 @@ pub fn run_goldfish_compare(
             objective: Box::new(GoldfishObjective::default()),
             max_turns: (cutoff.min(u8::MAX as u32) as u8).max(1),
             on_play: None,
+            fixed_us_hand: None,
         };
         let state = run_game(scenario, &mut rng);
         let outcome = if state.terminal {
@@ -527,6 +573,7 @@ pub fn run_goldfish_calibration(
             objective: Box::new(GoldfishObjective::default()),
             max_turns: (cutoff.min(u8::MAX as u32) as u8).max(1),
             on_play: None,
+            fixed_us_hand: None,
         };
         let state = run_game(scenario, &mut rng);
         let Some(pred) = state
@@ -586,6 +633,7 @@ pub fn run_goldfish_audit_det(
             objective: Box::new(GoldfishObjective::default()),
             max_turns: (cutoff.min(u8::MAX as u32) as u8).max(1),
             on_play: None,
+            fixed_us_hand: None,
         };
         let state = run_game(scenario, &mut rng);
         let calib = state

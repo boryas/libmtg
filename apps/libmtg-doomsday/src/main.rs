@@ -71,6 +71,10 @@ struct Args {
     /// to stdout for the mulligan-learning bake-off. Uses Keep7 + on-the-play.
     #[arg(long)]
     dump_keep_data: bool,
+    /// Estimate per-hand P(cast by cutoff): read a file of opening hands (one per line,
+    /// cards `|`-separated), replay each `--games` times on the play, print `rate<TAB>hand`.
+    #[arg(long)]
+    sim_hands: Option<String>,
     /// A/B debug: print, for a few SEEDED games, every decision where the principled
     /// policy disagrees with the reference value-table heuristic.
     #[arg(long)]
@@ -99,8 +103,8 @@ fn main() -> ExitCode {
     };
 
     // Surface cards the engine can't simulate (dropped / inert) before running.
-    // Skip for --dump-keep-data: that emits machine-readable CSV to stdout.
-    if !args.dump_keep_data {
+    // Skip for machine-readable stdout modes (--dump-keep-data, --sim-hands).
+    if !args.dump_keep_data && args.sim_hands.is_none() {
         warn_unimplemented_cards(&deck, "deck", &build_catalog());
     }
 
@@ -115,6 +119,19 @@ fn main() -> ExitCode {
     if args.dump_keep_data {
         eprintln!("Dumping {} keep-all-7 rows (Keep7, on the play, cutoff T{})…", args.games, args.cutoff);
         print!("{}", libmtg_doomsday::run_goldfish_dump(&deck, args.games, args.cutoff));
+        return ExitCode::SUCCESS;
+    }
+
+    if let Some(path) = &args.sim_hands {
+        let text = std::fs::read_to_string(path).expect("read --sim-hands file");
+        let hands: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        eprintln!("Per-hand P(cast): {} hands x {} games (on the play, cutoff T{})…",
+            hands.len(), args.games, args.cutoff);
+        for line in hands {
+            let hand: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
+            let rate = libmtg_doomsday::run_goldfish_fixed_hand(&deck, &hand, args.cutoff, args.games);
+            println!("{rate:.4}\t{line}");
+        }
         return ExitCode::SUCCESS;
     }
 

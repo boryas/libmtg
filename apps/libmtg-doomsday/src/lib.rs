@@ -37,6 +37,7 @@ pub use strategy::{dd_should_mulligan, DoomsdayStrategy, GenericOppStrategy, Mat
 pub use goldfish::{
     dd_goldfish_evaluator, run_goldfish, run_goldfish_asap, run_goldfish_asap_mode,
     run_goldfish_audit_det, run_goldfish_baseline_aggro, run_goldfish_calibration, run_goldfish_dump,
+    run_goldfish_fixed_hand,
     run_goldfish_compare, sample_doomsday_deck, DDGoldfishStrategy, GoldfishStats, MullMode,
     DEFAULT_CUTOFF, DEFAULT_PROTECTION,
 };
@@ -113,6 +114,7 @@ pub fn simulate_game(
             objective: Box::new(DoomsdayResolvedObjective::default()),
             max_turns: 10,
             on_play: None,
+            fixed_us_hand: None,
         },
         rng,
     )

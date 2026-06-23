@@ -4204,6 +4204,10 @@ pub struct Scenario {
     pub max_turns: u8,
     /// `Some(b)` forces the on-the-play coin; `None` flips it with `rng`.
     pub on_play: Option<bool>,
+    /// `Some(cards)` forces US's opening 7 to exactly these catalog keys (no mulligan,
+    /// no London bottom) — the rest of the deck is the shuffled library. For estimating
+    /// a specific hand's P(win) by replaying it under many shuffles. `None` = deal normally.
+    pub fixed_us_hand: Option<Vec<String>>,
 }
 
 /// Run one game to completion on the generic engine loop. Application-agnostic:
@@ -4212,7 +4216,7 @@ pub struct Scenario {
 pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
     let Scenario {
         us_label, opp_label, catalog, us_deck, opp_deck,
-        us_strategy, opp_strategy, evaluate_card, objective, max_turns, on_play,
+        us_strategy, opp_strategy, evaluate_card, objective, max_turns, on_play, fixed_us_hand,
     } = scenario;
 
     let on_play = on_play.unwrap_or_else(|| rng.gen_bool(0.5));
@@ -4259,6 +4263,22 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
     // Deal opening hands with mulligan decisions (London mulligan).
     let mut mulligans = [0u32; 2];
     for (i, who) in [PlayerId::Us, PlayerId::Opp].into_iter().enumerate() {
+        if who == PlayerId::Us {
+            if let Some(ref hand) = fixed_us_hand {
+                // Force US's opening 7 to exactly `hand`: move one library object per
+                // requested name into hand; no mulligan, no London bottom.
+                for name in hand {
+                    let id = state.player(PlayerId::Us).library_order.iter().copied().find(|&id| {
+                        state.objects.get(&id).map_or(false, |o| &o.catalog_key == name)
+                    });
+                    if let Some(id) = id {
+                        state.set_card_zone(id, Zone::Hand { known: false });
+                    }
+                }
+                state.player_mut(who).draws_this_turn = 0;
+                continue;
+            }
+        }
         for _ in 0..7 { sim_draw(&mut state, who, 0, false); }
         loop {
             let taken = mulligans[i];
