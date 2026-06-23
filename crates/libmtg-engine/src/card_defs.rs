@@ -432,12 +432,23 @@ fn ir_tap_mana(s: &str) -> crate::ir::ability::Ability {
 }
 
 /// `AbilityDef` for a fetch land: sacrifice self, pay 1 life, search → Battlefield.
+/// Closure-free — the effect is an IR `Action::Search` body (the canonical lowered
+/// form, run by `build_ability_effect`), not an `ability_factory`.
 fn fetch_ability(filter: crate::ir::expr::Filter) -> AbilityDef {
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
     AbilityDef {
         costs: ir_seq(vec![act_sac_self("$fetch_self"), act_pay_life(1)]),
-        ability_factory: Some(Arc::new(move |who, _| {
-            eff_fetch_search(who, filter.clone(), ZoneId::Battlefield)
-        })),
+        ir_body: Some(Action::Search {
+            who: IrWho::You,
+            zone: ZoneKindSel::Library,
+            filter,
+            count: Expr::Num(1),
+            dest: ZoneKindSel::Battlefield,
+            to_top: false,
+            shuffle: true,
+            bind_as: None,
+        }),
         ..Default::default()
     }
 }
