@@ -565,22 +565,6 @@ pub(crate) fn eff_each_may_put(caster: PlayerId, filter: Filter) -> Effect {
     }))
 }
 
-/// Placeholder for Atraxa, Grand Unifier's ETB: reveal top 10, for each card type
-/// you may put one into your hand. Real implementation needs per-type strategy choices
-/// over actual revealed cards; for now just silently move `n` library cards to hand
-/// (no Draw events — does not trigger Bowmasters etc.).
-///
-/// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
-pub(crate) fn eff_hand_boost(who: PlayerId, n: usize) -> Effect {
-    Effect(Arc::new(move |state, t, _targets| {
-        let ids: Vec<ObjId> = state.library_of(who).map(|o| o.id).take(n).collect();
-        let count = ids.len();
-        for id in ids {
-            state.set_card_zone(id, Zone::Hand { known: true });
-        }
-        state.log(t, who, format!("Atraxa ETB: {} cards to hand (placeholder)", count));
-    }))
-}
 
 /// Ward pay-or-counter effect (CR 702.20).
 /// Offers `targeting_caster` the chance to pay `cost`; if they decline (or can't pay),

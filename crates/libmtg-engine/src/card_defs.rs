@@ -4739,8 +4739,11 @@ fn meteor_sword() -> CardDef {
 /// "Equipped creature gets +2/+2 and has vigilance."
 /// "Equip {3}"
 fn pre_war_formalwear() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::Action;
     use crate::ir::ce::CEMod;
-    use crate::ir::expr::Expr;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut card = CardDef::new(
         "Pre-War Formalwear",
         CardKind::Artifact(ArtifactData {
@@ -4767,44 +4770,51 @@ fn pre_war_formalwear() -> CardDef {
         }),
         parse_colors("2W", false, false), None,
         vec![], CardLayout::Normal, None,
-        // ETB: reanimate a creature in own GY with MV ≤ 3, then attach self to it.
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, _state, pending| {
-                if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-                    if *id == source_id && *ctlr == controller {
-                        pending.push(TriggerContext {
-                            source_name: "Pre-War Formalwear".into(),
-                            controller,
-                            target_spec: TargetSpec::ObjectInZone {
-                                controller: Who::Actor,
-                                zone: ZoneId::Graveyard,
-                                filter: ir_and(
-                                    ir_type(CardType::Creature),
-                                    ir_mv_le(3),
-                                ),
-                            },
-                            effect: Effect(Arc::new(move |state, t, targets| {
-                                let Some(&target_id) = targets.first() else { return };
-                                change_zone(target_id, ZoneId::Battlefield, state, t, controller);
-                                do_attach(state, controller, source_id, target_id);
-                            })),
-                        });
-                    }
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
+        vec![], // ETB reanimate is now an IR Triggered ability (below)
         vec![], vec![],
         vec![], // static CE now IR (card.abilities below)
     );
+    // "When this Equipment enters, return target creature card with mana value 3 or
+    //  less from your graveyard to the battlefield, then attach this to it." The
+    //  reanimated creature is bound as `Ctx::Var("target")`.
+    let reanimate = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: None,
+            },
+            target_spec: TargetSpec::ObjectInZone {
+                controller: Who::Actor,
+                zone: ZoneId::Graveyard,
+                filter: ir_and(ir_type(CardType::Creature), ir_mv_le(3)),
+            },
+            body: Action::Sequence(vec![
+                Action::Move {
+                    what: Expr::Ctx(Ctx::Var("target")),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+                Action::Attach {
+                    what: Expr::Ctx(Ctx::Source),
+                    to: Expr::Ctx(Ctx::Var("target")),
+                },
+            ]),
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Pre-War Formalwear enters, return target creature card with mana value 3 or less from your graveyard to the battlefield, then attach Pre-War Formalwear to it."),
+    };
     // Equipped creature gets +2/+2 and has vigilance.
-    card.abilities = vec![equipped_creature_ce(
-        vec![
-            CEMod::PumpPT(Expr::Num(2), Expr::Num(2)),
-            CEMod::AddKeyword(Keyword::Vigilance),
-        ],
-        "Equipped creature gets +2/+2 and has vigilance.",
-    )];
+    card.abilities = vec![
+        reanimate,
+        equipped_creature_ce(
+            vec![
+                CEMod::PumpPT(Expr::Num(2), Expr::Num(2)),
+                CEMod::AddKeyword(Keyword::Vigilance),
+            ],
+            "Equipped creature gets +2/+2 and has vigilance.",
+        ),
+    ];
     card
 }
 
@@ -4823,8 +4833,11 @@ fn pre_war_formalwear() -> CardDef {
 ///   * "Can't be blocked" is not a supported keyword on the engine yet — we grant no
 ///     evasion, so combat interactions with equipped creatures are incorrect.
 fn cryptic_coat() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, TokenSpec, Who as IrWho};
     use crate::ir::ce::CEMod;
-    use crate::ir::expr::Expr;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut card = CardDef::new(
         "Cryptic Coat",
         CardKind::Artifact(ArtifactData {
@@ -4848,33 +4861,52 @@ fn cryptic_coat() -> CardDef {
         }),
         parse_colors("U", false, false), None,
         vec![], CardLayout::Normal, None,
-        // ETB: cloak the top card of your library (ABNORMAL: token), then attach self to it.
-        vec![TriggerDef {
-            check: Arc::new(|event, source_id, controller, _state, pending| {
-                if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-                    if *id == source_id && *ctlr == controller {
-                        pending.push(TriggerContext {
-                            source_name: "Cryptic Coat".into(),
-                            controller,
-                            target_spec: TargetSpec::None,
-                            effect: Effect(Arc::new(move |state, t, _targets| {
-                                let token_id = do_create_token("Mysterious Creature", controller, state, t);
-                                do_attach(state, controller, source_id, token_id);
-                            })),
-                        });
-                    }
-                }
-            }),
-            active_when: tp_on_battlefield(),
-        }],
+        vec![], // ETB cloak is now an IR Triggered ability (below)
         vec![], vec![],
         vec![], // static CE now IR (card.abilities below)
     );
+    // "When this Equipment enters, cloak the top card of your library, then attach
+    //  this to it." ABNORMAL: cloak is approximated by a 2/2 Mysterious Creature
+    //  token (no ward / turn-face-up), like Living Weapon's germ.
+    let cloak = Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: None,
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sequence(vec![
+                Action::CreateToken {
+                    who: IrWho::You,
+                    spec: TokenSpec {
+                        name: "Mysterious Creature",
+                        types: vec![CardType::Creature],
+                        subtypes: vec![],
+                        colors: vec![],
+                        power: Some(2),
+                        toughness: Some(2),
+                        keywords: vec![],
+                    },
+                    n: Expr::Num(1),
+                    bind_as: Some("cloaked"),
+                },
+                Action::Attach {
+                    what: Expr::Ctx(Ctx::Source),
+                    to: Expr::Ctx(Ctx::Var("cloaked")),
+                },
+            ]),
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Cryptic Coat enters, cloak the top card of your library, then attach Cryptic Coat to it."),
+    };
     // Equipped creature gets +1/+0. ("can't be blocked" omitted — no keyword.)
-    card.abilities = vec![equipped_creature_ce(
-        vec![CEMod::PumpPT(Expr::Num(1), Expr::Num(0))],
-        "Equipped creature gets +1/+0.",
-    )];
+    card.abilities = vec![
+        cloak,
+        equipped_creature_ce(
+            vec![CEMod::PumpPT(Expr::Num(1), Expr::Num(0))],
+            "Equipped creature gets +1/+0.",
+        ),
+    ];
     card
 }
 
@@ -5268,22 +5300,50 @@ fn emrakul_the_aeons_torn() -> CardDef {
 /// TODO: real ETB needs per-type strategy choices over actual revealed cards; placeholder
 /// adds 4 cards to hand silently (no Draw events).
 fn atraxa_grand_unifier() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
     let mut data = CreatureData::new("3GWUB", 7, 7);
     data.legendary = true;
     data.keywords = Keywords::from_slice(&[
         Keyword::Flying, Keyword::Vigilance, Keyword::Deathtouch, Keyword::Lifelink,
     ]);
-    CardDef::new(
+    let mut card = CardDef::new(
         "Atraxa, Grand Unifier",
         CardKind::Creature(data),
         parse_colors("3GWUB", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef { check: Arc::new(atraxa_etb_check), active_when: tp_on_battlefield() }],
-        vec![],
-        vec![],
-        vec![],
-    )
+        vec![], vec![], vec![], vec![],
+    );
+    // ETB — PLACEHOLDER for "reveal the top ten cards of your library; put one card of
+    // each card type into your hand and the rest on the bottom". Approximated as
+    // moving the top four cards of your library into your hand (no reveal-by-type).
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::EntersZone { obj_filter: ir_self(), zone_kind: ZoneKindSel::Battlefield },
+                condition: None,
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Move {
+                what: Expr::Top {
+                    zone: ZoneSel::Scoped {
+                        zone_kind: ZoneKindSel::Library,
+                        owner: Box::new(Expr::Ctx(Ctx::Controller)),
+                    },
+                    n: Box::new(Expr::Num(4)),
+                },
+                to: ZoneKindSel::Hand,
+                to_owner: None,
+                bind_as: None,
+            },
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some("When Atraxa, Grand Unifier enters, reveal the top ten cards of your library, put one card of each card type into your hand, then put the rest on the bottom of your library in a random order. (Placeholder: puts the top four cards into your hand.)"),
+    }];
+    card
 }
 
 fn brazen_borrower() -> CardDef {

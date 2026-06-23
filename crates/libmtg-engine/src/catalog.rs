@@ -1427,20 +1427,6 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
 /// ETB trigger for Atraxa, Grand Unifier: placeholder — adds 4 cards to hand.
 /// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
-pub(crate) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
-    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-        if *id == source_id && *ctlr == controller {
-            pending.push(TriggerContext {
-                source_name: "Atraxa, Grand Unifier".into(),
-                controller,
-                target_spec: TargetSpec::None,
-                effect: eff_hand_boost(controller, 4),
-            });
-        }
-    }
-}
-
-
 /// Check all triggers for the given event.
 /// Part 1: Card-bound triggers — walks all objects, checks trigger_defs from catalog,
 ///         filtered by `active_when` predicate. No instances needed.
