@@ -2113,6 +2113,28 @@
     }
 
     #[test]
+    fn test_ninjutsu_enters_tapped_and_attacking_inheriting_target() {
+        // CR 702.49 resolution (now Action::NinjutsuEnter): the ninja goes from
+        // hand to the battlefield tapped + attacking, inheriting the returned
+        // attacker's combat target (captured in CostsPaidCtx at cost time).
+        let mut state = make_state();
+        let target = state.opp_id; // the returned attacker was attacking the opponent
+        state.catalog.insert("Ninja".into(), creature("Ninja", 2, 2));
+        let ninja_id = add_hand_card(&mut state, PlayerId::Us, "Ninja");
+        state.resolving_costs_ctx.returned_attack_targets = vec![Some(target)];
+
+        let ability = ninjutsu_ability("1U");
+        build_ability_effect(&ability, PlayerId::Us, ninja_id).call(&mut state, 1, &[]);
+
+        let bf = state.permanent_bf(ninja_id).expect("ninja on battlefield");
+        assert!(bf.tapped, "ninja enters tapped");
+        assert!(bf.attacking, "ninja enters attacking");
+        assert!(bf.unblocked, "ninja enters unblocked");
+        assert_eq!(bf.attack_target, Some(target), "inherits the returned attacker's target");
+        assert!(state.combat_attackers.contains(&ninja_id), "ninja joins the attackers");
+    }
+
+    #[test]
     fn test_fatal_push_cannot_target_flipped_tamiyo() {
         let mut state = make_state();
         let tamiyo_id = add_default_perm(&mut state, PlayerId::Opp, "Tamiyo, Inquisitive Student");

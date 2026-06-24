@@ -477,6 +477,7 @@ fn walk(
         | Action::RecordEtbChoice { .. }
         | Action::CreateEmblem { .. }
         | Action::RegisterContinuous { .. }
+        | Action::NinjutsuEnter
         | Action::MayDo { .. } => Some(()),
     }
 }

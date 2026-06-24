@@ -759,6 +759,31 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::NinjutsuEnter => {
+            // CR 702.49: put the ninja (Source, in hand) onto the battlefield
+            // tapped and attacking, taking over the returned attacker's combat
+            // slot. The returned creature's pre-move `attack_target` was captured
+            // into CostsPaidCtx (it has since left the battlefield).
+            let Some(source_id) = env.source else { return ExecResult::Ok };
+            if !state.objects.contains_key(&source_id) { return ExecResult::Ok; }
+            let attack_target = state
+                .resolving_costs_ctx
+                .returned_attack_targets
+                .first()
+                .copied()
+                .flatten();
+            crate::change_zone(source_id, crate::ZoneId::Battlefield, state, t, actor);
+            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                bf.tapped = true;
+                bf.entered_this_turn = true;
+                bf.attacking = true;
+                bf.unblocked = true;
+                bf.attack_target = attack_target;
+            }
+            state.combat_attackers.push(source_id);
+            ExecResult::Ok
+        }
+
         Action::RecordEtbChoice { kind } => {
             // "As ~ enters, choose ..." (CR 614.12): ask the source's controller
             // and record the result on the source permanent's `etb_choice`, read

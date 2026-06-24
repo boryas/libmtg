@@ -523,27 +523,7 @@ pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
                 bind_as: Some("$ninjutsu_attacker"),
             },
         ])),
-        ability_factory: Some(std::sync::Arc::new(|who, source_id| {
-            Effect(std::sync::Arc::new(move |state: &mut SimState, t, _targets: &[ObjId]| {
-                let attack_target = state.resolving_costs_ctx.returned_attack_targets
-                    .first().copied().flatten();
-                let ninja_name = state.objects.get(&source_id)
-                    .map(|c| c.catalog_key.clone())
-                    .unwrap_or_default();
-                if ninja_name.is_empty() { return; }
-                // Move the source card from Stack to Battlefield (not a new object).
-                change_zone(source_id, ZoneId::Battlefield, state, t, who);
-                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                    bf.tapped = true;
-                    bf.entered_this_turn = true;
-                    bf.attacking = true;
-                    bf.unblocked = true;
-                    bf.attack_target = attack_target;
-                }
-                state.combat_attackers.push(source_id);
-                state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
-            }))
-        })),
+        ir_body: Some(Action::NinjutsuEnter),
         ..Default::default()
     }
 }

@@ -297,6 +297,11 @@ pub enum Action {
     /// permanent's `etb_choice`. Used inside a self-entry `Replacement` body
     /// (after the `Move`), so the permanent is on the battlefield to store on.
     RecordEtbChoice { kind: EtbChoiceKind },
+    /// CR 702.49: the resolution half of ninjutsu. Puts the source card (in hand)
+    /// onto the battlefield tapped and attacking, inheriting the attack target of
+    /// the unblocked attacker returned to pay the cost (captured in `CostsPaidCtx`
+    /// at cost time, since the returned creature has left combat by now).
+    NinjutsuEnter,
     /// "You get an emblem with '…'" (CR 114.2). Creates an emblem controlled by
     /// the resolving player, carrying the given static `abilities`; the emblem
     /// persists and its abilities apply continuously (e.g. Kaito +1, Tamiyo −7).
