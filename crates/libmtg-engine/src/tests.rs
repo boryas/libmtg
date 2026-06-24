@@ -2614,6 +2614,37 @@
             "emblem grants no maximum hand size");
     }
 
+    /// Kaito 0: surveil 2, then draw a card for each opponent who lost life this
+    /// turn — counted off the `LifeLost` event log, not a bespoke counter.
+    fn kaito_zero(state: &mut SimState) -> Effect {
+        let kaito_def = catalog_card("Kaito, Bane of Nightmares");
+        let CardKind::Planeswalker(pw) = &kaito_def.kind else { panic!("Kaito is a planeswalker") };
+        let zero = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(0))
+            .expect("Kaito has a 0 ability");
+        build_ability_effect(zero, PlayerId::Us, ObjId::UNSET)
+    }
+
+    #[test]
+    fn test_kaito_zero_draws_when_opponent_lost_life() {
+        let mut state = make_state();
+        for i in 0..3 { add_library_card(&mut state, PlayerId::Us, &format!("Lib{i}")); }
+        state.lose_life(PlayerId::Opp, 3); // logs a LifeLost event this turn
+        let hand_before = state.hand_size(PlayerId::Us);
+        kaito_zero(&mut state).call(&mut state, 1, &[]);
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before + 1,
+            "draw 1 — the opponent lost life this turn");
+    }
+
+    #[test]
+    fn test_kaito_zero_no_draw_when_opponent_kept_life() {
+        let mut state = make_state();
+        for i in 0..3 { add_library_card(&mut state, PlayerId::Us, &format!("Lib{i}")); }
+        let hand_before = state.hand_size(PlayerId::Us);
+        kaito_zero(&mut state).call(&mut state, 1, &[]);
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before,
+            "no draw — no opponent lost life this turn");
+    }
+
     #[test]
     fn test_sba_legend_rule_second_copy_dies() {
         let mut state = make_state();

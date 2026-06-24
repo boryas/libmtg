@@ -465,8 +465,12 @@ pub enum GameEvent {
     /// `Action::Attach` so "whenever ~ becomes equipped/enchanted" triggers fire.
     /// `attachment` is the equipment/aura; `target` is the permanent it attached to.
     BecameAttached { attachment: ObjId, target: ObjId, controller: PlayerId },
+    /// A player lost `amount` (>0) life (CR 118.2) — from damage, payment, drain, …
+    /// Logged centrally in `lose_life`. Read via `EventFilter::LifeLost` (e.g.
+    /// Kaito 0 "draw for each opponent who lost life this turn").
+    LifeLost { who: PlayerId, amount: i32 },
     // Future variants: DamageDealt, SpellResolved, AbilityActivated,
-    //                  CounterChanged, LifeChanged, TokenCreated.
+    //                  CounterChanged, TokenCreated.
 }
 
 /// Data stored with a triggered ability waiting to be pushed onto the stack.
@@ -1560,8 +1564,6 @@ pub struct PlayerState {
     pub pool: ManaPool,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
     draws_this_turn: u8,
-    /// Total life lost this turn; reset each Untap. Used for Kaito 0 ability.
-    life_lost_this_turn: i32,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     pub library_order: std::collections::VecDeque<ObjId>,
     /// How many top cards the controller legitimately KNOWS (front-down), since the
@@ -1586,7 +1588,6 @@ impl PlayerState {
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
             draws_this_turn: 0,
-            life_lost_this_turn: 0,
             library_order: std::collections::VecDeque::new(),
             known_top_len: 0,
             strategy: None,
@@ -2022,7 +2023,12 @@ impl SimState {
 
     fn lose_life(&mut self, who: PlayerId, n: i32) {
         self.player_mut(who).life -= n;
-        self.player_mut(who).life_lost_this_turn += n;
+        // Log actual life loss (CR 118.2) so event-log queries can derive
+        // "lost life this turn" without a bespoke per-player counter.
+        if n > 0 {
+            let turn = self.current_turn as u32;
+            self.event_log.push(turn, GameEvent::LifeLost { who, amount: n });
+        }
     }
 
     fn gain_life(&mut self, who: PlayerId, n: i32) {
@@ -4047,7 +4053,6 @@ fn do_step(
             state.player_mut(ap).lands_played_this_turn = 0;
             state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).draws_this_turn = 0;
-            state.player_mut(ap).life_lost_this_turn = 0;
             // Expire "until your next turn" trigger and continuous instances for the active player.
             state.trigger_instances.retain(|ti| {
                 !(ti.expiry == Some(Expiry::StartOfControllerNextTurn) && ti.controller == ap)

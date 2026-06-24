@@ -173,6 +173,10 @@ pub enum EventFilter {
     /// A player drew a card. `who` optionally filters by the drawing player.
     /// `EventCount(ThisTurn, Draw{You})` is "cards you've drawn this turn".
     Draw { who: Option<Box<Expr>> },
+    /// A player lost life (CR 118.2). `who` optionally filters by that player —
+    /// e.g. `EventCount(ThisTurn, LifeLost{who: o}) > 0` is "opponent o lost life
+    /// this turn" (Kaito 0).
+    LifeLost { who: Option<Box<Expr>> },
 }
 
 /// Which zone to scan, possibly controller-scoped.

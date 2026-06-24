@@ -1631,27 +1631,6 @@ pub(crate) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
 }
 
 
-/// Kaito 0: surveil 2, then draw a card for each opponent who lost life this turn.
-/// In a 1v1 game, this draws 0 or 1 card.
-pub(crate) fn build_kaito_zero(who: PlayerId, source_id: ObjId) -> Effect {
-    let surveil = eff_surveil(who, 2);
-    Effect(std::sync::Arc::new(move |state, t, _targets| {
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        surveil.call(state, t, &[]);
-        // 1v1: check if the single opponent lost life this turn.
-        let opp = who.opp();
-        let opp_lost = state.player(opp).life_lost_this_turn > 0;
-        let draw_count = if opp_lost { 1 } else { 0 };
-        if draw_count > 0 {
-            eff_draw(who, draw_count).call(state, t, &[]);
-        }
-        state.log(t, who, format!(
-            "{} 0: surveil 2{}",
-            source_name,
-            if draw_count > 0 { ", draw 1 (opp lost life)" } else { "" }
-        ));
-    }))
-}
 
 
 /// Build an `Effect` closure for an activated ability at push time.

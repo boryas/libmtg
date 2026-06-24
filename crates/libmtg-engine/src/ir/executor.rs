@@ -1824,6 +1824,15 @@ fn match_event(
                 Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *drawer),
             }
         }
+        EventFilter::LifeLost { who } => {
+            let crate::GameEvent::LifeLost { who: loser, .. } = &logged.event else {
+                return false;
+            };
+            match who {
+                None => true,
+                Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *loser),
+            }
+        }
     }
 }
 
@@ -2743,6 +2752,9 @@ fn walk_event_filter(filter: &crate::ir::expr::EventFilter, out: &mut Vec<Axis>)
             if let Some(e) = card { walk_reads(e, out); }
         }
         EventFilter::Draw { who } => {
+            if let Some(e) = who { walk_reads(e, out); }
+        }
+        EventFilter::LifeLost { who } => {
             if let Some(e) = who { walk_reads(e, out); }
         }
     }

@@ -3035,10 +3035,32 @@ fn kaito_bane_of_nightmares() -> CardDef {
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
-                // 0: Surveil 2, draw if opp lost life.
+                // 0: Surveil 2, then draw a card for each opponent who lost life
+                // this turn — counted straight off the event log.
                 AbilityDef {
                     costs: ir_loyalty(0),
-                    ability_factory: Some(Arc::new(build_kaito_zero)),
+                    ir_body: Some(crate::ir::action::Action::Sequence(vec![
+                        crate::ir::action::Action::Surveil {
+                            who: crate::ir::action::Who::You,
+                            n: Expr::Num(2),
+                        },
+                        crate::ir::action::Action::Draw {
+                            who: crate::ir::action::Who::You,
+                            n: Expr::CountWhere {
+                                set: Box::new(Expr::Opponents(Box::new(Expr::Ctx(Ctx::Controller)))),
+                                bind: "o",
+                                body: Box::new(Expr::Gt(
+                                    Box::new(Expr::EventCount {
+                                        window: crate::ir::event_log::Window::ThisTurn,
+                                        filter: Box::new(crate::ir::expr::EventFilter::LifeLost {
+                                            who: Some(Box::new(Expr::Ctx(Ctx::Var("o")))),
+                                        }),
+                                    }),
+                                    Box::new(Expr::Num(0)),
+                                )),
+                            },
+                        },
+                    ])),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
