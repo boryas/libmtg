@@ -2498,6 +2498,25 @@
     }
 
     #[test]
+    fn test_planeswalker_enters_with_starting_loyalty_via_ir_replacement() {
+        // CR 306.5b/c: a planeswalker enters with loyalty counters equal to its
+        // printed loyalty. Modeled as a self-entry IR Replacement that places
+        // Loyalty counters (routed to bf.loyalty). Drive the real ETB path
+        // (change_zone → EntersZone) so the replacement actually fires — Karn's
+        // loyalty must come out at his printed 5, not the BattlefieldState default 0.
+        let mut state = make_state();
+        state.catalog.insert("Karn, the Great Creator".into(),
+            catalog_card("Karn, the Great Creator"));
+        let karn_id = add_hand_card(&mut state, PlayerId::Us, "Karn, the Great Creator");
+        change_zone(karn_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        assert_eq!(
+            state.permanent_bf(karn_id).map(|bf| bf.loyalty),
+            Some(5),
+            "Karn enters with 5 loyalty counters via the ETB replacement (CR 306.5b)"
+        );
+    }
+
+    #[test]
     fn test_sba_legend_rule_second_copy_dies() {
         let mut state = make_state();
         let _first = add_default_perm(&mut state, PlayerId::Us, "Bowmasters");

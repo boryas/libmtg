@@ -3043,7 +3043,7 @@ fn kaito_bane_of_nightmares() -> CardDef {
         None,
         vec![Supertype::Legendary], CardLayout::Normal, None,
         vec![],
-        vec![replacement_planeswalker_etb(4)],
+        vec![], // ETB loyalty is now an IR Replacement (card.abilities below)
         vec![],
         vec![], // animation is now an IR Static ability (below)
     );
@@ -3051,31 +3051,34 @@ fn kaito_bane_of_nightmares() -> CardDef {
     // "During your turn, as long as Kaito has one or more loyalty counters on him,
     // he's a 3/4 Ninja creature and has hexproof." Self-scoped (`It == Source`) L4
     // BecomeCreature, gated on the active turn being his controller's and loyalty > 0.
-    card.abilities = vec![Ability {
-        kind: AbilityKind::Static {
-            mods: vec![CEMod::BecomeCreature {
-                power: Expr::Num(3),
-                toughness: Expr::Num(4),
-                subtypes: vec!["Ninja".to_string()],
-                keywords: vec![Keyword::Hexproof],
-            }],
-            scope: Some(Filter(Expr::Eq(
-                Box::new(Expr::Ctx(Ctx::It)),
-                Box::new(Expr::Ctx(Ctx::Source)),
-            ))),
-            condition: Some(Expr::And(
-                Box::new(Expr::Eq(
-                    Box::new(Expr::ActivePlayer),
-                    Box::new(Expr::Ctx(Ctx::Controller)),
+    card.abilities = vec![
+        ir_planeswalker_etb_loyalty(4),
+        Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::BecomeCreature {
+                    power: Expr::Num(3),
+                    toughness: Expr::Num(4),
+                    subtypes: vec!["Ninja".to_string()],
+                    keywords: vec![Keyword::Hexproof],
+                }],
+                scope: Some(Filter(Expr::Eq(
+                    Box::new(Expr::Ctx(Ctx::It)),
+                    Box::new(Expr::Ctx(Ctx::Source)),
+                ))),
+                condition: Some(Expr::And(
+                    Box::new(Expr::Eq(
+                        Box::new(Expr::ActivePlayer),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )),
+                    Box::new(Expr::Gt(
+                        Box::new(Expr::LoyaltyOf(Box::new(Expr::Ctx(Ctx::Source)))),
+                        Box::new(Expr::Num(0)),
+                    )),
                 )),
-                Box::new(Expr::Gt(
-                    Box::new(Expr::LoyaltyOf(Box::new(Expr::Ctx(Ctx::Source)))),
-                    Box::new(Expr::Num(0)),
-                )),
-            )),
+            },
+            text: Some("During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof."),
         },
-        text: Some("During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof."),
-    }];
+    ];
     card
 }
 
@@ -3846,7 +3849,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
     use crate::ir::context::Ctx;
     use crate::ir::event_log::Window;
     use crate::ir::expr::{EventFilter, Expr, Filter, ZoneKindSel};
-    let back = CardDef::new(
+    let mut back = CardDef::new(
         "Tamiyo, Seasoned Scholar",
         CardKind::Planeswalker(PlaneswalkerData {
             mana_cost: String::new(),
@@ -3881,10 +3884,13 @@ fn tamiyo_inquisitive_student() -> CardDef {
         None,
         vec![], CardLayout::Normal, None,
         vec![],
-        vec![replacement_planeswalker_etb(2)],
+        vec![], // ETB loyalty is now an IR Replacement (below)
         vec![],
         vec![],
     );
+    // Tamiyo, Seasoned Scholar (back face) is the planeswalker; she enters with
+    // 2 loyalty counters (CR 306.5b) when the front face flips and returns her.
+    back.abilities = vec![ir_planeswalker_etb_loyalty(2)];
 
     let mut front_data = CreatureData::new("U", 0, 3);
     front_data.legendary = true;
@@ -4142,28 +4148,31 @@ fn karn_the_great_creator() -> CardDef {
         None,
         vec![Supertype::Legendary], CardLayout::Normal, None,
         vec![],  // no triggers
-        vec![replacement_planeswalker_etb(5)],
+        vec![], // ETB loyalty is now an IR Replacement (card.abilities below)
         vec![],  // no prohibitions
         vec![], // "can't activate" is now an AbilityKind::Restriction (card.abilities below)
     );
     // "Activated abilities of artifacts your opponents control can't be activated."
     // Asymmetric: subject = artifact ∧ controlled by an opponent of Karn's controller.
-    card.abilities = vec![Ability {
-        kind: AbilityKind::Restriction {
-            action: ActionKind::Activate,
-            subject: Filter(Expr::And(
-                Box::new(Expr::Contains(
-                    Box::new(Expr::TypeLit(CardType::Artifact)),
-                    Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+    card.abilities = vec![
+        ir_planeswalker_etb_loyalty(5),
+        Ability {
+            kind: AbilityKind::Restriction {
+                action: ActionKind::Activate,
+                subject: Filter(Expr::And(
+                    Box::new(Expr::Contains(
+                        Box::new(Expr::TypeLit(CardType::Artifact)),
+                        Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+                    )),
+                    Box::new(Expr::Not(Box::new(Expr::Eq(
+                        Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )))),
                 )),
-                Box::new(Expr::Not(Box::new(Expr::Eq(
-                    Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
-                    Box::new(Expr::Ctx(Ctx::Controller)),
-                )))),
-            )),
+            },
+            text: Some("Activated abilities of artifacts your opponents control can't be activated."),
         },
-        text: Some("Activated abilities of artifacts your opponents control can't be activated."),
-    }];
+    ];
     card
 }
 
@@ -5368,6 +5377,41 @@ fn etb_choice_replacement(
             active_zone: None, // self-entry replacement
         },
         text: Some(text),
+    }
+}
+
+/// "This permanent enters the battlefield with a number of loyalty counters on
+/// it equal to its printed loyalty number" (CR 306.5b) — the intrinsic
+/// planeswalker ETB replacement. A self-entry `Replacement` re-does the entry
+/// then places `base` loyalty counters (CR 306.5c: loyalty *is* that count).
+fn ir_planeswalker_etb_loyalty(base: i32) -> crate::ir::ability::Ability {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, ReplacementBody};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    Ability {
+        kind: AbilityKind::Replacement {
+            matches: EventPattern::EntersZone {
+                obj_filter: ir_self(),
+                zone_kind: ZoneKindSel::Battlefield,
+            },
+            condition: None,
+            body: ReplacementBody::Replace(Action::Sequence(vec![
+                Action::Move {
+                    what: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+                Action::PutCounters {
+                    on: Expr::Ctx(Ctx::Var("triggered_obj")),
+                    kind: crate::CounterType::Loyalty,
+                    n: Expr::Num(base as i64),
+                },
+            ])),
+            active_zone: None, // self-entry replacement
+        },
+        text: Some("This planeswalker enters with its starting loyalty counters."),
     }
 }
 

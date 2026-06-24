@@ -84,6 +84,11 @@ pub enum CounterType {
     /// +1/+1 counter. Stored in `BattlefieldState.counters` for legacy
     /// compatibility; read by `fold_game_state_into_def`.
     PlusOnePlusOne,
+    /// Loyalty counter (CR 306.5b/c): a planeswalker's loyalty *is* the number
+    /// of these on it. Zone-scoped like `PlusOnePlusOne`, so it routes to the
+    /// dedicated `BattlefieldState.loyalty` field rather than the cross-zone
+    /// `GameObject.counters` map (auto-resets each battlefield stint).
+    Loyalty,
 }
 
 
@@ -164,7 +169,7 @@ pub struct BattlefieldState {
     counters: i32,              // +1/+1 counters
     power_mod: i32,
     toughness_mod: i32,
-    loyalty: i32,               // planeswalker loyalty (0 for non-PWs)
+    loyalty: i32,               // # of loyalty counters = the PW's loyalty (CR 306.5c); 0 for non-PWs. Routed to by CounterType::Loyalty.
     pub pw_activated_this_turn: bool,
     pub attacking: bool,
     pub unblocked: bool,
@@ -512,13 +517,6 @@ pub(crate) fn tp_on_stack() -> TriggerPredicate {
     Arc::new(|src, state| {
         state.objects.get(&src).map_or(false, |o| matches!(o.zone(), Some(Zone::Stack)))
     })
-}
-
-/// Trigger predicate: always active regardless of zone.
-/// Used for intrinsic entry replacements (CR 614.1c/d: "As this permanent enters...")
-/// where the check fn itself guards on (id == source_id && to == Battlefield).
-pub(crate) fn tp_always() -> TriggerPredicate {
-    Arc::new(|_, _| true)
 }
 
 /// Predicate for LatentSpellMod: given (spell ObjId, caster, &SimState), returns

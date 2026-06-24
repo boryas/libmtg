@@ -156,14 +156,25 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::PutCounters { on, kind, n } => {
             let id = expect_obj(eval_expr(on, state, env));
             let n = expect_num(eval_expr(n, state, env));
-            // +1/+1 counters live on BattlefieldState.counters (legacy storage
-            // read by the fold into P/T). All other kinds use the generic map.
-            if matches!(kind, crate::CounterType::PlusOnePlusOne) {
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.counters += n as i32;
+            // +1/+1 and loyalty counters are zone-scoped and folded into a stat,
+            // so they live on BattlefieldState (counters / loyalty) rather than
+            // the cross-zone generic map. All other kinds use the generic map.
+            match kind {
+                crate::CounterType::PlusOnePlusOne => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.counters += n as i32;
+                    }
                 }
-            } else if let Some(obj) = state.objects.get_mut(&id) {
-                *obj.counters.entry(*kind).or_insert(0) += n as u32;
+                crate::CounterType::Loyalty => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.loyalty += n as i32;
+                    }
+                }
+                _ => {
+                    if let Some(obj) = state.objects.get_mut(&id) {
+                        *obj.counters.entry(*kind).or_insert(0) += n as u32;
+                    }
+                }
             }
             ExecResult::Ok
         }
@@ -171,13 +182,23 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::RemoveCounters { from, kind, n } => {
             let id = expect_obj(eval_expr(from, state, env));
             let n = expect_num(eval_expr(n, state, env));
-            if matches!(kind, crate::CounterType::PlusOnePlusOne) {
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.counters = (bf.counters - n as i32).max(0);
+            match kind {
+                crate::CounterType::PlusOnePlusOne => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.counters = (bf.counters - n as i32).max(0);
+                    }
                 }
-            } else if let Some(obj) = state.objects.get_mut(&id) {
-                if let Some(c) = obj.counters.get_mut(kind) {
-                    *c = c.saturating_sub(n as u32);
+                crate::CounterType::Loyalty => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.loyalty = (bf.loyalty - n as i32).max(0);
+                    }
+                }
+                _ => {
+                    if let Some(obj) = state.objects.get_mut(&id) {
+                        if let Some(c) = obj.counters.get_mut(kind) {
+                            *c = c.saturating_sub(n as u32);
+                        }
+                    }
                 }
             }
             ExecResult::Ok

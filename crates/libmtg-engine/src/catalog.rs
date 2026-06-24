@@ -1318,44 +1318,6 @@ impl CardDef {
 
 // ── ETB replacement / trigger helpers ────────────────────────────────────────
 
-/// Build a `ReplacementDef` for self-ETB replacement effects.
-///
-/// Eliminates the repeated boilerplate (extract id, `current_zone_id`, `fire_event`) present in
-/// every ETB replacement. `extra` is called **after** the zone-change event fires, so
-/// `state.permanent_bf_mut(id)` is live by the time it runs.
-///
-/// Signature: `extra(source_id, id, controller, state, t)`
-///
-/// Now used only by `replacement_planeswalker_etb` (a planeswalker enters with
-/// its starting loyalty). The card-specific ETB replacements have all moved to
-/// IR `AbilityKind::Replacement`: cost-context ETBs (Engineered Explosives,
-/// Murktide) read the cast via `Ctx::ThisCast`, and "as ~ enters, choose ..."
-/// ETBs (Painter's Servant, Cavern of Souls, Disruptor Flute) use
-/// `Action::RecordEtbChoice`.
-pub(crate) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
-where
-    F: Fn(ObjId, ObjId, PlayerId, &mut SimState, u8) + Send + Sync + 'static,
-{
-    let extra = std::sync::Arc::new(extra);
-    ReplacementDef {
-        check: std::sync::Arc::new(etb_self_check),
-        make_effect: std::sync::Arc::new(move |source_id, controller: PlayerId| {
-            let extra = std::sync::Arc::clone(&extra);
-            Effect(std::sync::Arc::new(move |state, t, targets| {
-                let Some(&id) = targets.first() else { return };
-                let from = current_zone_id(id, state);
-                fire_event(
-                    GameEvent::ZoneChange { id, actor: controller, from, to: ZoneId::Battlefield, controller },
-                    state, t, controller,
-                );
-                extra(source_id, id, controller, state, t);
-            }))
-        }),
-        // CR 614.1c/d: intrinsic entry replacements are always active.
-        active_when: tp_always(),
-    }
-}
-
 /// Build a `TriggerDef` for simple self-ETB triggers.
 ///
 /// Fires when this permanent enters the battlefield under its controller's control.
@@ -1387,13 +1349,6 @@ where
         }),
         active_when: tp_on_battlefield(),
     }
-}
-
-/// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
-pub(crate) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
-    etb_self_replacement(move |_, id, _, state, _| {
-        if let Some(bf) = state.permanent_bf_mut(id) { bf.loyalty = base_loyalty; }
-    })
 }
 
 // ── Card type enum ─────────────────────────────────────────────────────────────
@@ -1880,24 +1835,6 @@ pub(crate) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _c
     } else {
         None
     }
-}
-
-// ── Shared ETB-self check ─────────────────────────────────────────────────────
-
-/// Matches any ZoneChange where this permanent is the object entering the battlefield.
-pub(crate) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
-    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
-        if *id == source_id {
-            return Some(vec![*id]);
-        }
-    }
-    None
-}
-
-/// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
-/// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
-pub(crate) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
-    state.objects.get(&id).and_then(|c| c.zone()).map(|z| card_zone_to_id(&z)).unwrap_or(ZoneId::Hand)
 }
 
 #[cfg(test)]
