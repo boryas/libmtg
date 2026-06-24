@@ -3917,9 +3917,33 @@ fn tamiyo_inquisitive_student() -> CardDef {
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
+                // −7: draw cards equal to half your library, rounded up; you get
+                // an emblem with "You have no maximum hand size."
                 AbilityDef {
                     costs: ir_loyalty(-7),
-                    ability_factory: Some(Arc::new(build_tamiyo_minus_seven)),
+                    ir_body: Some(Action::Sequence(vec![
+                        Action::Draw {
+                            who: IrWho::You,
+                            // ceil(library / 2) = (library + 1) / 2 (floor div).
+                            n: Expr::Div(
+                                Box::new(Expr::Add(
+                                    Box::new(Expr::LibrarySize(Box::new(Expr::Ctx(Ctx::Controller)))),
+                                    Box::new(Expr::Num(1)),
+                                )),
+                                Box::new(Expr::Num(2)),
+                            ),
+                        },
+                        Action::CreateEmblem {
+                            abilities: vec![Ability {
+                                kind: AbilityKind::Static {
+                                    mods: vec![crate::ir::ce::CEMod::NoMaxHandSize],
+                                    scope: None,
+                                    condition: None,
+                                },
+                                text: Some("You have no maximum hand size."),
+                            }],
+                        },
+                    ])),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },

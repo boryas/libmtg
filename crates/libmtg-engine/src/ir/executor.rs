@@ -1632,6 +1632,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             let p = expect_player(eval_expr(e, state, env));
             Value::Num(state.hand_of(p).count() as i64)
         }
+        Expr::LibrarySize(e) => {
+            let p = expect_player(eval_expr(e, state, env));
+            Value::Num(state.library_size(p) as i64)
+        }
         Expr::Opponents(e) => {
             let p = expect_player(eval_expr(e, state, env));
             Value::PlayerSet(vec![p.opp()])
@@ -1688,6 +1692,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         Expr::Sub(a, b) => Value::Num(
             expect_num(eval_expr(a, state, env)) - expect_num(eval_expr(b, state, env)),
         ),
+        Expr::Div(a, b) => Value::Num({
+            let denom = expect_num(eval_expr(b, state, env));
+            if denom == 0 { 0 } else { expect_num(eval_expr(a, state, env)) / denom }
+        }),
         Expr::Mul(a, b) => Value::Num(
             expect_num(eval_expr(a, state, env)) * expect_num(eval_expr(b, state, env)),
         ),
@@ -2674,6 +2682,10 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::HandSize);
             walk_reads(e, out);
         }
+        Expr::LibrarySize(e) => {
+            out.push(Axis::Zone);
+            walk_reads(e, out);
+        }
         Expr::Opponents(e) => walk_reads(e, out),
 
         // ── zone walkers ──────────────────────────────────────────────────
@@ -2690,7 +2702,7 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
         Expr::And(a, b) | Expr::Or(a, b) | Expr::Eq(a, b) | Expr::Lt(a, b)
         | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b)
         | Expr::Contains(a, b) | Expr::Add(a, b) | Expr::Sub(a, b)
-        | Expr::Mul(a, b) | Expr::Min(a, b) | Expr::Max(a, b) => {
+        | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Min(a, b) | Expr::Max(a, b) => {
             walk_reads(a, out);
             walk_reads(b, out);
         }
@@ -2787,6 +2799,7 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
 
         CEMod::AllowLoss(_)
         | CEMod::MaxHandSize(_)
+        | CEMod::NoMaxHandSize
         | CEMod::ExtraLandDrops(_)
         | CEMod::SkipStep(_) => vec![Axis::RuleMod],
 

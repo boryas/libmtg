@@ -76,6 +76,7 @@ pub enum Expr {
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64
     HandSize(Box<Expr>),         // i64
+    LibrarySize(Box<Expr>),      // i64
     Opponents(Box<Expr>),        // Vec<PlayerId>
 
     // ── zone projections ─────────────────────────────────────────────────
@@ -96,6 +97,8 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
+    /// Integer (floor) division; division by zero yields 0.
+    Div(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Max(Box<Expr>, Box<Expr>),

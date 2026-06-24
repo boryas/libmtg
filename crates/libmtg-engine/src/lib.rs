@@ -1562,8 +1562,6 @@ pub struct PlayerState {
     draws_this_turn: u8,
     /// Total life lost this turn; reset each Untap. Used for Kaito 0 ability.
     life_lost_this_turn: i32,
-    /// Tamiyo −7 emblem: "You have no maximum hand size." (CR 114)
-    no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     pub library_order: std::collections::VecDeque<ObjId>,
     /// How many top cards the controller legitimately KNOWS (front-down), since the
@@ -1589,7 +1587,6 @@ impl PlayerState {
             pool: ManaPool::default(),
             draws_this_turn: 0,
             life_lost_this_turn: 0,
-            no_max_hand_size: false,
             library_order: std::collections::VecDeque::new(),
             known_top_len: 0,
             strategy: None,
@@ -1841,6 +1838,20 @@ impl SimState {
 
     pub fn library_size(&self, who: PlayerId) -> usize {
         self.player(who).library_order.len()
+    }
+
+    /// True if `who` controls a source granting "no maximum hand size" (CR 402.2 /
+    /// the Tamiyo −7 emblem). Derived on demand from emblems carrying a
+    /// `CEMod::NoMaxHandSize` static, rather than a sticky player flag.
+    pub(crate) fn has_no_max_hand_size(&self, who: PlayerId) -> bool {
+        self.emblems.iter().any(|e| {
+            e.controller == who
+                && e.abilities.iter().any(|a| {
+                    matches!(&a.kind,
+                        crate::ir::ability::AbilityKind::Static { mods, .. }
+                            if mods.iter().any(|m| matches!(m, crate::ir::ce::CEMod::NoMaxHandSize)))
+                })
+        })
     }
 
     /// Mutate zone field only — no triggers, no logging. Use `change_zone` for that.
@@ -2427,7 +2438,7 @@ fn sim_play_land(
 
 /// Discard down to 7 at end of turn.
 fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
-    if state.player(who).no_max_hand_size { return; }
+    if state.has_no_max_hand_size(who) { return; }
     let hand = state.hand_size(who);
     if hand > 7 {
         let n = hand - 7;

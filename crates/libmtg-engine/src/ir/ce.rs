@@ -89,6 +89,10 @@ pub enum CEMod {
     // ── rule modifiers (game-level) ──────────────────────────────────────
     AllowLoss(Expr),        // Platinum Angel: "you can't lose" when true
     MaxHandSize(Expr),
+    /// "You have no maximum hand size" (e.g. Tamiyo −7 emblem). A player-level
+    /// rule override carried as an emblem's static ability and consulted by the
+    /// cleanup discard check; produces no object-CE.
+    NoMaxHandSize,
     ExtraLandDrops(Expr),
     SkipStep(crate::StepKind),
 

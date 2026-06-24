@@ -2591,6 +2591,30 @@
     }
 
     #[test]
+    fn test_tamiyo_minus_seven_draws_half_library_and_grants_no_max_hand() {
+        // Tamiyo −7: draw ⌈library/2⌉; emblem "You have no maximum hand size."
+        let mut state = make_state();
+        for i in 0..7 {
+            add_library_card(&mut state, PlayerId::Us, &format!("Lib{i}"));
+        }
+        let hand_before = state.hand_size(PlayerId::Us);
+        assert!(!state.has_no_max_hand_size(PlayerId::Us), "no emblem yet");
+
+        let tamiyo_def = catalog_card("Tamiyo, Inquisitive Student");
+        let back = tamiyo_def.back.as_deref().expect("Tamiyo has a back face");
+        let CardKind::Planeswalker(pw) = &back.kind else { panic!("back is a planeswalker") };
+        let minus_seven = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(-7))
+            .expect("Tamiyo has a −7 ability");
+        build_ability_effect(minus_seven, PlayerId::Us, ObjId::UNSET).call(&mut state, 1, &[]);
+
+        // ⌈7/2⌉ = 4 drawn.
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before + 4, "draw half library, rounded up");
+        assert_eq!(state.library_size(PlayerId::Us), 3, "7 − 4 = 3 left");
+        assert!(state.has_no_max_hand_size(PlayerId::Us),
+            "emblem grants no maximum hand size");
+    }
+
+    #[test]
     fn test_sba_legend_rule_second_copy_dies() {
         let mut state = make_state();
         let _first = add_default_perm(&mut state, PlayerId::Us, "Bowmasters");

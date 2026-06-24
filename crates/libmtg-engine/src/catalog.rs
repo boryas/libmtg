@@ -1653,21 +1653,6 @@ pub(crate) fn build_kaito_zero(who: PlayerId, source_id: ObjId) -> Effect {
     }))
 }
 
-/// Tamiyo −7: draw cards equal to half library (rounded up).
-/// You get an emblem with "You have no maximum hand size."
-pub(crate) fn build_tamiyo_minus_seven(who: PlayerId, source_id: ObjId) -> Effect {
-    Effect(std::sync::Arc::new(move |state, t, _targets| {
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        let lib_size = state.library_size(who);
-        let draw_count = (lib_size + 1) / 2; // rounded up
-        eff_draw(who, draw_count).call(state, t, &[]);
-        state.player_mut(who).no_max_hand_size = true;
-        state.log(t, who, format!(
-            "{} −7: draw {} (half library), emblem: no max hand size",
-            source_name, draw_count
-        ));
-    }))
-}
 
 /// Build an `Effect` closure for an activated ability at push time.
 pub(crate) fn build_ability_effect(
