@@ -89,6 +89,10 @@ pub enum CounterType {
     /// dedicated `BattlefieldState.loyalty` field rather than the cross-zone
     /// `GameObject.counters` map (auto-resets each battlefield stint).
     Loyalty,
+    /// Stun counter (CR 122.1d): "if a permanent with a stun counter would
+    /// become untapped, instead remove a stun counter." Zone-scoped, routes to
+    /// `BattlefieldState.stun_counters` (e.g. Kaito −2).
+    Stun,
 }
 
 

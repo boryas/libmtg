@@ -170,6 +170,11 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                         bf.loyalty += n as i32;
                     }
                 }
+                crate::CounterType::Stun => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.stun_counters += n as u32;
+                    }
+                }
                 _ => {
                     if let Some(obj) = state.objects.get_mut(&id) {
                         *obj.counters.entry(*kind).or_insert(0) += n as u32;
@@ -191,6 +196,11 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 crate::CounterType::Loyalty => {
                     if let Some(bf) = state.permanent_bf_mut(id) {
                         bf.loyalty = (bf.loyalty - n as i32).max(0);
+                    }
+                }
+                crate::CounterType::Stun => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.stun_counters = bf.stun_counters.saturating_sub(n as u32);
                     }
                 }
                 _ => {
@@ -1058,7 +1068,23 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::AddMana { who, count, spec } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(count, state, env)) as usize;
-            let mana_spec = build_mana_spec_string(spec, n, env.chosen_color);
+            // `AnyOneColor`: prefer the activation-time hint (mana-ability dispatch);
+            // otherwise — an effect-body use like Tamiyo −3's green-card rider — ask
+            // the producing player to choose the color (CR 106.1b).
+            let color = env.chosen_color.or_else(|| {
+                if matches!(spec, crate::ir::action::ManaSpec::AnyOneColor) {
+                    let src = env.source.unwrap_or(ObjId::UNSET);
+                    match state.with_strategy(who, |s, st| {
+                        s.resolve_choice(src, &crate::ChoiceRequest::Color, st)
+                    }) {
+                        crate::ChoiceResult::Color(c) => Some(c),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            });
+            let mana_spec = build_mana_spec_string(spec, n, color);
             crate::eff_mana(who, mana_spec).call(state, t, &[]);
             ExecResult::Ok
         }

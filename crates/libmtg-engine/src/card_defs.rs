@@ -3028,7 +3028,14 @@ fn kaito_bane_of_nightmares() -> CardDef {
                 // −2: Tap target creature + 2 stun counters.
                 AbilityDef {
                     costs: ir_loyalty(-2),
-                    ability_factory: Some(Arc::new(build_kaito_minus_two)),
+                    ir_body: Some(crate::ir::action::Action::Sequence(vec![
+                        crate::ir::action::Action::Tap { target: Expr::Ctx(Ctx::Var("target")) },
+                        crate::ir::action::Action::PutCounters {
+                            on: Expr::Ctx(Ctx::Var("target")),
+                            kind: crate::CounterType::Stun,
+                            n: Expr::Num(2),
+                        },
+                    ])),
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Opp,
                         zone: ZoneId::Battlefield,
@@ -3861,9 +3868,30 @@ fn tamiyo_inquisitive_student() -> CardDef {
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
+                // −3: return target instant/sorcery from your graveyard to hand;
+                // if it's green, add one mana of any color (CR 106.1b choice).
                 AbilityDef {
                     costs: ir_loyalty(-3),
-                    ability_factory: Some(Arc::new(build_tamiyo_minus_three)),
+                    ir_body: Some(Action::Sequence(vec![
+                        Action::Move {
+                            what: Expr::Ctx(Ctx::Var("target")),
+                            to: ZoneKindSel::Hand,
+                            to_owner: None,
+                            bind_as: None,
+                        },
+                        Action::IfThen {
+                            cond: Expr::Contains(
+                                Box::new(Expr::ColorLit(crate::Color::Green)),
+                                Box::new(Expr::Colors(Box::new(Expr::Ctx(Ctx::Var("target"))))),
+                            ),
+                            then: Box::new(Action::AddMana {
+                                who: IrWho::You,
+                                count: Expr::Num(1),
+                                spec: crate::ir::action::ManaSpec::AnyOneColor,
+                            }),
+                            else_: None,
+                        },
+                    ])),
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Actor,
                         zone: ZoneId::Graveyard,

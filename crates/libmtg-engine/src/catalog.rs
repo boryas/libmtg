@@ -1630,51 +1630,6 @@ pub(crate) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
     }))
 }
 
-/// Tamiyo −3: return target instant or sorcery from your graveyard to your hand.
-/// If it's a green card, add one mana of any color.
-pub(crate) fn build_tamiyo_minus_three(who: PlayerId, source_id: ObjId) -> Effect {
-    Effect(std::sync::Arc::new(move |state, t, targets| {
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        let Some(&target_id) = targets.first() else { return; };
-        // Check if the card is green before moving it.
-        let is_green = state.objects.get(&target_id)
-            .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
-            .map_or(false, |d| d.colors.contains(&Color::Green));
-        let card_name = state.objects.get(&target_id)
-            .map(|o| o.catalog_key.clone())
-            .unwrap_or_default();
-        change_zone(target_id, ZoneId::Hand, state, t, who);
-        state.log(t, who, format!("{} −3: return {} to hand", source_name, card_name));
-        if is_green {
-            // "Add one mana of any color" — use strategy color choice.
-            let ChoiceResult::Color(chosen) =
-                state.with_strategy(who, |s, st| s.resolve_choice(source_id, &ChoiceRequest::Color, st)) else { return };
-            let spec = match chosen {
-                Color::White => "W",
-                Color::Blue  => "U",
-                Color::Black => "B",
-                Color::Red   => "R",
-                Color::Green => "G",
-            };
-            fire_event(GameEvent::ManaProduced { who, spec: spec.into() }, state, t, who);
-            state.log(t, who, format!("  (green card → add {{{}}})", spec));
-        }
-    }))
-}
-
-/// Kaito −2: tap target creature, put two stun counters on it.
-pub(crate) fn build_kaito_minus_two(who: PlayerId, source_id: ObjId) -> Effect {
-    Effect(std::sync::Arc::new(move |state, t, targets| {
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        let Some(&target_id) = targets.first() else { return; };
-        let target_name = state.permanent_name(target_id).unwrap_or_default();
-        if let Some(bf) = state.permanent_bf_mut(target_id) {
-            bf.tapped = true;
-            bf.stun_counters += 2;
-        }
-        state.log(t, who, format!("{} −2: tap {} + 2 stun counters", source_name, target_name));
-    }))
-}
 
 /// Kaito 0: surveil 2, then draw a card for each opponent who lost life this turn.
 /// In a 1v1 game, this draws 0 or 1 card.

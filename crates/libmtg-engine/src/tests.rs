@@ -2517,6 +2517,51 @@
     }
 
     #[test]
+    fn test_kaito_minus_two_taps_and_stuns_target() {
+        // Kaito −2: tap target creature, put two stun counters on it. Now an IR
+        // body — Tap + PutCounters(Stun, 2) — instead of a factory closure.
+        let mut state = make_state();
+        let kaito_def = catalog_card("Kaito, Bane of Nightmares");
+        let CardKind::Planeswalker(pw) = &kaito_def.kind else { panic!("Kaito is a planeswalker") };
+        let minus_two = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(-2))
+            .expect("Kaito has a −2 ability");
+        state.catalog.insert("Goblin".into(), creature("Goblin", 2, 2));
+        let target = add_default_perm(&mut state, PlayerId::Opp, "Goblin");
+        let eff = build_ability_effect(minus_two, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[target]);
+        let bf = state.permanent_bf(target).expect("target on battlefield");
+        assert!(bf.tapped, "Kaito −2 taps the target");
+        assert_eq!(bf.stun_counters, 2, "Kaito −2 places two stun counters");
+    }
+
+    #[test]
+    fn test_tamiyo_minus_three_returns_card_and_ramps_on_green() {
+        // Tamiyo −3: return target instant/sorcery from your GY to hand; if it's
+        // green, add one mana of any color. IR body: Move + IfThen(green, AddMana).
+        let mut state = make_state();
+        let tamiyo_def = catalog_card("Tamiyo, Inquisitive Student");
+        let back = tamiyo_def.back.as_deref().expect("Tamiyo has a back face");
+        let CardKind::Planeswalker(pw) = &back.kind else { panic!("back is a planeswalker") };
+        let minus_three = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(-3))
+            .expect("Tamiyo has a −3 ability");
+        let green_sorc = CardDef::new(
+            "Green Sorcery",
+            CardKind::Sorcery(SpellData { mana_cost: "G".to_string(), ..Default::default() }),
+            vec![Color::Green], None, vec![], CardLayout::Normal, None,
+            vec![], vec![], vec![], vec![],
+        );
+        state.catalog.insert("Green Sorcery".into(), green_sorc);
+        let card = add_graveyard_card(&mut state, PlayerId::Us, "Green Sorcery");
+        let pool_before = state.player(PlayerId::Us).pool.total;
+        let eff = build_ability_effect(minus_three, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[card]);
+        assert!(matches!(state.objects[&card].zone(), Some(Zone::Hand { .. })),
+            "card returned to hand");
+        assert_eq!(state.player(PlayerId::Us).pool.total, pool_before + 1,
+            "green card → one mana added (any color)");
+    }
+
+    #[test]
     fn test_sba_legend_rule_second_copy_dies() {
         let mut state = make_state();
         let _first = add_default_perm(&mut state, PlayerId::Us, "Bowmasters");
