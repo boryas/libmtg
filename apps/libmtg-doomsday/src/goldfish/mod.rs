@@ -443,6 +443,7 @@ pub fn run_goldfish_fixed_hand(
     hand: &[String],
     cutoff: u32,
     games: u32,
+    on_play: bool,
 ) -> f64 {
     let catalog = build_catalog();
     let opp_deck: Vec<(String, i32, String)> =
@@ -462,7 +463,7 @@ pub fn run_goldfish_fixed_hand(
             evaluate_card: dd_goldfish_evaluator(),
             objective: Box::new(GoldfishObjective::default()),
             max_turns: cutoff_u8,
-            on_play: Some(true),
+            on_play: Some(on_play),
             fixed_us_hand: Some(hand.to_vec()),
         };
         let state = run_game(scenario, &mut rng);
@@ -471,6 +472,111 @@ pub fn run_goldfish_fixed_hand(
         }
     }
     wins as f64 / games as f64
+}
+
+/// Estimate a hand's E[time-to-Doomsday], censored at `horizon` (never-cast counts as `horizon`).
+/// LOWER is better. Runs each game cast-ASAP to `horizon` turns and averages the cast turn (or
+/// `horizon` if it never casts). This is the label for the E[TTD] mulligan objective — unlike the
+/// binary cast-by-T3, it has no cliff (a reliable T4 cast counts) and rewards reliability.
+pub fn run_goldfish_fixed_hand_ttd(
+    deck: &[(String, i32, String)],
+    hand: &[String],
+    horizon: u32,
+    games: u32,
+    on_play: bool,
+) -> f64 {
+    let catalog = build_catalog();
+    let opp_deck: Vec<(String, i32, String)> =
+        vec![("Island".to_string(), 60, "main".to_string())];
+    let horizon_u8 = (horizon.min(u8::MAX as u32) as u8).max(1);
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let mut sum_ttd = 0.0f64;
+    for _ in 0..games {
+        let scenario = Scenario {
+            us_label: "doomsday".to_string(),
+            opp_label: "goldfish".to_string(),
+            catalog: catalog.clone(),
+            us_deck: deck.to_vec(),
+            opp_deck: opp_deck.clone(),
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(horizon, MullMode::Keep7)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective::default()),
+            max_turns: horizon_u8,
+            on_play: Some(on_play),
+            fixed_us_hand: Some(hand.to_vec()),
+        };
+        let state = run_game(scenario, &mut rng);
+        sum_ttd += if state.terminal && state.current_turn <= horizon_u8 {
+            state.current_turn as f64
+        } else {
+            horizon_u8 as f64
+        };
+    }
+    sum_ttd / games as f64
+}
+
+/// Replay a fixed hand and return play-by-play traces for the first `n_win` winning
+/// and `n_loss` losing games (per-turn intent from the decision log + the engine's
+/// actual plays from `state.log`), to diagnose why a hand over/under-performs.
+pub fn run_goldfish_fixed_hand_trace(
+    deck: &[(String, i32, String)],
+    hand: &[String],
+    cutoff: u32,
+    n_win: u32,
+    n_loss: u32,
+    on_play: bool,
+) -> Vec<String> {
+    let catalog = build_catalog();
+    let opp_deck: Vec<(String, i32, String)> =
+        vec![("Island".to_string(), 60, "main".to_string())];
+    let cutoff_u8 = (cutoff.min(u8::MAX as u32) as u8).max(1);
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let mut out = Vec::new();
+    let (mut got_w, mut got_l) = (0u32, 0u32);
+    let mut games = 0u32;
+    while (got_w < n_win || got_l < n_loss) && games < 200_000 {
+        games += 1;
+        let scenario = Scenario {
+            us_label: "doomsday".to_string(),
+            opp_label: "goldfish".to_string(),
+            catalog: catalog.clone(),
+            us_deck: deck.to_vec(),
+            opp_deck: opp_deck.clone(),
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, MullMode::Keep7)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective::default()),
+            max_turns: cutoff_u8,
+            on_play: Some(on_play),
+            fixed_us_hand: Some(hand.to_vec()),
+        };
+        let state = run_game(scenario, &mut rng);
+        let win = state.terminal && state.current_turn <= cutoff_u8;
+        let want = if win { got_w < n_win } else { got_l < n_loss };
+        if !want {
+            continue;
+        }
+        if win {
+            got_w += 1;
+            out.push(format!("════ WIN #{got_w} — cast T{} ════", state.current_turn));
+        } else {
+            got_l += 1;
+            let o = if state.terminal {
+                format!("cast T{} (past cutoff)", state.current_turn)
+            } else {
+                "never cast".to_string()
+            };
+            out.push(format!("════ LOSS #{got_l} — {o} ════"));
+        }
+        for l in state.decision_log.iter().filter(|l| l.starts_with("KEPT") || l.starts_with('T')) {
+            out.push(format!("  intent: {l}"));
+        }
+        for l in &state.log {
+            out.push(format!("  play:   {l}"));
+        }
+    }
+    out
 }
 
 /// Debug A/B: run `games` SEEDED cast-ASAP games in compare mode and return a log

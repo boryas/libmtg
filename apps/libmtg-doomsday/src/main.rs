@@ -75,6 +75,14 @@ struct Args {
     /// cards `|`-separated), replay each `--games` times on the play, print `rate<TAB>hand`.
     #[arg(long)]
     sim_hands: Option<String>,
+    /// With --sim-hands: output E[time-to-Doomsday] (censored at --cutoff as the horizon, e.g.
+    /// --cutoff 10) instead of P(cast by cutoff). Lower is better; never-cast counts as the horizon.
+    #[arg(long)]
+    ttd: bool,
+    /// Trace one fixed opening 7 (cards `|`-separated): print play-by-play for a few
+    /// winning and losing games, to see how the hand actually plays out.
+    #[arg(long)]
+    trace_hand: Option<String>,
     /// A/B debug: print, for a few SEEDED games, every decision where the principled
     /// policy disagrees with the reference value-table heuristic.
     #[arg(long)]
@@ -104,8 +112,17 @@ fn main() -> ExitCode {
 
     // Surface cards the engine can't simulate (dropped / inert) before running.
     // Skip for machine-readable stdout modes (--dump-keep-data, --sim-hands).
-    if !args.dump_keep_data && args.sim_hands.is_none() {
+    if !args.dump_keep_data && args.sim_hands.is_none() && args.trace_hand.is_none() {
         warn_unimplemented_cards(&deck, "deck", &build_catalog());
+    }
+
+    if let Some(spec) = &args.trace_hand {
+        let hand: Vec<String> = spec.split('|').map(|s| s.trim().to_string()).collect();
+        eprintln!("Tracing hand ({} cards), cutoff T{}…", hand.len(), args.cutoff);
+        for line in libmtg_doomsday::run_goldfish_fixed_hand_trace(&deck, &hand, args.cutoff, 2, 2, !args.draw) {
+            println!("{line}");
+        }
+        return ExitCode::SUCCESS;
     }
 
     if std::env::var("AUDIT_DET").is_ok() {
@@ -125,12 +142,18 @@ fn main() -> ExitCode {
     if let Some(path) = &args.sim_hands {
         let text = std::fs::read_to_string(path).expect("read --sim-hands file");
         let hands: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        eprintln!("Per-hand P(cast): {} hands x {} games (on the play, cutoff T{})…",
-            hands.len(), args.games, args.cutoff);
+        let on_play = !args.draw;
+        let metric = if args.ttd { "E[TTD]" } else { "P(cast)" };
+        eprintln!("Per-hand {}: {} hands x {} games (on the {}, horizon/cutoff T{})…",
+            metric, hands.len(), args.games, if on_play { "play" } else { "draw" }, args.cutoff);
         for line in hands {
             let hand: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
-            let rate = libmtg_doomsday::run_goldfish_fixed_hand(&deck, &hand, args.cutoff, args.games);
-            println!("{rate:.4}\t{line}");
+            let v = if args.ttd {
+                libmtg_doomsday::run_goldfish_fixed_hand_ttd(&deck, &hand, args.cutoff, args.games, on_play)
+            } else {
+                libmtg_doomsday::run_goldfish_fixed_hand(&deck, &hand, args.cutoff, args.games, on_play)
+            };
+            println!("{v:.4}\t{line}");
         }
         return ExitCode::SUCCESS;
     }
