@@ -744,6 +744,21 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::CreateEmblem { abilities } => {
+            // "You get an emblem with …" (CR 114). Register a command-zone emblem
+            // controlled by the resolving player; recompute gathers its static
+            // abilities each cycle and it never expires.
+            let id = state.alloc_id();
+            let timestamp = state.next_ci_timestamp();
+            state.emblems.push(crate::EmblemInstance {
+                id,
+                controller: actor,
+                abilities: abilities.clone(),
+                timestamp,
+            });
+            ExecResult::Ok
+        }
+
         Action::RecordEtbChoice { kind } => {
             // "As ~ enters, choose ..." (CR 614.12): ask the source's controller
             // and record the result on the source permanent's `etb_choice`, read

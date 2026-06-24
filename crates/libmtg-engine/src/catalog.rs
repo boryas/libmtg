@@ -1669,35 +1669,6 @@ pub(crate) fn build_tamiyo_minus_seven(who: PlayerId, source_id: ObjId) -> Effec
     }))
 }
 
-/// Kaito +1: you get an emblem with "Ninjas you control get +1/+1."
-/// Modeled as a permanent L7 CE (Expiry::Never).
-pub(crate) fn build_kaito_plus_one(who: PlayerId, source_id: ObjId) -> Effect {
-    Effect(std::sync::Arc::new(move |state, t, _targets| {
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        let ts = state.next_ci_timestamp();
-        state.continuous_instances.push(ContinuousInstance {
-            source_id,
-            controller: who,
-            layer: ContinuousLayer::L7PowerToughness,
-            reads: vec![],
-            writes: vec![CeWrites::PowerToughness],
-            timestamp: ts,
-            filter: std::sync::Arc::new(move |id, _controller, state| {
-                let obj = match state.objects.get(&id) { Some(o) => o, None => return false };
-                if obj.controller != who { return false; }
-                state.def_of(id).map_or(false, |d| d.has_subtype("Ninja"))
-            }),
-            modifier: std::sync::Arc::new(|def, _state| {
-                if let CardKind::Creature(c) = &mut def.kind {
-                    c.adjust_pt(1, 1);
-                }
-            }),
-            expiry: Expiry::Never,
-        });
-        state.log(t, who, format!("{} +1: emblem — Ninjas you control get +1/+1", source_name));
-    }))
-}
-
 /// Build an `Effect` closure for an activated ability at push time.
 pub(crate) fn build_ability_effect(
     ability: &AbilityDef,

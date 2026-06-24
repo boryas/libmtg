@@ -2562,6 +2562,35 @@
     }
 
     #[test]
+    fn test_kaito_plus_one_emblem_pumps_only_your_ninjas() {
+        // Kaito +1: "you get an emblem with 'Ninjas you control get +1/+1.'"
+        // Now a real emblem (CR 114) carrying an IR Static, gathered each recompute.
+        let mut state = make_state();
+        let mut ninja = creature("Ninja", 2, 2);
+        if let CardKind::Creature(c) = &mut ninja.kind {
+            c.creature_subtypes = vec!["Ninja".to_string()];
+        }
+        state.catalog.insert("Ninja".into(), ninja);
+        let mine = add_default_perm(&mut state, PlayerId::Us, "Ninja");
+        let theirs = add_default_perm(&mut state, PlayerId::Opp, "Ninja");
+
+        let kaito_def = catalog_card("Kaito, Bane of Nightmares");
+        let CardKind::Planeswalker(pw) = &kaito_def.kind else { panic!("Kaito is a planeswalker") };
+        let plus_one = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(1))
+            .expect("Kaito has a +1 ability");
+        build_ability_effect(plus_one, PlayerId::Us, ObjId::UNSET).call(&mut state, 1, &[]);
+        recompute(&mut state);
+
+        let pt = |st: &SimState, id| st.def_of(id).and_then(|d| match &d.kind {
+            CardKind::Creature(c) => Some((c.power(), c.toughness())),
+            _ => None,
+        });
+        assert_eq!(pt(&state, mine), Some((3, 3)), "your Ninja gets +1/+1 from the emblem");
+        assert_eq!(pt(&state, theirs), Some((2, 2)), "opponent's Ninja is unaffected");
+        assert_eq!(state.emblems.len(), 1, "one emblem created");
+    }
+
+    #[test]
     fn test_sba_legend_rule_second_copy_dies() {
         let mut state = make_state();
         let _first = add_default_perm(&mut state, PlayerId::Us, "Bowmasters");

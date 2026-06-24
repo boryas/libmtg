@@ -3011,10 +3011,27 @@ fn kaito_bane_of_nightmares() -> CardDef {
             abilities: vec![
                 // Ninjutsu from hand (not a loyalty ability).
                 ninjutsu_ability("1UB"),
-                // +1: emblem "Ninjas you control get +1/+1."
+                // +1: "You get an emblem with 'Ninjas you control get +1/+1.'"
                 AbilityDef {
                     costs: ir_loyalty(1),
-                    ability_factory: Some(Arc::new(build_kaito_plus_one)),
+                    ir_body: Some(crate::ir::action::Action::CreateEmblem {
+                        abilities: vec![Ability {
+                            kind: AbilityKind::Static {
+                                mods: vec![CEMod::PumpPT(Expr::Num(1), Expr::Num(1))],
+                                // "Ninjas you control": Ninja ∧ controlled by the
+                                // emblem's controller (Ctx::Controller).
+                                scope: Some(ir_and(
+                                    ir_subtype("Ninja"),
+                                    Filter(Expr::Eq(
+                                        Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                                        Box::new(Expr::Ctx(Ctx::Controller)),
+                                    )),
+                                )),
+                                condition: None,
+                            },
+                            text: Some("Ninjas you control get +1/+1."),
+                        }],
+                    }),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },

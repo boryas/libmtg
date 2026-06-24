@@ -714,6 +714,21 @@ pub struct ContinuousInstance {
     pub(crate) expiry: Expiry,
 }
 
+/// An emblem (CR 114): a command-zone marker with one or more static abilities,
+/// controlled by the player whose effect created it, with no other characteristics.
+/// Held in a side-list (like `continuous_instances`) rather than `state.objects`,
+/// since it has no card type. Its abilities are gathered each `recompute`; it
+/// never expires (CR 114.5 — an emblem can't leave the command zone).
+pub struct EmblemInstance {
+    /// Identity (for `Ctx::Source` / logging); not present in `state.objects`.
+    pub(crate) id: ObjId,
+    pub(crate) controller: PlayerId,
+    /// The emblem's static abilities (CR 114.5 — the emblem is their source).
+    pub(crate) abilities: Vec<crate::ir::ability::Ability>,
+    /// CR 613.6 timestamp, assigned at creation.
+    pub(crate) timestamp: u32,
+}
+
 
 // ── Recompute ─────────────────────────────────────────────────────────────────
 
@@ -876,6 +891,17 @@ pub(crate) fn recompute(state: &mut SimState) {
         for ability in &card_def.abilities {
             for mut ci in crate::ir::executor::ir_static_to_cis(id, obj.controller, ability, state) {
                 ci.timestamp = obj.ci_timestamp;
+                static_cis.push(ci);
+            }
+        }
+    }
+
+    // Emblems (CR 114.5): their static abilities apply continuously from the
+    // command zone, gathered the same way as battlefield static abilities.
+    for emblem in &state.emblems {
+        for ability in &emblem.abilities {
+            for mut ci in crate::ir::executor::ir_static_to_cis(emblem.id, emblem.controller, ability, state) {
+                ci.timestamp = emblem.timestamp;
                 static_cis.push(ci);
             }
         }
@@ -1634,6 +1660,10 @@ pub struct SimState {
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(crate) continuous_instances: Vec<ContinuousInstance>,
+    /// Emblems (CR 114): command-zone markers with static abilities. Their abilities
+    /// are gathered fresh each `recompute` (like battlefield static abilities) and they
+    /// never leave — emblems are not pruned. Created by `Action::CreateEmblem`.
+    pub(crate) emblems: Vec<EmblemInstance>,
     /// Append-only record of every `GameEvent` that fired (post-prohibition, post-replacement).
     /// Layer B state surface for IR queries (`Expr::EventCount`, etc.) and the eventual
     /// replacement for scattered `this_turn` counters. See `ir/event_log.rs`.
@@ -1697,6 +1727,7 @@ impl SimState {
             graveyard_order: Vec::new(),
             trigger_instances: Vec::new(),
             replacement_instances: Vec::new(),
+            emblems: Vec::new(),
             repl_applied: HashSet::new(),
             repl_depth: 0,
             continuous_instances: Vec::new(),

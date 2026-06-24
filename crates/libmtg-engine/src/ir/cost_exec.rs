@@ -475,6 +475,7 @@ fn walk(
         | Action::OrderTop { .. }
         | Action::Dig { .. }
         | Action::RecordEtbChoice { .. }
+        | Action::CreateEmblem { .. }
         | Action::MayDo { .. } => Some(()),
     }
 }
