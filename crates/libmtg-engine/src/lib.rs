@@ -1554,7 +1554,8 @@ impl PlayerState {
 pub struct SimState {
     /// The turn number currently being simulated. Set at the start of each do_turn call.
     pub current_turn: u8,
-    on_play: bool,
+    /// Whether `Us` is on the play (vs. on the draw). Set once at game start.
+    pub on_play: bool,
     /// The two players are `GameObject`s in `objects` with `ObjectRole::Player`;
     /// these are their stable ids. Reach their state via `player(who)`/`player_mut(who)`.
     pub us_id: ObjId,

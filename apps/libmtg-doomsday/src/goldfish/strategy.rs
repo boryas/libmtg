@@ -720,6 +720,24 @@ impl Strategy for DDGoldfishStrategy {
     /// with extras if everything is needed.
     fn london_bottom(&self, state: &SimState, n: usize) -> Vec<ObjId> {
         let who = self.player_id;
+        use super::mull::MullMode;
+        // Learned policies: keep the highest-scoring (7-n)-card subset; bottom the rest. This is
+        // what makes the Interactive mode preserve protection instead of shipping it.
+        if let MullMode::LearnedSpeed | MullMode::LearnedInteractive = self.mull_mode {
+            use super::learned_mull::LearnedObjective;
+            let cards: Vec<(ObjId, &str)> =
+                state.hand_of(who).map(|c| (c.id, c.catalog_key.as_str())).collect();
+            let names: Vec<&str> = cards.iter().map(|&(_, nm)| nm).collect();
+            let obj = if self.mull_mode == MullMode::LearnedSpeed {
+                LearnedObjective::Speed
+            } else {
+                LearnedObjective::Interactive
+            };
+            return super::learned_mull::learned_bottom(&names, n as u32, state.on_play, obj)
+                .iter()
+                .map(|&i| cards[i].0)
+                .collect();
+        }
         let hand: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
         let mut bottom: Vec<ObjId> = hand.iter().copied().filter(|&id| !self.card_needed(state, id)).collect();
         if bottom.len() < n {

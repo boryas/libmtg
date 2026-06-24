@@ -167,6 +167,8 @@
         <option value="realistic" selected>Realistic &mdash; keep a real plan</option>
         <option value="keep7">Keep 7 &mdash; never mulligan</option>
         <option value="aggressive">Aggressive &mdash; race bar</option>
+        <option value="learned-speed">Learned (max speed) &mdash; the model, raw speed</option>
+        <option value="learned-interactive">Learned-Interactive &mdash; speed + keep protection</option>
       </select>
       <details id="mull-help" class="mode-desc">
         <summary>How this mode decides</summary>
@@ -212,8 +214,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260623-playdraw';
-    const WASM_VER = '20260623-playdraw';
+      from '../pkg/libmtg_doomsday.js?v=20260624-learned';
+    const WASM_VER = '20260624-learned';
 
     const REPO = 'boryas/libmtg';
 
@@ -244,6 +246,16 @@
         <em>deterministic</em> line by the cut-off, or if it holds Doomsday + two black sources +
         a castable cantrip to dig the last black. No probability threshold; it always keeps at four
         cards.</p>`,
+      'learned-speed': `<p>The <b>learned model</b>, lifted out of Python and run in-browser: a
+        gradient-boosted tree that estimates <code>P(cast by T3)</code> from the hand's properties,
+        plus backward-induction keep-bars for every hand size. Pure raw speed &mdash; it ships any
+        hand it can out-race, even down to a three-card combo core. Fastest mulligan there is
+        (beats Aggressive), but it throws away protection to do it.</p>`,
+      'learned-interactive': `<p>The same learned model, scored as
+        <code>P(cast) &times; resolve(resources)</code> &mdash; it values the protection and
+        interaction you'd still hold when you go off. Ties Aggressive on raw speed but shows up to
+        the combo with far more counters/disruption in hand (it keeps Force/Daze instead of digging
+        past them). The "actually resolve the Doomsday" mulligan.</p>`,
     };
 
     // Default deck: Eureka22422's 3-Wasteland / 3-Ponder tempo Doomsday list

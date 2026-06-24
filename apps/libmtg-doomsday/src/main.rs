@@ -30,6 +30,10 @@ enum MullArg {
     Realistic,
     /// High p_cast_by bar, loosening as you mulligan.
     Aggressive,
+    /// Learned P(cast)-GBDT policy, raw-speed objective (the fastest mulligan).
+    LearnedSpeed,
+    /// Learned policy scoring P(cast) x resolve(resources): same speed as Aggressive, more interaction.
+    LearnedInteractive,
 }
 
 impl From<MullArg> for MullMode {
@@ -38,6 +42,8 @@ impl From<MullArg> for MullMode {
             MullArg::Keep7 => MullMode::Keep7,
             MullArg::Realistic => MullMode::Realistic,
             MullArg::Aggressive => MullMode::Aggressive,
+            MullArg::LearnedSpeed => MullMode::LearnedSpeed,
+            MullArg::LearnedInteractive => MullMode::LearnedInteractive,
         }
     }
 }
@@ -79,6 +85,10 @@ struct Args {
     /// --cutoff 10) instead of P(cast by cutoff). Lower is better; never-cast counts as the horizon.
     #[arg(long)]
     ttd: bool,
+    /// With --sim-hands: output `cards<TAB>protection<TAB>hand` = mean cards & protection in hand
+    /// at the moment DD is cast (conditional on casting by --cutoff). A resources-retained proxy.
+    #[arg(long)]
+    resources: bool,
     /// Trace one fixed opening 7 (cards `|`-separated): print play-by-play for a few
     /// winning and losing games, to see how the hand actually plays out.
     #[arg(long)]
@@ -148,12 +158,17 @@ fn main() -> ExitCode {
             metric, hands.len(), args.games, if on_play { "play" } else { "draw" }, args.cutoff);
         for line in hands {
             let hand: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
-            let v = if args.ttd {
-                libmtg_doomsday::run_goldfish_fixed_hand_ttd(&deck, &hand, args.cutoff, args.games, on_play)
+            if args.resources {
+                let (cards, prot) = libmtg_doomsday::run_goldfish_fixed_hand_resources(&deck, &hand, args.cutoff, args.games, on_play);
+                println!("{cards:.4}\t{prot:.4}\t{line}");
             } else {
-                libmtg_doomsday::run_goldfish_fixed_hand(&deck, &hand, args.cutoff, args.games, on_play)
-            };
-            println!("{v:.4}\t{line}");
+                let v = if args.ttd {
+                    libmtg_doomsday::run_goldfish_fixed_hand_ttd(&deck, &hand, args.cutoff, args.games, on_play)
+                } else {
+                    libmtg_doomsday::run_goldfish_fixed_hand(&deck, &hand, args.cutoff, args.games, on_play)
+                };
+                println!("{v:.4}\t{line}");
+            }
         }
         return ExitCode::SUCCESS;
     }

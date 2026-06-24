@@ -46,6 +46,11 @@ pub enum MullMode {
     Realistic,
     /// Keep only a deterministic Doomsday line by the cutoff (the fanatical race bar).
     Aggressive,
+    /// The learned P(cast)-GBDT policy, raw-speed objective (the fastest mulligan).
+    LearnedSpeed,
+    /// The learned policy scoring P(cast) x resolve(resources): ties Aggressive on speed but keeps
+    /// far more interaction in hand.
+    LearnedInteractive,
 }
 
 impl Default for MullMode {
@@ -53,11 +58,13 @@ impl Default for MullMode {
 }
 
 impl MullMode {
-    /// Parse a web/CLI token (`keep7` / `realistic` / `aggressive`); unknown → default.
+    /// Parse a web/CLI token; unknown → default.
     pub fn from_str_or_default(s: &str) -> MullMode {
         match s {
             "keep7" => MullMode::Keep7,
             "aggressive" => MullMode::Aggressive,
+            "learned-speed" | "learned_speed" => MullMode::LearnedSpeed,
+            "learned-interactive" | "learned_interactive" => MullMode::LearnedInteractive,
             _ => MullMode::Realistic,
         }
     }
@@ -296,11 +303,24 @@ pub fn should_mulligan(
     cutoff: u32,
     mulligans_taken: u32,
 ) -> bool {
+    use super::learned_mull::LearnedObjective;
+    // The learned policies carry their own floor (they keep a 1-card hand), so they bypass the
+    // heuristic 4-card cap and follow the backward-induction bars all the way down.
+    if let MullMode::LearnedSpeed | MullMode::LearnedInteractive = mode {
+        let hand: Vec<&str> = state.hand_of(who).map(|c| c.catalog_key.as_str()).collect();
+        let obj = if mode == MullMode::LearnedSpeed {
+            LearnedObjective::Speed
+        } else {
+            LearnedObjective::Interactive
+        };
+        return !super::learned_mull::learned_keep(&hand, mulligans_taken, state.on_play, obj);
+    }
     if mulligans_taken >= 3 { return false; } // always keep the 4-card hand
     let keep = match mode {
         MullMode::Keep7 => true,
         MullMode::Realistic => realistic_keep(&hand_signals(state, who, cutoff), mulligans_taken),
         MullMode::Aggressive => aggressive_keep(state, who, cutoff),
+        MullMode::LearnedSpeed | MullMode::LearnedInteractive => unreachable!(),
     };
     !keep
 }

@@ -30,6 +30,9 @@ pub mod strategy;
 /// Pluggable opening-hand mulligan policies for the goldfish pilot.
 pub mod mull;
 
+mod learned_gen;
+pub mod learned_mull;
+
 pub use mull::{should_mulligan, HandSignals, MullMode};
 pub use strategy::{DDGoldfishStrategy, DEFAULT_CUTOFF};
 
@@ -514,6 +517,54 @@ pub fn run_goldfish_fixed_hand_ttd(
         };
     }
     sum_ttd / games as f64
+}
+
+/// For a fixed hand: mean (cards-in-hand, protection-in-hand) AT THE MOMENT DD is cast,
+/// conditional on casting by `cutoff`. Protection = DEFAULT_PROTECTION. A proxy for the
+/// resources/interaction you retain when you actually go off.
+pub fn run_goldfish_fixed_hand_resources(
+    deck: &[(String, i32, String)],
+    hand: &[String],
+    cutoff: u32,
+    games: u32,
+    on_play: bool,
+) -> (f64, f64) {
+    let catalog = build_catalog();
+    let opp_deck: Vec<(String, i32, String)> =
+        vec![("Island".to_string(), 60, "main".to_string())];
+    let cutoff_u8 = (cutoff.min(u8::MAX as u32) as u8).max(1);
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let (mut sum_cards, mut sum_prot, mut casts) = (0.0f64, 0.0f64, 0u32);
+    for _ in 0..games {
+        let scenario = Scenario {
+            us_label: "doomsday".to_string(),
+            opp_label: "goldfish".to_string(),
+            catalog: catalog.clone(),
+            us_deck: deck.to_vec(),
+            opp_deck: opp_deck.clone(),
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, MullMode::Keep7)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective::default()),
+            max_turns: cutoff_u8,
+            on_play: Some(on_play),
+            fixed_us_hand: Some(hand.to_vec()),
+        };
+        let state = run_game(scenario, &mut rng);
+        if state.terminal && state.current_turn <= cutoff_u8 {
+            casts += 1;
+            sum_cards += state.hand_of(PlayerId::Us).count() as f64;
+            sum_prot += state
+                .hand_of(PlayerId::Us)
+                .filter(|c| DEFAULT_PROTECTION.contains(&c.catalog_key.as_str()))
+                .count() as f64;
+        }
+    }
+    if casts == 0 {
+        (0.0, 0.0)
+    } else {
+        (sum_cards / casts as f64, sum_prot / casts as f64)
+    }
 }
 
 /// Replay a fixed hand and return play-by-play traces for the first `n_win` winning

@@ -37,7 +37,8 @@ pub use strategy::{dd_should_mulligan, DoomsdayStrategy, GenericOppStrategy, Mat
 pub use goldfish::{
     dd_goldfish_evaluator, run_goldfish, run_goldfish_asap, run_goldfish_asap_mode,
     run_goldfish_audit_det, run_goldfish_baseline_aggro, run_goldfish_calibration, run_goldfish_dump,
-    run_goldfish_fixed_hand, run_goldfish_fixed_hand_trace, run_goldfish_fixed_hand_ttd,
+    run_goldfish_fixed_hand, run_goldfish_fixed_hand_resources, run_goldfish_fixed_hand_trace,
+    run_goldfish_fixed_hand_ttd,
     run_goldfish_compare, sample_doomsday_deck, DDGoldfishStrategy, GoldfishStats, MullMode,
     DEFAULT_CUTOFF, DEFAULT_PROTECTION,
 };
