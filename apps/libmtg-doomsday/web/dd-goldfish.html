@@ -246,16 +246,22 @@
         <em>deterministic</em> line by the cut-off, or if it holds Doomsday + two black sources +
         a castable cantrip to dig the last black. No probability threshold; it always keeps at four
         cards.</p>`,
-      'learned-speed': `<p>The <b>learned model</b>, lifted out of Python and run in-browser: a
-        gradient-boosted tree that estimates <code>P(cast by T3)</code> from the hand's properties,
-        plus backward-induction keep-bars for every hand size. Pure raw speed &mdash; it ships any
-        hand it can out-race, even down to a three-card combo core. Fastest mulligan there is
-        (beats Aggressive), but it throws away protection to do it.</p>`,
-      'learned-interactive': `<p>The same learned model, scored as
-        <code>P(cast) &times; resolve(resources)</code> &mdash; it values the protection and
-        interaction you'd still hold when you go off. Ties Aggressive on raw speed but shows up to
-        the combo with far more counters/disruption in hand (it keeps Force/Daze instead of digging
-        past them). The "actually resolve the Doomsday" mulligan.</p>`,
+      'learned-speed': `<p>A <b>trained</b> keep-value: for any hand it estimates
+        <code>P(cast by T3)</code> from <em>measured</em> outcomes &mdash; thousands of simulated
+        games per hand-shape, not a written rule &mdash; and its keep thresholds are the
+        <b>provably optimal</b> stopping policy for raw speed (backward induction over every hand
+        size, verified to sit at a peak: keeping more or less <i>both</i> cast slower).</p>
+        <p>The behavior it settles on: keep once you have Doomsday plus a way to power it out
+        (a black source, or a ritual standing in for one), or enough card selection to reliably dig
+        to the missing piece; otherwise ship and re-draw &mdash; even down to a three-card combo
+        core. The fastest mulligan here (it beats Aggressive), at the price of shipping protection.</p>`,
+      'learned-interactive': `<p>The same trained values and the same optimal-stopping recursion,
+        but scoring each hand by <code>P(cast) &times; the protection you'd still hold</code> when
+        you combo &mdash; so it optimizes <em>resolving</em> the Doomsday, not merely casting it.</p>
+        <p>The behavior: it keeps fast hands <i>and</i> slower hands that arrive with
+        counters/disruption, and ships only the genuinely slow-and-naked ones. Same cast-speed as
+        Aggressive, but it shows up to the combo with far more interaction in hand &mdash; it won't
+        dig past a Force of Will to find a land.</p>`,
     };
 
     // Default deck: Eureka22422's 3-Wasteland / 3-Ponder tempo Doomsday list
