@@ -2062,17 +2062,23 @@
         assert!(!tamiyo_bf.tapped, "returned as a fresh untapped object (exile-return, not in-place)");
     }
 
+    /// Activate Tamiyo, Seasoned Scholar's +2 for `PlayerId::Us` — registers the
+    /// floating "opposing attackers get −1/−0 until your next turn" CE.
+    fn tamiyo_plus_two_us(state: &mut SimState) {
+        let tamiyo_def = catalog_card("Tamiyo, Inquisitive Student");
+        let back = tamiyo_def.back.as_deref().expect("Tamiyo has a back face");
+        let CardKind::Planeswalker(pw) = &back.kind else { panic!("back is a planeswalker") };
+        let plus_two = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(2))
+            .expect("Tamiyo has a +2 ability");
+        build_ability_effect(plus_two, PlayerId::Us, ObjId::UNSET).call(state, 1, &[]);
+    }
+
     #[test]
     fn test_tamiyo_plus_two_applies_power_mod_to_attackers() {
         let mut state = make_state();
-        // Register the +2 floating trigger watcher for PlayerId::Us (as if us activated it last turn).
-        state.trigger_instances.push(TriggerInstance {
-            source_id: ObjId::UNSET,
-            controller: PlayerId::Us,
-            check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(Expiry::StartOfControllerNextTurn),
+        // Activate +2 first; the dynamic-filter CE catches attackers declared later.
+        tamiyo_plus_two_us(&mut state);
 
-        });
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
         let dragon_atk_id = add_perm(&mut state, PlayerId::Opp, "Dragon", BattlefieldState { entered_this_turn: false, ..BattlefieldState::new() });
@@ -2085,31 +2091,25 @@
             true);
 
         let dragon_id = state.permanents_of(PlayerId::Opp).find(|p| p.catalog_key == "Dragon").map(|p| p.id).unwrap();
-        // The -1 comes from a ContinuousInstance (L7), not bf.power_mod.
-        // recompute reflects the CE modifier in the materialized view.
+        // The -1 comes from the floating ContinuousInstance (L7), gated on "attacking".
         recompute(&mut state);
         let eff = state.def_of(dragon_id).expect("Dragon materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
-        assert_eq!(c.power(), 2, "Dragon's effective power is 3 + (-1) = 2");
+        assert_eq!(c.power(), 2, "attacking opposing Dragon's power is 3 + (-1) = 2");
     }
 
     #[test]
     fn test_tamiyo_plus_two_expires_at_controller_untap() {
         let mut state = make_state();
-        state.trigger_instances.push(TriggerInstance {
-            source_id: ObjId::UNSET,
-            controller: PlayerId::Us,
-            check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(Expiry::StartOfControllerNextTurn),
+        tamiyo_plus_two_us(&mut state);
+        assert_eq!(state.continuous_instances.len(), 1, "+2 registers one floating CE");
 
-        });
-        assert_eq!(state.trigger_instances.len(), 1);
-
-        // Untap step for PlayerId::Us should expire the floating trigger watcher.
+        // Untap step for PlayerId::Us should expire the "until your next turn" CE.
         let step = Step { kind: StepKind::Untap, prio: false };
         do_step(&mut state, 2, PlayerId::Us, &step, true);
 
-        assert!(state.trigger_instances.is_empty(), "Floating trigger expires at controller's next Untap");
+        assert!(state.continuous_instances.is_empty(),
+            "the +2 continuous effect expires at the controller's next Untap");
     }
 
     #[test]

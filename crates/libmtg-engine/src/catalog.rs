@@ -1571,65 +1571,6 @@ pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState)
     }
 }
 
-/// Trigger check for Tamiyo +2: fires for each opposing creature that attacks.
-/// Produces a trigger whose effect registers a -1/0 ContinuousInstance (L7) for that attacker.
-pub(crate) fn tamiyo_plus_two_check(
-    event: &GameEvent,
-    source_id: ObjId,
-    controller: PlayerId,
-    _state: &SimState,
-    pending: &mut Vec<TriggerContext>,
-) {
-    if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
-        if *attacker_controller != controller {
-            let attacker_id = *attacker_id;
-            let tamiyo_id = source_id;
-            pending.push(TriggerContext {
-                source_name: "Tamiyo, Seasoned Scholar".into(),
-                controller,
-                target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
-                    let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
-                    if state.permanent_bf(attacker_id).is_some() {
-                        let ts = state.next_ci_timestamp();
-                        state.continuous_instances.push(ContinuousInstance {
-                            source_id: tamiyo_id,
-                            controller,
-                            layer: ContinuousLayer::L7PowerToughness,
-                            reads: vec![],
-                            writes: vec![CeWrites::PowerToughness],
-                            timestamp: ts,
-                            filter: std::sync::Arc::new(move |id, _, _| id == attacker_id),
-                            modifier: std::sync::Arc::new(|def, _state| {
-                                if let CardKind::Creature(c) = &mut def.kind {
-                                    c.adjust_pt(-1, 0);
-                                }
-                            }),
-                            expiry: Expiry::EndOfTurn,
-                        });
-                    }
-                    state.log(t, controller, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
-                })),
-            });
-        }
-    }
-}
-
-pub(crate) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
-    Effect(std::sync::Arc::new(move |state, t, _targets| {
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        // Register a floating trigger watcher that fires for each opposing attacker.
-        // Expires at the start of our next turn (StartOfControllerNextTurn).
-        state.trigger_instances.push(TriggerInstance {
-            source_id,
-            controller: who,
-            check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(Expiry::StartOfControllerNextTurn),
-        });
-        state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
-    }))
-}
-
 
 
 

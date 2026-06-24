@@ -301,6 +301,16 @@ pub enum Action {
     /// the resolving player, carrying the given static `abilities`; the emblem
     /// persists and its abilities apply continuously (e.g. Kaito +1, Tamiyo −7).
     CreateEmblem { abilities: Vec<crate::ir::ability::Ability> },
+    /// Register a floating continuous effect with a *dynamic* `scope` (re-evaluated
+    /// each recompute, so it catches objects matching later) and an `expiry`. The
+    /// dynamic-filter sibling of `ApplyCE`, which instead locks its target set at
+    /// resolution (CR 611.2c). Used for "until your next turn, … get …" effects
+    /// keyed on changing state — e.g. Tamiyo +2 (opposing attackers get −1/−0).
+    RegisterContinuous {
+        scope: Filter,
+        mods: Vec<CEMod>,
+        expiry: Expiry,
+    },
 
     // ── scheduling ───────────────────────────────────────────────────────
     /// Register a delayed trigger that fires at some future event.

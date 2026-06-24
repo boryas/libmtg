@@ -1034,6 +1034,34 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::RegisterContinuous { scope, mods, expiry } => {
+            // Dynamic-filter sibling of ApplyCE: `scope` is re-evaluated each
+            // recompute (so it catches objects matching later — e.g. attackers
+            // declared after this resolves), with the given expiry.
+            let source_id = env.source.unwrap_or(ObjId::UNSET);
+            let ctrl = env.controller.unwrap_or(actor);
+            let engine_expiry = map_ir_expiry(expiry);
+            let scope_opt = Some(scope.clone());
+            let mut built: Vec<ContinuousInstance> = Vec::new();
+            for m in mods {
+                let Some(build) = cemod_to_modifier(m, env, state) else { continue };
+                let ts = state.next_ci_timestamp();
+                built.push(ContinuousInstance {
+                    source_id,
+                    controller: ctrl,
+                    layer: build.layer,
+                    reads: build.reads,
+                    writes: build.writes,
+                    timestamp: ts,
+                    filter: build_filter(source_id, ctrl, &scope_opt),
+                    modifier: build.modifier,
+                    expiry: engine_expiry.clone(),
+                });
+            }
+            state.continuous_instances.extend(built);
+            ExecResult::Ok
+        }
+
         Action::ApplyCE { target, mods, expiry } => {
             // Target may be a single object (Mistrise/Dauthi: a chosen card) or a
             // set (Toxic Deluge: every creature). The affected id set is locked at

@@ -476,6 +476,7 @@ fn walk(
         | Action::Dig { .. }
         | Action::RecordEtbChoice { .. }
         | Action::CreateEmblem { .. }
+        | Action::RegisterContinuous { .. }
         | Action::MayDo { .. } => Some(()),
     }
 }

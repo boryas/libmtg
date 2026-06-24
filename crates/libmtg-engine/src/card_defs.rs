@@ -3901,9 +3901,32 @@ fn tamiyo_inquisitive_student() -> CardDef {
             mana_cost: String::new(),
             loyalty: 2,
             abilities: vec![
+                // +2: until your next turn, creatures your opponents control get
+                // −1/−0 while attacking (the engine's model of the damage-reducing
+                // ultimate). A floating dynamic-filter CE that catches attackers
+                // declared on the opponent's turn, expiring at your next untap.
                 AbilityDef {
                     costs: ir_loyalty(2),
-                    ability_factory: Some(Arc::new(build_tamiyo_plus_two)),
+                    ir_body: Some(Action::RegisterContinuous {
+                        scope: Filter(Expr::And(
+                            Box::new(Expr::And(
+                                // a creature …
+                                Box::new(Expr::Contains(
+                                    Box::new(Expr::TypeLit(CardType::Creature)),
+                                    Box::new(Expr::Types(Box::new(Expr::Ctx(Ctx::It)))),
+                                )),
+                                // … an opponent controls …
+                                Box::new(Expr::Not(Box::new(Expr::Eq(
+                                    Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                                    Box::new(Expr::Ctx(Ctx::Controller)),
+                                )))),
+                            )),
+                            // … and is attacking.
+                            Box::new(Expr::Attacking(Box::new(Expr::Ctx(Ctx::It)))),
+                        )),
+                        mods: vec![crate::ir::ce::CEMod::PumpPT(Expr::Num(-1), Expr::Num(0))],
+                        expiry: crate::ir::action::Expiry::UntilYourNextTurn,
+                    }),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
