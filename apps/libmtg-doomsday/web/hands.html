@@ -46,8 +46,8 @@
     .srow { margin: 0.12rem 0; }
     .srow .pol { color: #889; display: inline-block; min-width: 11rem; }
     .srow b { color: #5dade2; }
-    .above { color: #6fcf9f; }
-    .below { color: #cf8f6f; }
+    .v-keep { color: #6fcf9f; font-weight: bold; }
+    .v-mull { color: #cf8f6f; font-weight: bold; }
     .bottom { color: #d8b48a; }
     table.sim { border-collapse: collapse; font-size: 0.8rem; margin-top: 0.6rem; min-width: 26rem; }
     table.sim th { color: #788; font-weight: normal; text-align: right; padding: 0.1rem 0.7rem; border-bottom: 1px solid #0f3460; }
@@ -63,12 +63,11 @@
 </head>
 <body>
   <h1>dd-hands &mdash; Doomsday hand explorer</h1>
-  <p class="lede">Deal opening hands and <b>judge them yourself first</b> &mdash; the model says nothing
-    until you ask. Hit <b>reveal</b> on a hand to see the learned model's instant read (P(cast by T3),
-    E[turns-to-Doomsday]) <i>next to the simulated truth</i>, including the interaction-conditioned
-    metrics. Set <b>Keep</b> below 7 to get a suggested bottoming. Decisions are shown as score-vs-bar,
-    not thumbs-up/down: the speed policy's bar is steep, so it mulligans most opening 7s <i>by design</i>
-    &mdash; that's a high threshold, not a bad hand. <a class="nav" href="../goldfish/">&rarr; deck-level goldfish</a></p>
+  <p class="lede">Deal opening hands and <b>judge them yourself first</b> &mdash; the model stays quiet
+    until you ask. <b>Reveal</b> shows its instant read (P(cast by T3), E[TTD]) and each policy's KEEP/MULL;
+    <b>simulate</b> then runs the games for the measured truth. Set <b>Keep</b> below 7 for suggested bottoms.
+    Note: the speed policy mulligans most opening 7s <i>by design</i> (it's hyper-aggressive), so don't read
+    its MULL as a bad hand. <a class="nav" href="../goldfish/">&rarr; deck-level goldfish</a></p>
 
   <div id="loading" class="muted">Loading WASM…</div>
   <div id="app" class="layout" style="display:none">
@@ -181,27 +180,23 @@
     }
 
     function armRow(label, a, keepSz) {
-      const rel = a.keeps ? '<span class="above">at/above bar</span>' : '<span class="below">below bar</span>';
-      const drop = keepSz >= 7 ? '' : ` &middot; bottom <span class="bottom">${a.bottom.join(', ') || '—'}</span>`;
-      return `<div class="srow"><span class="pol">${label}</span> score <b>${fmt(a.score)}</b> vs bar ${fmt(a.bar)} ${rel}${drop}</div>`;
+      const dec = a.keeps ? '<span class="v-keep">KEEP</span>' : '<span class="v-mull">MULL</span>';
+      const drop = (a.keeps && keepSz < 7) ? ` &mdash; bottom <span class="bottom">${a.bottom.join(', ')}</span>` : '';
+      return `<div class="srow"><span class="pol">${label}</span> ${dec}${drop}</div>`;
     }
 
     function suggestEl(sug) {
-      const ks = sug.keep_size;
       const w = document.createElement('div'); w.className = 'suggest';
-      const head = ks >= 7 ? 'Keep all 7 (no mulligan) — would each policy keep this seven?'
-                           : `Keep ${ks} — best ${ks} to keep, bottom the rest:`;
-      w.innerHTML = `<div class="suggest-head">${head}</div>`
-        + armRow('Learned (max speed)', sug.speed, ks)
-        + armRow('Learned-Interactive', sug.interactive, ks);
+      w.innerHTML = armRow('Learned (max speed)', sug.speed, sug.keep_size)
+        + armRow('Learned-Interactive', sug.interactive, sug.keep_size);
       return w;
     }
 
-    // Mark which cards the Interactive policy would bottom (by name, consuming duplicates).
+    // Mark the Interactive policy's bottoms (by name, consuming duplicates) — only when it keeps.
     function highlight(cardsRow, sug) {
       const divs = [...cardsRow.querySelectorAll('.card')];
       divs.forEach(d => d.classList.remove('kept', 'bottomed'));
-      if (sug.keep_size >= 7) return;
+      if (sug.keep_size >= 7 || !sug.interactive.keeps) return;
       const drop = [...sug.interactive.bottom];
       for (const d of divs) {
         const name = d.querySelector('img').alt;
