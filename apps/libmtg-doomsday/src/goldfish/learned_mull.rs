@@ -1,16 +1,21 @@
-//! Learned mulligan policy: the exported P(cast-by-T3) GBDT (a tree-walk over an embedded
-//! 156 KB blob, bit-exact to the sklearn model) + the backward-induction keep-bars, exposed as
-//! two policies:
+//! Learned mulligan policy + per-hand model estimates. Two GBDTs (each a tree-walk over an
+//! embedded ~156 KB blob, bit-exact to the sklearn model) share one tag representation:
+//!   * `pcast` — P(cast Doomsday by T3) from the hand's properties.
+//!   * `ettd`  — E[turns-to-Doomsday] (censored), the negative-result speed model.
+//! On top of `pcast` sit the backward-induction keep-bars, exposed as two policies:
 //!   * `Speed`       — keep iff best-subset P(cast) >= bar. The raw-speed optimum (78% by T3).
 //!   * `Interactive` — keep iff best-subset [P(cast) * resolve(R)] >= bar, where R is the
-//!                     Doomsday-utility of resources retained (protection + clock). Ties Aggressive
-//!                     on speed but shows up to the combo with far more interaction in hand.
+//!                     Doomsday-utility of resources retained (protection + clock).
 //!
-//! Everything runs in WASM: just arithmetic over a `const` blob, no Python, no float surprises.
+//! Everything runs in WASM: just arithmetic over `const` blobs, no Python, no float surprises.
 
 use std::sync::OnceLock;
 
-pub use super::learned_gen::{add_card_tags, is_blue, N_TAGS, BARS_DRAW_SPEED, BARS_DRAW_WIN, BARS_PLAY_SPEED, BARS_PLAY_WIN};
+use serde::Serialize;
+
+pub use super::learned_gen::{
+    add_card_tags, is_blue, BARS_DRAW_SPEED, BARS_DRAW_WIN, BARS_PLAY_SPEED, BARS_PLAY_WIN, N_TAGS,
+};
 
 /// Which learned objective to optimize.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,11 +34,17 @@ struct Model {
     val: Vec<f32>,
 }
 
-static MODEL_BIN: &[u8] = include_bytes!("pcast_model.bin");
+static PCAST_BIN: &[u8] = include_bytes!("pcast_model.bin");
+static ETTD_BIN: &[u8] = include_bytes!("ettd_model.bin");
 
-fn model() -> &'static Model {
+fn pcast_model() -> &'static Model {
     static M: OnceLock<Model> = OnceLock::new();
-    M.get_or_init(|| parse_model(MODEL_BIN))
+    M.get_or_init(|| parse_model(PCAST_BIN))
+}
+
+fn ettd_model() -> &'static Model {
+    static M: OnceLock<Model> = OnceLock::new();
+    M.get_or_init(|| parse_model(ETTD_BIN))
 }
 
 fn parse_model(b: &[u8]) -> Model {
@@ -62,8 +73,7 @@ fn parse_model(b: &[u8]) -> Model {
 }
 
 /// Tree-walk inference: sum each tree's leaf value (+ baseline). `x` = [tags(N_TAGS), size, on_play].
-fn predict(x: &[f32]) -> f32 {
-    let m = model();
+fn predict(m: &Model, x: &[f32]) -> f32 {
     let mut sum = m.baseline;
     for &ts in &m.tree_start {
         let mut n = ts as usize;
@@ -93,8 +103,18 @@ fn features(cards: &[&str], on_play: bool) -> Vec<f32> {
     x
 }
 
+/// Model estimate of P(cast Doomsday by T3) for a hand.
+pub fn pcast(cards: &[&str], on_play: bool) -> f32 {
+    predict(pcast_model(), &features(cards, on_play))
+}
+
+/// Model estimate of E[turns-to-Doomsday] (censored) for a hand.
+pub fn ettd(cards: &[&str], on_play: bool) -> f32 {
+    predict(ettd_model(), &features(cards, on_play))
+}
+
 /// R = Doomsday-utility of resources retained: deployable protection + clock/backup.
-fn resources(cards: &[&str]) -> f32 {
+pub fn resources(cards: &[&str]) -> f32 {
     let (mut fow, mut daze, mut ts, mut waste, mut clock, mut blue) = (0, 0, 0, 0, 0, 0);
     let mut dd = 0;
     for &c in cards {
@@ -119,11 +139,16 @@ fn resources(cards: &[&str]) -> f32 {
         + 0.4 * (clock + (dd - 1).max(0)) as f32
 }
 
+/// resolve(R) in [0.30, 0.90]: how well resources let the Doomsday actually resolve.
+pub fn resolve(cards: &[&str]) -> f32 {
+    0.30 + 0.60 * resources(cards).tanh()
+}
+
 fn score(cards: &[&str], on_play: bool, obj: LearnedObjective) -> f32 {
-    let p = predict(&features(cards, on_play));
+    let p = pcast(cards, on_play);
     match obj {
         LearnedObjective::Speed => p,
-        LearnedObjective::Interactive => p * (0.30 + 0.60 * resources(cards).tanh()),
+        LearnedObjective::Interactive => p * resolve(cards),
     }
 }
 
@@ -172,4 +197,48 @@ pub fn learned_bottom(hand: &[&str], mulls: u32, on_play: bool, obj: LearnedObje
     let keep_size = n.saturating_sub(mulls as usize);
     let (_, keep_mask) = best_subset(hand, keep_size, on_play, obj);
     (0..n).filter(|&i| keep_mask & (1 << i) == 0).collect()
+}
+
+/// The two policies' verdict on an opening 7: keep, or mulligan and bottom these cards.
+#[derive(Serialize)]
+pub struct Verdict {
+    pub keep: bool,
+    /// Cards to bottom if this is kept after one mulligan (the best-6 hint); empty when kept at 7.
+    pub bottom_if_mulled: Vec<String>,
+}
+
+/// Instant model read on an opening hand: both GBDTs + the resource score + each policy's verdict.
+/// No simulation — pure arithmetic over the embedded blobs.
+#[derive(Serialize)]
+pub struct HandEstimates {
+    pub p_cast: f32,
+    pub e_ttd: f32,
+    pub resources: f32,
+    pub resolve: f32,
+    pub interactive_score: f32,
+    pub speed: Verdict,
+    pub interactive: Verdict,
+}
+
+fn verdict(hand: &[&str], on_play: bool, obj: LearnedObjective) -> Verdict {
+    let keep = learned_keep(hand, 0, on_play, obj);
+    let bottom_if_mulled = learned_bottom(hand, 1, on_play, obj)
+        .into_iter()
+        .map(|i| hand[i].to_string())
+        .collect();
+    Verdict { keep, bottom_if_mulled }
+}
+
+pub fn hand_estimates(hand: &[&str], on_play: bool) -> HandEstimates {
+    HandEstimates {
+        // The GBDT is an unclamped regressor: clamp the *displayed* probabilities to [0,1]
+        // (the policy keeps the raw scores internally, where only the ordering matters).
+        p_cast: pcast(hand, on_play).clamp(0.0, 1.0),
+        e_ttd: ettd(hand, on_play).max(0.0),
+        resources: resources(hand),
+        resolve: resolve(hand),
+        interactive_score: score(hand, on_play, LearnedObjective::Interactive).clamp(0.0, 1.0),
+        speed: verdict(hand, on_play, LearnedObjective::Speed),
+        interactive: verdict(hand, on_play, LearnedObjective::Interactive),
+    }
 }

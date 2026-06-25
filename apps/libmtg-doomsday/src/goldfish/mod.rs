@@ -567,6 +567,107 @@ pub fn run_goldfish_fixed_hand_resources(
     }
 }
 
+/// Draw `n` random opening 7-card hands from `deck` (for the per-hand explorer).
+pub fn deal_opening_hands(deck: &[(String, i32, String)], n: usize) -> Vec<Vec<String>> {
+    use rand::seq::SliceRandom;
+    let mut pool: Vec<String> = Vec::new();
+    for (name, count, _section) in deck {
+        for _ in 0..(*count).max(0) {
+            pool.push(name.clone());
+        }
+    }
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    (0..n)
+        .map(|_| pool.choose_multiple(&mut rng, 7).cloned().collect())
+        .collect()
+}
+
+/// Every measured stat for one fixed opening hand, in a single sim pass: how often / how fast it
+/// casts Doomsday, the same conditioned on bringing interaction, and the resources held at cast.
+#[derive(Serialize)]
+pub struct HandSimReport {
+    pub games: u32,
+    /// P(cast DD by `cutoff`).
+    pub p_cast: f64,
+    /// E[turns-to-Doomsday], censored at `horizon`.
+    pub e_ttd: f64,
+    /// P(cast DD by `cutoff` AND holding >=1 protection at cast).
+    pub p_cast_intr: f64,
+    /// E[turns-to-(Doomsday-with-protection)], censored at `horizon`.
+    pub e_ttd_intr: f64,
+    /// Mean protection in hand at cast (| cast by `cutoff`).
+    pub protection_at_cast: f64,
+    /// Mean cards in hand at cast (| cast by `cutoff`).
+    pub cards_at_cast: f64,
+}
+
+pub fn run_goldfish_fixed_hand_report(
+    deck: &[(String, i32, String)],
+    hand: &[String],
+    cutoff: u32,
+    horizon: u32,
+    games: u32,
+    on_play: bool,
+) -> HandSimReport {
+    let catalog = build_catalog();
+    let opp_deck: Vec<(String, i32, String)> =
+        vec![("Island".to_string(), 60, "main".to_string())];
+    let horizon_u8 = (horizon.min(u8::MAX as u32) as u8).max(1);
+    let cutoff_u8 = (cutoff.min(u8::MAX as u32) as u8).max(1);
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let (mut n_cast, mut n_cast_intr, mut n_castcut) = (0u32, 0u32, 0u32);
+    let (mut sum_ttd, mut sum_ttd_intr, mut sum_prot, mut sum_cards) = (0.0f64, 0.0, 0.0, 0.0);
+    for _ in 0..games {
+        let scenario = Scenario {
+            us_label: "doomsday".to_string(),
+            opp_label: "goldfish".to_string(),
+            catalog: catalog.clone(),
+            us_deck: deck.to_vec(),
+            opp_deck: opp_deck.clone(),
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, MullMode::Keep7)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective::default()),
+            max_turns: horizon_u8,
+            on_play: Some(on_play),
+            fixed_us_hand: Some(hand.to_vec()),
+        };
+        let state = run_game(scenario, &mut rng);
+        let cast = state.terminal;
+        let turn = state.current_turn;
+        let prot = if cast {
+            state
+                .hand_of(PlayerId::Us)
+                .filter(|c| DEFAULT_PROTECTION.contains(&c.catalog_key.as_str()))
+                .count()
+        } else {
+            0
+        };
+        let cast_intr = cast && prot >= 1;
+        sum_ttd += if cast { turn as f64 } else { horizon_u8 as f64 };
+        sum_ttd_intr += if cast_intr { turn as f64 } else { horizon_u8 as f64 };
+        if cast && turn <= cutoff_u8 {
+            n_cast += 1;
+            n_castcut += 1;
+            sum_prot += prot as f64;
+            sum_cards += state.hand_of(PlayerId::Us).count() as f64;
+            if prot >= 1 {
+                n_cast_intr += 1;
+            }
+        }
+    }
+    let g = games.max(1) as f64;
+    HandSimReport {
+        games,
+        p_cast: n_cast as f64 / g,
+        e_ttd: sum_ttd / g,
+        p_cast_intr: n_cast_intr as f64 / g,
+        e_ttd_intr: sum_ttd_intr / g,
+        protection_at_cast: if n_castcut > 0 { sum_prot / n_castcut as f64 } else { 0.0 },
+        cards_at_cast: if n_castcut > 0 { sum_cards / n_castcut as f64 } else { 0.0 },
+    }
+}
+
 /// Replay a fixed hand and return play-by-play traces for the first `n_win` winning
 /// and `n_loss` losing games (per-turn intent from the decision log + the engine's
 /// actual plays from `state.log`), to diagnose why a hand over/under-performs.
@@ -902,5 +1003,40 @@ mod tests {
             asap_by + 0.05 >= base_by,
             "ASAP P(cast by {cutoff})={asap_by:.3} should be >= baseline {base_by:.3}"
         );
+    }
+}
+
+#[cfg(test)]
+mod learned_explorer_smoke {
+    use super::*;
+    fn tempo_deck() -> Vec<(String, i32, String)> {
+        [("Underground Sea",4),("Polluted Delta",4),("Misty Rainforest",1),("Scalding Tarn",1),
+         ("Flooded Strand",1),("Bloodstained Mire",1),("Undercity Sewers",1),("Cavern of Souls",1),
+         ("Island",1),("Swamp",1),("Wasteland",3),("Lotus Petal",2),("Lion's Eye Diamond",1),
+         ("Dark Ritual",4),("Doomsday",4),("Thassa's Oracle",1),("Jace, Wielder of Mysteries",1),
+         ("Brainstorm",4),("Ponder",3),("Consider",1),("Flow State",4),("Edge of Autumn",1),
+         ("Street Wraith",1),("Tamiyo, Inquisitive Student",4),("Murktide Regent",2),
+         ("Force of Will",4),("Daze",2),("Thoughtseize",2)]
+            .iter().map(|(n,c)| (n.to_string(), *c, "main".to_string())).collect()
+    }
+    #[test]
+    fn report_and_estimates_smoke() {
+        let deck = tempo_deck();
+        let hands = deal_opening_hands(&deck, 4);
+        assert_eq!(hands.len(), 4);
+        assert!(hands.iter().all(|h| h.len() == 7));
+        let hand: Vec<String> = ["Doomsday","Dark Ritual","Underground Sea","Brainstorm","Ponder","Force of Will","Daze"]
+            .iter().map(|s| s.to_string()).collect();
+        let refs: Vec<&str> = hand.iter().map(|s| s.as_str()).collect();
+        let est = learned_mull::hand_estimates(&refs, true);
+        let rep = run_goldfish_fixed_hand_report(&deck, &hand, 3, 10, 200, true);
+        println!("EST p_cast={:.3} e_ttd={:.2} R={:.2} resolve={:.2} speed.keep={} intr.keep={}",
+            est.p_cast, est.e_ttd, est.resources, est.resolve, est.speed.keep, est.interactive.keep);
+        println!("SIM p_cast={:.3} e_ttd={:.2} p_intr={:.3} e_ttd_intr={:.2} prot@cast={:.2} cards@cast={:.2}",
+            rep.p_cast, rep.e_ttd, rep.p_cast_intr, rep.e_ttd_intr, rep.protection_at_cast, rep.cards_at_cast);
+        assert!(est.p_cast > 0.3 && est.p_cast < 1.2, "p_cast estimate sane");
+        assert!(rep.p_cast > 0.3, "DD+ritual+source casts often");
+        assert!(rep.e_ttd >= 1.0 && rep.e_ttd <= 10.0, "ttd in horizon");
+        assert!(rep.p_cast_intr <= rep.p_cast + 1e-9, "intr is a subset of cast");
     }
 }

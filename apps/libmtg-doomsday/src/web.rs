@@ -23,6 +23,10 @@ use libmtg_engine::{
 use libmtg_decklist::Decklist;
 #[cfg(target_arch = "wasm32")]
 use crate::{generate_scenario, run_goldfish_asap_mode, MullMode, DEFAULT_PROTECTION};
+#[cfg(target_arch = "wasm32")]
+use crate::goldfish::{
+    deal_opening_hands, learned_mull::hand_estimates, run_goldfish_fixed_hand_report,
+};
 
 #[cfg(target_arch = "wasm32")]
 fn cards(list: &[(&str, i32)]) -> Vec<(String, i32, String)> {
@@ -241,4 +245,50 @@ pub fn missing_cards_web(deck_text: &str) -> String {
     let deck = Decklist::parse_text(deck_text).to_engine_deck();
     let report = classify_unimplemented_cards(&deck, &build_catalog());
     serde_json::to_string(&report).unwrap()
+}
+
+// ── hand explorer (hands.html) ──────────────────────────────────────────────
+
+/// Deal `n` random opening hands from the deck, each with the model's *instant* read
+/// (both GBDTs + the two policies' keep/mull verdicts). No simulation. Returns
+/// `[{cards:[..], est:HandEstimates}, ..]` as JSON.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn deal_hands_web(deck_text: &str, n: u32, play_draw: &str) -> String {
+    let deck = Decklist::parse_text(deck_text).to_engine_deck();
+    let on_play = play_draw != "draw";
+    let out: Vec<serde_json::Value> = deal_opening_hands(&deck, n as usize)
+        .into_iter()
+        .map(|cards| {
+            let refs: Vec<&str> = cards.iter().map(|s| s.as_str()).collect();
+            serde_json::json!({ "cards": cards, "est": hand_estimates(&refs, on_play) })
+        })
+        .collect();
+    serde_json::to_string(&out).unwrap()
+}
+
+/// Full report for one hand (`cards` joined by `|`): the model's instant estimate plus the
+/// measured sim truth (P(cast), E[TTD], the interaction-conditioned variants, resources at cast).
+/// Returns `{cards:[..], est:HandEstimates, sim:HandSimReport}` as JSON.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn hand_report_web(
+    deck_text: &str,
+    hand_str: &str,
+    cutoff: u32,
+    horizon: u32,
+    games: u32,
+    play_draw: &str,
+) -> String {
+    let deck = Decklist::parse_text(deck_text).to_engine_deck();
+    let on_play = play_draw != "draw";
+    let hand: Vec<String> = hand_str
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let refs: Vec<&str> = hand.iter().map(|s| s.as_str()).collect();
+    let est = hand_estimates(&refs, on_play);
+    let sim = run_goldfish_fixed_hand_report(&deck, &hand, cutoff, horizon, games, on_play);
+    serde_json::to_string(&serde_json::json!({ "cards": hand, "est": est, "sim": sim })).unwrap()
 }

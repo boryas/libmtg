@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>dd-hands — Doomsday hand explorer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 1rem 1.5rem; line-height: 1.4; }
+    h1 { font-size: 1.1rem; color: #c0c0d0; margin-bottom: 0.5rem; }
+    p.lede { color: #9aa; font-size: 0.85rem; max-width: 54rem; margin-bottom: 0.9rem; }
+    .layout { display: grid; grid-template-columns: 300px 1fr; gap: 1.5rem; align-items: start; }
+    textarea { width: 100%; height: 18rem; background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460;
+      border-radius: 6px; padding: 0.6rem; font-family: monospace; font-size: 0.78rem; resize: vertical; }
+    label { font-size: 0.8rem; color: #aaa; display: block; margin: 0.6rem 0 0.2rem; }
+    input[type=number] { background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px;
+      padding: 0.3rem 0.5rem; font-size: 0.8rem; width: 5rem; }
+    input[type=text] { background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px;
+      padding: 0.35rem 0.5rem; font-size: 0.78rem; width: 100%; font-family: monospace; }
+    select { background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px;
+      padding: 0.3rem 0.5rem; font-size: 0.8rem; width: 100%; }
+    .controls { display: flex; gap: 0.8rem; flex-wrap: wrap; align-items: flex-end; }
+    button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 0.45rem 0.9rem;
+      cursor: pointer; font-size: 0.85rem; border-radius: 4px; }
+    button:hover:enabled { background: #0f3460; }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    button.primary { background: #1d3a5f; border-color: #2a5a8a; }
+    button.reveal { font-size: 0.75rem; padding: 0.3rem 0.7rem; margin-top: 0.4rem; }
+    .hand { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 0.7rem 0.9rem; margin-bottom: 0.9rem; }
+    .hand-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; }
+    .hand-head .idx { color: #788; font-size: 0.78rem; }
+    .cards { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+    .card img { width: 86px; border-radius: 4px; display: block; transition: transform 0.12s; }
+    .card img:hover { transform: scale(2.4); position: relative; z-index: 10; }
+    .est { display: flex; gap: 0.5rem 1.3rem; flex-wrap: wrap; margin-top: 0.55rem; font-size: 0.82rem; }
+    .est .k { color: #889; }
+    .est b { color: #5dade2; }
+    .verdict { font-size: 0.8rem; margin-top: 0.4rem; }
+    .verdict .pol { color: #889; display: inline-block; min-width: 9.5rem; }
+    .keep { color: #6fcf9f; font-weight: bold; }
+    .mull { color: #cf8f6f; font-weight: bold; }
+    .bottom { color: #9aa; font-size: 0.76rem; }
+    table.sim { border-collapse: collapse; font-size: 0.8rem; margin-top: 0.6rem; min-width: 26rem; }
+    table.sim th { color: #788; font-weight: normal; text-align: right; padding: 0.1rem 0.7rem; border-bottom: 1px solid #0f3460; }
+    table.sim th:first-child { text-align: left; }
+    table.sim td { padding: 0.12rem 0.7rem; text-align: right; font-variant-numeric: tabular-nums; }
+    table.sim td:first-child { text-align: left; color: #c8c8d4; }
+    table.sim td.model { color: #9fd0ee; }
+    table.sim td.simv { color: #f5b041; font-weight: bold; }
+    .panel { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 0.9rem 1rem; }
+    .muted { color: #788; font-size: 0.78rem; }
+    a.nav { color: #5dade2; font-size: 0.82rem; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>dd-hands &mdash; Doomsday hand explorer</h1>
+  <p class="lede">Deal opening hands and inspect them. Each hand shows the <b>learned model's instant
+    read</b> (P(cast by T3) and E[turns-to-Doomsday], both lifted GBDTs, plus each policy's keep/mull
+    verdict) for free. Hit <b>reveal</b> to run the actual simulator on that exact hand and see the
+    measured truth &mdash; including the interaction-conditioned metrics the model only proxies.
+    <a class="nav" href="../goldfish/">&rarr; deck-level goldfish</a></p>
+
+  <div id="loading" class="muted">Loading WASM…</div>
+  <div id="app" class="layout" style="display:none">
+    <div class="panel">
+      <label for="deck">Decklist</label>
+      <textarea id="deck" spellcheck="false"></textarea>
+      <div class="controls" style="margin-top:0.6rem">
+        <div><label for="n">Hands</label><input type="number" id="n" value="8" min="1" max="30"></div>
+        <div><label for="onplay">Play/draw</label>
+          <select id="onplay"><option value="play">On the play</option><option value="draw">On the draw</option></select></div>
+      </div>
+      <div class="controls" style="margin-top:0.5rem">
+        <div><label for="cutoff">Cutoff (T)</label><input type="number" id="cutoff" value="3" min="1" max="10"></div>
+        <div><label for="horizon">Horizon (T)</label><input type="number" id="horizon" value="10" min="3" max="20"></div>
+        <div><label for="sims">Sims / hand</label><input type="number" id="sims" value="300" min="20" max="3000" step="20"></div>
+      </div>
+      <button id="deal" class="primary" style="margin-top:0.8rem">Deal hands</button>
+      <label for="paste" style="margin-top:1rem">Inspect a specific hand</label>
+      <input type="text" id="paste" placeholder="Doomsday | Dark Ritual | Underground Sea | …">
+      <button id="inspect" style="margin-top:0.5rem">Inspect hand</button>
+      <p class="muted" style="margin-top:0.8rem">The model read is instant; reveal runs <span id="simlbl">300</span>
+        games on that hand (cast-ASAP, no opponent).</p>
+    </div>
+    <div id="hands"></div>
+  </div>
+
+  <script type="module">
+    import init, { deal_hands_web, hand_report_web } from '../pkg/libmtg_doomsday.js?v=20260625-hands';
+    const WASM_VER = '20260625-hands';
+    const SAMPLE = `4 Underground Sea
+4 Polluted Delta
+1 Misty Rainforest
+1 Scalding Tarn
+1 Flooded Strand
+1 Bloodstained Mire
+1 Undercity Sewers
+1 Cavern of Souls
+1 Island
+1 Swamp
+3 Wasteland
+2 Lotus Petal
+1 Lion's Eye Diamond
+4 Dark Ritual
+4 Doomsday
+1 Thassa's Oracle
+1 Jace, Wielder of Mysteries
+4 Brainstorm
+3 Ponder
+1 Consider
+4 Flow State
+1 Edge of Autumn
+1 Street Wraith
+4 Tamiyo, Inquisitive Student
+2 Murktide Regent
+4 Force of Will
+2 Daze
+2 Thoughtseize`;
+
+    const $ = id => document.getElementById(id);
+    const scryfallImg = name => `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name.replace(/ Token$/,''))}&format=image&version=small`;
+    const fmt = (x, d=2) => Number(x).toFixed(d);
+
+    function cardsEl(cards) {
+      const row = document.createElement('div'); row.className = 'cards';
+      for (const c of cards) {
+        const d = document.createElement('div'); d.className = 'card';
+        const img = document.createElement('img'); img.src = scryfallImg(c); img.alt = c; img.title = c; img.loading = 'lazy';
+        d.appendChild(img); row.appendChild(d);
+      }
+      return row;
+    }
+
+    function verdictEl(label, v) {
+      const s = document.createElement('div'); s.className = 'verdict';
+      const decision = v.keep ? `<span class="keep">KEEP</span>`
+        : `<span class="mull">MULL</span> <span class="bottom">→ bottom ${v.bottom_if_mulled.join(', ') || '(best-6)'}</span>`;
+      s.innerHTML = `<span class="pol">${label}</span> ${decision}`;
+      return s;
+    }
+
+    function estEl(est) {
+      const wrap = document.createElement('div');
+      const e = document.createElement('div'); e.className = 'est';
+      e.innerHTML = `<span><span class="k">model P(cast≤T3)</span> <b>${fmt(est.p_cast)}</b></span>`
+        + `<span><span class="k">model E[TTD]</span> <b>${fmt(est.e_ttd,1)}</b></span>`
+        + `<span><span class="k">resources R</span> <b>${fmt(est.resources,1)}</b></span>`
+        + `<span><span class="k">resolve(R)</span> <b>${fmt(est.resolve)}</b></span>`;
+      wrap.appendChild(e);
+      wrap.appendChild(verdictEl('Learned (max speed)', est.speed));
+      wrap.appendChild(verdictEl('Learned-Interactive', est.interactive));
+      return wrap;
+    }
+
+    function simTable(est, sim) {
+      const rows = [
+        ['P(cast ≤ T'+$('cutoff').value+')', fmt(est.p_cast), fmt(sim.p_cast)],
+        ['E[turns to DD]', fmt(est.e_ttd,1), fmt(sim.e_ttd,1)],
+        ['P(cast WITH interaction)', fmt(est.interactive_score)+' *', fmt(sim.p_cast_intr)],
+        ['E[turns to DD-with-interaction]', '—', fmt(sim.e_ttd_intr,1)],
+        ['protection in hand @ cast', '—', fmt(sim.protection_at_cast)],
+        ['cards in hand @ cast', '—', fmt(sim.cards_at_cast,1)],
+      ];
+      const t = document.createElement('table'); t.className = 'sim';
+      t.innerHTML = `<tr><th>metric</th><th>model</th><th>sim (${sim.games})</th></tr>`
+        + rows.map(r => `<tr><td>${r[0]}</td><td class="model">${r[1]}</td><td class="simv">${r[2]}</td></tr>`).join('');
+      const note = document.createElement('div'); note.className = 'muted'; note.style.marginTop = '0.35rem';
+      note.textContent = '* the model has no direct P(cast-with-interaction); it scores P(cast) × resolve(R) as a proxy.';
+      const box = document.createElement('div'); box.appendChild(t); box.appendChild(note);
+      return box;
+    }
+
+    function handCard(obj, idx) {
+      const div = document.createElement('div'); div.className = 'hand';
+      const head = document.createElement('div'); head.className = 'hand-head';
+      head.innerHTML = `<span class="idx">${idx == null ? 'pasted hand' : 'hand #' + (idx+1)}</span>`;
+      div.appendChild(head);
+      div.appendChild(cardsEl(obj.cards));
+      div.appendChild(estEl(obj.est));
+      const btn = document.createElement('button'); btn.className = 'reveal'; btn.textContent = 'reveal (run sim)';
+      const slot = document.createElement('div');
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = 'simulating…';
+        await new Promise(r => setTimeout(r, 10));
+        try {
+          const rep = JSON.parse(hand_report_web($('deck').value, obj.cards.join('|'),
+            +$('cutoff').value, +$('horizon').value, +$('sims').value, $('onplay').value));
+          slot.innerHTML = ''; slot.appendChild(simTable(rep.est, rep.sim)); btn.style.display = 'none';
+        } catch (e) { slot.innerHTML = '<div class="muted">sim error: ' + e + '</div>'; btn.disabled = false; btn.textContent = 'reveal (run sim)'; }
+      };
+      div.appendChild(btn); div.appendChild(slot);
+      return div;
+    }
+
+    function deal() {
+      const out = $('hands'); out.innerHTML = '';
+      try {
+        const hands = JSON.parse(deal_hands_web($('deck').value, +$('n').value, $('onplay').value));
+        hands.forEach((h, i) => out.appendChild(handCard(h, i)));
+      } catch (e) { out.innerHTML = '<div class="muted">error: ' + e + '</div>'; }
+    }
+
+    function inspect() {
+      const raw = $('paste').value.trim(); if (!raw) return;
+      const cards = raw.split(/[|,\n]/).map(s => s.trim()).filter(Boolean);
+      try {
+        const rep = JSON.parse(hand_report_web($('deck').value, cards.join('|'),
+          +$('cutoff').value, +$('horizon').value, +$('sims').value, $('onplay').value));
+        const out = $('hands'); out.innerHTML = '';
+        const obj = { cards: rep.cards, est: rep.est };
+        const div = handCard(obj, null);
+        out.appendChild(div);
+        // auto-reveal the pasted hand
+        div.querySelector('button.reveal').click();
+      } catch (e) { $('hands').innerHTML = '<div class="muted">error: ' + e + '</div>'; }
+    }
+
+    (async () => {
+      await init(`../pkg/libmtg_doomsday_bg.wasm?v=${WASM_VER}`);
+      $('deck').value = SAMPLE;
+      $('loading').style.display = 'none'; $('app').style.display = 'grid';
+      $('sims').addEventListener('input', () => $('simlbl').textContent = $('sims').value);
+      $('deal').onclick = deal;
+      $('inspect').onclick = inspect;
+      deal();
+    })();
+  </script>
+</body>
+</html>
