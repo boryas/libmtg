@@ -583,9 +583,10 @@ pub enum SpellModes {
 
 impl SpellModes {
     /// Construct a modal spell. Panics if fewer than 2 modes are provided.
-    /// Unused since every modal spell moved to IR `AbilityKind::OnResolve { modes }`;
-    /// retained with the rest of the legacy `SpellModes` path (still used by the
-    /// last two single-mode `untargeted_mode` cards) until that path is retired.
+    /// Unused: every spell moved to IR `AbilityKind::OnResolve { modes }` (Show
+    /// and Tell was the last single-mode holdout). The whole `SpellModes`/
+    /// `SpellMode` path and the `SpellData.modes` field are now vestigial and can
+    /// be deleted once a sweep removes the legacy resolution branch.
     #[allow(dead_code)]
     pub(crate) fn modal(modes: Vec<SpellMode>) -> Self {
         assert!(modes.len() >= 2, "modal spells require at least 2 modes, got {}", modes.len());

@@ -494,40 +494,6 @@ pub(crate) fn eff_fetch_search(
     }))
 }
 
-/// Each player may put a card matching `filter` from their hand onto the battlefield.
-/// Both choices are collected before either placement, so the placements are simultaneous
-/// (CR 101.4 — "each" effects are simultaneous; no triggers fire between them).
-pub(crate) fn eff_each_may_put(caster: PlayerId, filter: Filter) -> Effect {
-    Effect(Arc::new(move |state, t, _targets| {
-        let mut to_place: Vec<(ObjId, PlayerId)> = Vec::new();
-        for &player in &[caster, caster.opp()] {
-            let env = crate::ir::executor::BindEnv::new().with_controller(player);
-            let candidates: Vec<ObjId> = state.hand_of(player)
-                .filter(|c| crate::ir::executor::matches(&filter, c.id, state, &env))
-                .map(|c| c.id)
-                .collect();
-            if candidates.is_empty() { continue; }
-            let req = ChoiceRequest::MayPutOnBattlefield { candidates };
-            let decision = state.with_strategy(player, |s, st| s.resolve_choice(ObjId(0), &req, st));
-            if let ChoiceResult::OptionalObject(Some(id)) = decision {
-                // Validate the chosen id is actually in the candidate set.
-                if let ChoiceRequest::MayPutOnBattlefield { ref candidates } = req {
-                    if candidates.contains(&id) {
-                        to_place.push((id, player));
-                    }
-                }
-            }
-        }
-        // Place all chosen cards simultaneously — no triggers fire between placements.
-        for (id, player) in to_place {
-            let name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-            state.log(t, player, format!("puts {} onto the battlefield", name));
-            change_zone(id, ZoneId::Battlefield, state, t, player);
-        }
-    }))
-}
-
-
 /// Ward pay-or-counter effect (CR 702.20).
 /// Offers `targeting_caster` the chance to pay `cost`; if they decline (or can't pay),
 /// `targeting_spell` is countered. Called from Ward `TriggerContext` effects.

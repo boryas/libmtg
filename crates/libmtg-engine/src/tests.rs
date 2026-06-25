@@ -5757,6 +5757,20 @@
 
     // ── §48: Show and Tell ────────────────────────────────────────────────────
 
+    /// Resolve the real Show and Tell `OnResolve` body (the IR `SimultaneousPut`)
+    /// as `caster`.
+    fn run_show_and_tell(state: &mut SimState, caster: PlayerId) {
+        let snt = catalog_card("Show and Tell");
+        let body = match &snt.abilities[0].kind {
+            crate::ir::ability::AbilityKind::OnResolve { modes } => modes[0].body.clone(),
+            _ => panic!("Show and Tell should carry an OnResolve body"),
+        };
+        crate::ir::executor::execute(
+            &body, state,
+            &crate::ir::executor::BindEnv::new().with_controller(caster),
+        );
+    }
+
     #[test]
     fn test_show_and_tell_caster_puts_creature_on_battlefield() {
         let mut state = make_state();
@@ -5765,31 +5779,18 @@
         // Caster puts its only candidate (the creature); opp has none → declines.
         state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).put_first_candidate()));
 
-        eff_each_may_put(
-            PlayerId::Us,
-            ir_or(
-                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
-                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
-            ),
-        ).call(&mut state, 1, &[]);
+        run_show_and_tell(&mut state, PlayerId::Us);
 
         assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Battlefield),
-            "Show and Tell should put chosen creature onto the battlefield");
+            "Show and Tell should put the chosen creature onto the battlefield");
     }
 
     #[test]
     fn test_show_and_tell_no_candidates_no_crash() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // No cards in hand — should not panic.
-        eff_each_may_put(
-            PlayerId::Us,
-            ir_or(
-                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
-                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
-            ),
-        ).call(&mut state, 1, &[]);
-        // No assertions needed — just verifying no panic.
+        // No cards in either hand — should not panic.
+        run_show_and_tell(&mut state, PlayerId::Us);
     }
 
     // ── §49: Spell Pierce / tax counters ──────────────────────────────────────

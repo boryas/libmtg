@@ -306,6 +306,18 @@ pub enum Action {
     /// the resolving player, carrying the given static `abilities`; the emblem
     /// persists and its abilities apply continuously (e.g. Kaito +1, Tamiyo −7).
     CreateEmblem { abilities: Vec<crate::ir::ability::Ability> },
+    /// Each selected player chooses a card matching `filter` in their `from` zone
+    /// and puts it onto the battlefield. *All* choices are made (APNAP order)
+    /// before *any* placement, so the placements are simultaneous (CR 101.4 — no
+    /// triggers/SBAs fire between them; the engine's deferred `pending_triggers`
+    /// then fire together). `optional` = "may" (Show and Tell) vs mandatory
+    /// (Exhume). Each player puts at most one.
+    SimultaneousPut {
+        who: Who,
+        from: crate::ir::expr::ZoneKindSel,
+        filter: crate::ir::expr::Filter,
+        optional: bool,
+    },
     /// Register a floating continuous effect with a *dynamic* `scope` (re-evaluated
     /// each recompute, so it catches objects matching later) and an `expiry`. The
     /// dynamic-filter sibling of `ApplyCE`, which instead locks its target set at

@@ -332,20 +332,6 @@ fn simple(name: &str, kind: CardKind, colors: Vec<Color>, play_weight: Option<u3
     )
 }
 
-/// Convenience: wrap a single target_spec + factory into `Some(SpellModes::Single(...))`.
-fn single_mode(
-    target_spec: TargetSpec,
-    factory: impl Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync + 'static,
-) -> Option<SpellModes> {
-    Some(SpellModes::Single(SpellMode { target_spec, factory: Arc::new(factory) }))
-}
-
-/// Convenience: `single_mode` with `TargetSpec::None`.
-fn untargeted_mode(
-    factory: impl Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync + 'static,
-) -> Option<SpellModes> {
-    single_mode(TargetSpec::None, factory)
-}
 
 /// IR resolution body for "counter target spell/ability unless its controller
 /// pays `cost`" (Daze, Spell Pierce). The spell's controller is offered a choice:
@@ -2807,16 +2793,35 @@ fn green_suns_zenith() -> CardDef {
 /// Each player may put an artifact, creature, enchantment, or land card from their
 /// hand onto the battlefield. Both placements are simultaneous (CR 101.4).
 fn show_and_tell() -> CardDef {
-    simple("Show and Tell", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::ZoneKindSel;
+    let mut card = simple("Show and Tell", CardKind::Sorcery(SpellData {
         mana_cost: "2U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| {
-            eff_each_may_put(who, ir_or(
-                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
-                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
-            ))
-        }),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", false, false), None)
+    }), parse_colors("U", false, false), None);
+    // "Each player may put an artifact, creature, enchantment, or land card from
+    // their hand onto the battlefield." Each player chooses before any card
+    // enters, so the placements are simultaneous (CR 101.4).
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::SimultaneousPut {
+                    who: IrWho::Each,
+                    from: ZoneKindSel::Hand,
+                    filter: ir_or(
+                        ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
+                        ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
+                    ),
+                    optional: true,
+                },
+            }],
+        },
+        text: Some("Each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield."),
+    }];
+    card
 }
 
 fn omniscience() -> CardDef {

@@ -759,6 +759,61 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::SimultaneousPut { who, from, filter, optional } => {
+            use crate::ir::expr::ZoneKindSel;
+            // Collect every selected player's choice (APNAP order) before placing
+            // anything (CR 101.4): no player sees another's card first, and the
+            // deferred pending_triggers fire together after this resolves.
+            let players: Vec<PlayerId> = match who {
+                Who::You => vec![actor],
+                Who::Opponent | Who::EachOpponent => vec![actor.opp()],
+                Who::Each => vec![actor, actor.opp()],
+                Who::Player(e) => match eval_expr(e, state, env) {
+                    Value::Player(p) => vec![p],
+                    _ => Vec::new(),
+                },
+            };
+            let mut to_place: Vec<(ObjId, PlayerId)> = Vec::new();
+            for player in players {
+                let in_zone: Vec<ObjId> = match from {
+                    ZoneKindSel::Hand => state.hand_of(player).map(|c| c.id).collect(),
+                    ZoneKindSel::Graveyard => state.graveyard_of(player).map(|c| c.id).collect(),
+                    _ => Vec::new(),
+                };
+                let penv = BindEnv::new().with_controller(player);
+                let candidates: Vec<ObjId> = in_zone
+                    .into_iter()
+                    .filter(|&id| matches(filter, id, state, &penv))
+                    .collect();
+                if candidates.is_empty() {
+                    continue;
+                }
+                let chosen: Option<ObjId> = if *optional {
+                    // "may" — the player chooses one or declines (CR 101.4).
+                    let req = crate::ChoiceRequest::MayPutOnBattlefield { candidates: candidates.clone() };
+                    match state.with_strategy(player, |s, st| s.resolve_choice(ObjId::UNSET, &req, st)) {
+                        crate::ChoiceResult::OptionalObject(Some(id)) if candidates.contains(&id) => Some(id),
+                        _ => None,
+                    }
+                } else {
+                    // Mandatory — the player must put one if able.
+                    state
+                        .with_strategy(player, |s, st| s.choose_for_effect(ObjId::UNSET, &candidates, st))
+                        .filter(|id| candidates.contains(id))
+                        .or_else(|| candidates.first().copied())
+                };
+                if let Some(id) = chosen {
+                    to_place.push((id, player));
+                }
+            }
+            // Simultaneous placement — back-to-back change_zones whose triggers are
+            // batched in pending_triggers (no triggers/SBAs fire between them).
+            for (id, player) in to_place {
+                crate::change_zone(id, crate::ZoneId::Battlefield, state, t, player);
+            }
+            ExecResult::Ok
+        }
+
         Action::NinjutsuEnter => {
             // CR 702.49: put the ninja (Source, in hand) onto the battlefield
             // tapped and attacking, taking over the returned attacker's combat
