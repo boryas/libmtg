@@ -105,8 +105,8 @@
   </div>
 
   <script type="module">
-    import init, { deal_hands_web, hand_report_web, keep_suggestion_web } from '../pkg/libmtg_doomsday.js?v=20260625-explore';
-    const WASM_VER = '20260625-explore';
+    import init, { deal_hands_web, hand_report_web, hand_estimates_web, keep_suggestion_web } from '../pkg/libmtg_doomsday.js?v=20260625-split';
+    const WASM_VER = '20260625-split';
     const SAMPLE = `4 Underground Sea
 4 Polluted Delta
 1 Misty Rainforest
@@ -219,24 +219,36 @@
       const cardsRow = cardsEl(cards); div.appendChild(cardsRow);
       const btn = document.createElement('button'); btn.className = 'reveal'; btn.textContent = 'reveal';
       const slot = document.createElement('div');
-      btn.onclick = async () => {
-        btn.disabled = true; btn.textContent = 'simulating…';
-        await new Promise(r => setTimeout(r, 10));
+      btn.onclick = () => {
+        // Instant: the model read + keep/bottom suggestion are pure arithmetic — no games run here.
         try {
-          const rep = JSON.parse(hand_report_web($('deck').value, cards.join('|'),
-            +$('cutoff').value, +$('horizon').value, +$('sims').value, onplay()));
+          const est = JSON.parse(hand_estimates_web(cards.join('|'), onplay()));
           slot.innerHTML = '';
-          slot.appendChild(modelRead(rep.est));
-          slot.appendChild(simTable(rep.est, rep.sim));
+          slot.appendChild(modelRead(est));
           const sugBox = document.createElement('div'); slot.appendChild(sugBox);
           const renderSug = s => { sugBox.innerHTML = ''; sugBox.appendChild(suggestEl(s)); highlight(cardsRow, s); };
           renderSug(JSON.parse(keep_suggestion_web(cards.join('|'), onplay(), keepSize())));
           revealed.push({ cards, cardsRow, renderSug });
+          // Separate, opt-in: run the simulator for the measured truth.
+          const simSlot = document.createElement('div');
+          const simBtn = document.createElement('button'); simBtn.className = 'reveal';
+          simBtn.textContent = `simulate (${$('sims').value} games)`;
+          simBtn.onclick = async () => {
+            simBtn.disabled = true; simBtn.textContent = 'simulating…';
+            await new Promise(r => setTimeout(r, 10));
+            try {
+              const rep = JSON.parse(hand_report_web($('deck').value, cards.join('|'),
+                +$('cutoff').value, +$('horizon').value, +$('sims').value, onplay()));
+              simSlot.innerHTML = ''; simSlot.appendChild(simTable(rep.est, rep.sim));
+              simBtn.style.display = 'none';
+            } catch (e) {
+              simSlot.innerHTML = '<div class="muted">sim error: ' + e + '</div>';
+              simBtn.disabled = false; simBtn.textContent = 'simulate';
+            }
+          };
+          slot.appendChild(simBtn); slot.appendChild(simSlot);
           btn.style.display = 'none';
-        } catch (e) {
-          slot.innerHTML = '<div class="muted">sim error: ' + e + '</div>';
-          btn.disabled = false; btn.textContent = 'reveal';
-        }
+        } catch (e) { slot.innerHTML = '<div class="muted">error: ' + e + '</div>'; }
       };
       div.appendChild(btn); div.appendChild(slot);
       return div;

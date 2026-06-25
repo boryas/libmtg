@@ -295,6 +295,21 @@ pub fn hand_report_web(
     serde_json::to_string(&serde_json::json!({ "cards": hand, "est": est, "sim": sim })).unwrap()
 }
 
+/// Instant model read for one hand (`cards` joined by `|`): both GBDTs + the resource score.
+/// No simulation — this is the "known stuff" revealed without running any games.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn hand_estimates_web(hand_str: &str, play_draw: &str) -> String {
+    let on_play = play_draw != "draw";
+    let hand: Vec<String> = hand_str
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let refs: Vec<&str> = hand.iter().map(|s| s.as_str()).collect();
+    serde_json::to_string(&hand_estimates(&refs, on_play)).unwrap()
+}
+
 /// Instant keep/bottom suggestion for one hand (`cards` joined by `|`) at a chosen `keep_size`:
 /// each policy's best `keep_size`-card subset, the cards to bottom, and the score-vs-bar. No sim.
 #[cfg(target_arch = "wasm32")]
