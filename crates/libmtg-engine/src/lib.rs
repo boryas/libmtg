@@ -93,6 +93,9 @@ pub enum CounterType {
     /// become untapped, instead remove a stun counter." Zone-scoped, routes to
     /// `BattlefieldState.stun_counters` (e.g. Kaito −2).
     Stun,
+    /// Lore counter (CR 714): a Saga's chapter abilities trigger as its lore
+    /// count reaches their chapter number. Stored in the generic `counters` map.
+    Lore,
 }
 
 
@@ -2646,6 +2649,14 @@ pub(crate) fn fire_event(
     // Stage 5: Trigger dispatch.
     let (triggers, one_shot_fired) = fire_triggers(&event, state);
     state.pending_triggers.extend(triggers);
+    // CR 714.2: as a Saga enters, its controller puts a lore counter on it,
+    // firing chapter I. (Turn-based action, not a triggered ability — handled
+    // here so the chapter joins the same pending-trigger batch as ETB triggers.)
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = &event {
+        if obj_is_saga(state, *id) {
+            add_lore_counter(state, *id, t);
+        }
+    }
     // Remove OneShot trigger instances that just fired (reverse order to keep indices valid).
     for &i in one_shot_fired.iter().rev() {
         state.trigger_instances.remove(i);
@@ -3328,6 +3339,48 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
 #[inline(always)]
 fn assert_engine_invariants(_state: &SimState, _label: &str) {}
 
+/// True iff this object is a Saga (CR 714) — carries one or more chapter abilities.
+fn obj_is_saga(state: &SimState, id: ObjId) -> bool {
+    state.objects.get(&id)
+        .and_then(|o| state.catalog.get(&o.catalog_key))
+        .map_or(false, |d| !d.chapters.is_empty())
+}
+
+/// CR 714: put a lore counter on a Saga, then fire the chapter ability whose
+/// number equals the new lore count (as a triggered ability, onto the stack via
+/// `pending_triggers`). Called when a Saga enters and as its controller's
+/// precombat main phase begins. Once the count exceeds the final chapter there's
+/// no chapter to fire; the SBA in `check_state_based_actions` then sacrifices it.
+fn add_lore_counter(state: &mut SimState, saga_id: ObjId, t: u8) {
+    let (controller, catalog_key, new_count) = {
+        let Some(obj) = state.objects.get_mut(&saga_id) else { return };
+        let c = obj.counters.entry(CounterType::Lore).or_insert(0);
+        *c += 1;
+        (obj.controller, obj.catalog_key.clone(), *c as usize)
+    };
+    let chapter = match state.catalog.get(&catalog_key).and_then(|d| d.chapters.get(new_count - 1)) {
+        Some(ch) => ch.clone(),
+        None => return,
+    };
+    // The chapter ability resolves with the Saga as its source (CR 714.3).
+    let effect = crate::effects::Effect(std::sync::Arc::new(
+        move |state: &mut SimState, _t: u8, _targets: &[ObjId]| {
+            let env = crate::ir::executor::BindEnv::new()
+                .with_source(saga_id)
+                .with_controller(controller);
+            let _ = crate::ir::executor::execute(&chapter, state, &env);
+        },
+    ));
+    let source_name = state.permanent_name(saga_id).unwrap_or(catalog_key);
+    state.log(t, controller, format!("{}: lore {} → chapter {}", source_name, new_count, new_count));
+    state.pending_triggers.push(TriggerContext {
+        source_name,
+        controller,
+        target_spec: TargetSpec::None,
+        effect,
+    });
+}
+
 /// Check and apply all State-Based Actions (rule 704). Called before every priority grant.
 /// Runs in a loop until no SBA fires in a pass — the rules require repeated checking until stable.
 fn check_state_based_actions(
@@ -3404,6 +3457,26 @@ fn check_state_based_actions(
                 })
                 .collect();
             for id in dying {
+                change_zone(id, ZoneId::Graveyard, state, t, who);
+                any = true;
+            }
+        }
+
+        // SBA: a Saga with lore counters ≥ its final chapter number is sacrificed
+        // (CR 714.4). The final chapter ability was pushed onto the stack when the
+        // lore count reached it and resolves independently of its source, so we
+        // don't gate on "chapter still on the stack" — correct as long as no
+        // chapter references the Saga after this point (true for current sagas).
+        for who in [PlayerId::Us, PlayerId::Opp] {
+            let done_sagas: Vec<ObjId> = state.permanents_of(who)
+                .filter_map(|card| {
+                    let chapters = state.def_of(card.id).map(|d| d.chapters.len()).unwrap_or(0);
+                    if chapters == 0 { return None; }
+                    let lore = card.counters.get(&CounterType::Lore).copied().unwrap_or(0) as usize;
+                    if lore >= chapters { Some(card.id) } else { None }
+                })
+                .collect();
+            for id in done_sagas {
                 change_zone(id, ZoneId::Graveyard, state, t, who);
                 any = true;
             }
@@ -4237,6 +4310,17 @@ fn do_phase(
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
         fire_event(phase_ev, state, t, ap);
+        // CR 714.2b: as a player's precombat main phase begins, they put a lore
+        // counter on each Saga they control (firing the next chapter).
+        if phase.kind == PhaseKind::PreCombatMain {
+            let sagas: Vec<ObjId> = state.permanents_of(ap)
+                .filter(|c| obj_is_saga(state, c.id))
+                .map(|c| c.id)
+                .collect();
+            for saga_id in sagas {
+                add_lore_counter(state, saga_id, t);
+            }
+        }
         handle_priority_round(state, t, ap);
         assert_engine_invariants(state, "phase-end");
         // Mana pool drains at the end of the main phase.

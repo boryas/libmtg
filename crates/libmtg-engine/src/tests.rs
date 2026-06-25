@@ -3005,6 +3005,44 @@
         assert_eq!(state.library_of(PlayerId::Us).count(), 1, "MV 2 artifact must not be fetched");
     }
 
+    #[test]
+    fn test_saga_lore_counters_fire_chapters_then_sacrifice() {
+        // Synthetic 2-chapter Saga validating the CR-714 machinery: chapter I
+        // gains 1 life, chapter II gains 10. Lore is added on entry (chapter I)
+        // and each precombat main (chapter II); at lore ≥ 2 the SBA sacrifices it.
+        use crate::ir::action::{Action, Who as IrWho};
+        use crate::ir::expr::Expr;
+        let mut saga = CardDef::new(
+            "Test Saga", CardKind::Enchantment(EnchantmentData::default()),
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![],
+        );
+        saga.chapters = vec![
+            Action::GainLife { who: IrWho::You, amount: Expr::Num(1) },
+            Action::GainLife { who: IrWho::You, amount: Expr::Num(10) },
+        ];
+        let mut state = make_state();
+        state.catalog.insert("Test Saga".into(), saga);
+        let life0 = state.player(PlayerId::Us).life;
+        let saga_id = add_hand_card(&mut state, PlayerId::Us, "Test Saga");
+
+        // Enters the battlefield → lore 1 → chapter I triggers.
+        change_zone(saga_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert_eq!(state.objects[&saga_id].counters.get(&CounterType::Lore).copied(), Some(1));
+        assert_eq!(state.player(PlayerId::Us).life, life0 + 1, "chapter I gained 1 life");
+
+        // Precombat main → lore 2 → chapter II triggers.
+        add_lore_counter(&mut state, saga_id, 1);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert_eq!(state.player(PlayerId::Us).life, life0 + 11, "chapter II gained 10 more life");
+
+        // Lore (2) ≥ final chapter (2) → sacrificed as an SBA.
+        recompute(&mut state);
+        check_state_based_actions(&mut state, 1);
+        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == saga_id),
+            "Saga is sacrificed once its last chapter has resolved (CR 714.4)");
+    }
+
     /// Green Sun's Zenith finds a green creature and puts it on the battlefield.
     /// A non-green creature in the same library is not moved.
     #[test]

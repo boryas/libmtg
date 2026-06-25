@@ -772,6 +772,10 @@ pub struct CardDef {
     /// closure-based fields above). When non-empty, the engine dispatches
     /// this card's behavior through the IR executor.
     pub(crate) abilities: Vec<crate::ir::ability::Ability>,
+    /// Saga chapter abilities (CR 714), in order: `chapters[N-1]` is chapter N's
+    /// effect, a triggered ability that fires as the Saga's lore count reaches N.
+    /// Non-empty iff this card is a Saga; its length is the final chapter number.
+    pub(crate) chapters: Vec<crate::ir::action::Action>,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -1293,6 +1297,7 @@ impl CardDef {
             alternate_costs: vec![],
             protection_from: vec![],
             abilities: vec![],
+            chapters: vec![],
         }
     }
 }
