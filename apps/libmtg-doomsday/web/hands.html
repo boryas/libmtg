@@ -7,7 +7,7 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 1rem 1.5rem; line-height: 1.4; }
     h1 { font-size: 1.1rem; color: #c0c0d0; margin-bottom: 0.5rem; }
-    p.lede { color: #9aa; font-size: 0.85rem; max-width: 54rem; margin-bottom: 0.9rem; }
+    p.lede { color: #9aa; font-size: 0.85rem; max-width: 56rem; margin-bottom: 0.9rem; }
     .layout { display: grid; grid-template-columns: 300px 1fr; gap: 1.5rem; align-items: start; }
     textarea { width: 100%; height: 18rem; background: #111a2e; color: #e0e0e0; border: 1px solid #0f3460;
       border-radius: 6px; padding: 0.6rem; font-family: monospace; font-size: 0.78rem; resize: vertical; }
@@ -24,7 +24,7 @@
     button:hover:enabled { background: #0f3460; }
     button:disabled { opacity: 0.5; cursor: wait; }
     button.primary { background: #1d3a5f; border-color: #2a5a8a; }
-    button.reveal { font-size: 0.75rem; padding: 0.3rem 0.7rem; margin-top: 0.4rem; }
+    button.reveal { font-size: 0.75rem; padding: 0.3rem 0.7rem; margin-top: 0.5rem; }
     .hand { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 0.7rem 0.9rem; margin-bottom: 0.9rem; }
     .hand-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; }
     .hand-head .idx { color: #788; font-size: 0.78rem; }
@@ -32,18 +32,23 @@
     /* The small card stays the hover target; the zoom is a pointer-events:none overlay so the
        scaled image never steals the mouse — hover hands off the instant you cross the *small*
        card's footprint, not the enlarged one's edge. */
-    .card { position: relative; }
+    .card { position: relative; border-radius: 6px; }
     .card img { width: 86px; border-radius: 4px; display: block; transition: transform 0.12s; pointer-events: none; }
     .card:hover { z-index: 10; }
     .card:hover img { transform: scale(2.4); }
+    .card.bottomed img { opacity: 0.3; filter: grayscale(0.7); }
+    .card.kept { box-shadow: 0 0 0 2px #3a9a5a; }
     .est { display: flex; gap: 0.5rem 1.3rem; flex-wrap: wrap; margin-top: 0.55rem; font-size: 0.82rem; }
     .est .k { color: #889; }
     .est b { color: #5dade2; }
-    .verdict { font-size: 0.8rem; margin-top: 0.4rem; }
-    .verdict .pol { color: #889; display: inline-block; min-width: 9.5rem; }
-    .keep { color: #6fcf9f; font-weight: bold; }
-    .mull { color: #cf8f6f; font-weight: bold; }
-    .bottom { color: #9aa; font-size: 0.76rem; }
+    .suggest { margin-top: 0.6rem; font-size: 0.8rem; }
+    .suggest-head { color: #c8c8d4; margin-bottom: 0.25rem; }
+    .srow { margin: 0.12rem 0; }
+    .srow .pol { color: #889; display: inline-block; min-width: 11rem; }
+    .srow b { color: #5dade2; }
+    .above { color: #6fcf9f; }
+    .below { color: #cf8f6f; }
+    .bottom { color: #d8b48a; }
     table.sim { border-collapse: collapse; font-size: 0.8rem; margin-top: 0.6rem; min-width: 26rem; }
     table.sim th { color: #788; font-weight: normal; text-align: right; padding: 0.1rem 0.7rem; border-bottom: 1px solid #0f3460; }
     table.sim th:first-child { text-align: left; }
@@ -58,11 +63,12 @@
 </head>
 <body>
   <h1>dd-hands &mdash; Doomsday hand explorer</h1>
-  <p class="lede">Deal opening hands and inspect them. Each hand shows the <b>learned model's instant
-    read</b> (P(cast by T3) and E[turns-to-Doomsday], both lifted GBDTs, plus each policy's keep/mull
-    verdict) for free. Hit <b>reveal</b> to run the actual simulator on that exact hand and see the
-    measured truth &mdash; including the interaction-conditioned metrics the model only proxies.
-    <a class="nav" href="../goldfish/">&rarr; deck-level goldfish</a></p>
+  <p class="lede">Deal opening hands and <b>judge them yourself first</b> &mdash; the model says nothing
+    until you ask. Hit <b>reveal</b> on a hand to see the learned model's instant read (P(cast by T3),
+    E[turns-to-Doomsday]) <i>next to the simulated truth</i>, including the interaction-conditioned
+    metrics. Set <b>Keep</b> below 7 to get a suggested bottoming. Decisions are shown as score-vs-bar,
+    not thumbs-up/down: the speed policy's bar is steep, so it mulligans most opening 7s <i>by design</i>
+    &mdash; that's a high threshold, not a bad hand. <a class="nav" href="../goldfish/">&rarr; deck-level goldfish</a></p>
 
   <div id="loading" class="muted">Loading WASM…</div>
   <div id="app" class="layout" style="display:none">
@@ -73,6 +79,15 @@
         <div><label for="n">Hands</label><input type="number" id="n" value="8" min="1" max="30"></div>
         <div><label for="onplay">Play/draw</label>
           <select id="onplay"><option value="play">On the play</option><option value="draw">On the draw</option></select></div>
+        <div><label for="keep">Keep</label>
+          <select id="keep">
+            <option value="7" selected>7 — no mulligan</option>
+            <option value="6">6 — bottom 1</option>
+            <option value="5">5 — bottom 2</option>
+            <option value="4">4 — bottom 3</option>
+            <option value="3">3 — bottom 4</option>
+            <option value="2">2 — bottom 5</option>
+          </select></div>
       </div>
       <div class="controls" style="margin-top:0.5rem">
         <div><label for="cutoff">Cutoff (T)</label><input type="number" id="cutoff" value="3" min="1" max="10"></div>
@@ -83,15 +98,15 @@
       <label for="paste" style="margin-top:1rem">Inspect a specific hand</label>
       <input type="text" id="paste" placeholder="Doomsday | Dark Ritual | Underground Sea | …">
       <button id="inspect" style="margin-top:0.5rem">Inspect hand</button>
-      <p class="muted" style="margin-top:0.8rem">The model read is instant; reveal runs <span id="simlbl">300</span>
-        games on that hand (cast-ASAP, no opponent).</p>
+      <p class="muted" style="margin-top:0.8rem">Reveal runs <span id="simlbl">300</span> games on that exact
+        hand (cast-ASAP, no opponent). The keep/bottom suggestion is instant and updates live with Keep.</p>
     </div>
     <div id="hands"></div>
   </div>
 
   <script type="module">
-    import init, { deal_hands_web, hand_report_web } from '../pkg/libmtg_doomsday.js?v=20260625-hands';
-    const WASM_VER = '20260625-hands';
+    import init, { deal_hands_web, hand_report_web, keep_suggestion_web } from '../pkg/libmtg_doomsday.js?v=20260625-explore';
+    const WASM_VER = '20260625-explore';
     const SAMPLE = `4 Underground Sea
 4 Polluted Delta
 1 Misty Rainforest
@@ -124,6 +139,9 @@
     const $ = id => document.getElementById(id);
     const scryfallImg = name => `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name.replace(/ Token$/,''))}&format=image&version=small`;
     const fmt = (x, d=2) => Number(x).toFixed(d);
+    const onplay = () => $('onplay').value;
+    const keepSize = () => +$('keep').value;
+    let revealed = []; // {cards, cardsRow, renderSug} — for live Keep reactivity
 
     function cardsEl(cards) {
       const row = document.createElement('div'); row.className = 'cards';
@@ -135,25 +153,13 @@
       return row;
     }
 
-    function verdictEl(label, v) {
-      const s = document.createElement('div'); s.className = 'verdict';
-      const decision = v.keep ? `<span class="keep">KEEP</span>`
-        : `<span class="mull">MULL</span> <span class="bottom">→ bottom ${v.bottom_if_mulled.join(', ') || '(best-6)'}</span>`;
-      s.innerHTML = `<span class="pol">${label}</span> ${decision}`;
-      return s;
-    }
-
-    function estEl(est) {
-      const wrap = document.createElement('div');
+    function modelRead(est) {
       const e = document.createElement('div'); e.className = 'est';
-      e.innerHTML = `<span><span class="k">model P(cast≤T3)</span> <b>${fmt(est.p_cast)}</b></span>`
+      e.innerHTML = `<span><span class="k">model P(cast)</span> <b>${fmt(est.p_cast)}</b></span>`
         + `<span><span class="k">model E[TTD]</span> <b>${fmt(est.e_ttd,1)}</b></span>`
         + `<span><span class="k">resources R</span> <b>${fmt(est.resources,1)}</b></span>`
         + `<span><span class="k">resolve(R)</span> <b>${fmt(est.resolve)}</b></span>`;
-      wrap.appendChild(e);
-      wrap.appendChild(verdictEl('Learned (max speed)', est.speed));
-      wrap.appendChild(verdictEl('Learned-Interactive', est.interactive));
-      return wrap;
+      return e;
     }
 
     function simTable(est, sim) {
@@ -174,49 +180,92 @@
       return box;
     }
 
-    function handCard(obj, idx) {
+    function armRow(label, a, keepSz) {
+      const rel = a.keeps ? '<span class="above">at/above bar</span>' : '<span class="below">below bar</span>';
+      const drop = keepSz >= 7 ? '' : ` &middot; bottom <span class="bottom">${a.bottom.join(', ') || '—'}</span>`;
+      return `<div class="srow"><span class="pol">${label}</span> score <b>${fmt(a.score)}</b> vs bar ${fmt(a.bar)} ${rel}${drop}</div>`;
+    }
+
+    function suggestEl(sug) {
+      const ks = sug.keep_size;
+      const w = document.createElement('div'); w.className = 'suggest';
+      const head = ks >= 7 ? 'Keep all 7 (no mulligan) — would each policy keep this seven?'
+                           : `Keep ${ks} — best ${ks} to keep, bottom the rest:`;
+      w.innerHTML = `<div class="suggest-head">${head}</div>`
+        + armRow('Learned (max speed)', sug.speed, ks)
+        + armRow('Learned-Interactive', sug.interactive, ks);
+      return w;
+    }
+
+    // Mark which cards the Interactive policy would bottom (by name, consuming duplicates).
+    function highlight(cardsRow, sug) {
+      const divs = [...cardsRow.querySelectorAll('.card')];
+      divs.forEach(d => d.classList.remove('kept', 'bottomed'));
+      if (sug.keep_size >= 7) return;
+      const drop = [...sug.interactive.bottom];
+      for (const d of divs) {
+        const name = d.querySelector('img').alt;
+        const i = drop.indexOf(name);
+        if (i >= 0) { d.classList.add('bottomed'); drop.splice(i, 1); }
+        else d.classList.add('kept');
+      }
+    }
+
+    function handCard(cards, idx) {
       const div = document.createElement('div'); div.className = 'hand';
       const head = document.createElement('div'); head.className = 'hand-head';
       head.innerHTML = `<span class="idx">${idx == null ? 'pasted hand' : 'hand #' + (idx+1)}</span>`;
       div.appendChild(head);
-      div.appendChild(cardsEl(obj.cards));
-      div.appendChild(estEl(obj.est));
-      const btn = document.createElement('button'); btn.className = 'reveal'; btn.textContent = 'reveal (run sim)';
+      const cardsRow = cardsEl(cards); div.appendChild(cardsRow);
+      const btn = document.createElement('button'); btn.className = 'reveal'; btn.textContent = 'reveal';
       const slot = document.createElement('div');
       btn.onclick = async () => {
         btn.disabled = true; btn.textContent = 'simulating…';
         await new Promise(r => setTimeout(r, 10));
         try {
-          const rep = JSON.parse(hand_report_web($('deck').value, obj.cards.join('|'),
-            +$('cutoff').value, +$('horizon').value, +$('sims').value, $('onplay').value));
-          slot.innerHTML = ''; slot.appendChild(simTable(rep.est, rep.sim)); btn.style.display = 'none';
-        } catch (e) { slot.innerHTML = '<div class="muted">sim error: ' + e + '</div>'; btn.disabled = false; btn.textContent = 'reveal (run sim)'; }
+          const rep = JSON.parse(hand_report_web($('deck').value, cards.join('|'),
+            +$('cutoff').value, +$('horizon').value, +$('sims').value, onplay()));
+          slot.innerHTML = '';
+          slot.appendChild(modelRead(rep.est));
+          slot.appendChild(simTable(rep.est, rep.sim));
+          const sugBox = document.createElement('div'); slot.appendChild(sugBox);
+          const renderSug = s => { sugBox.innerHTML = ''; sugBox.appendChild(suggestEl(s)); highlight(cardsRow, s); };
+          renderSug(JSON.parse(keep_suggestion_web(cards.join('|'), onplay(), keepSize())));
+          revealed.push({ cards, cardsRow, renderSug });
+          btn.style.display = 'none';
+        } catch (e) {
+          slot.innerHTML = '<div class="muted">sim error: ' + e + '</div>';
+          btn.disabled = false; btn.textContent = 'reveal';
+        }
       };
       div.appendChild(btn); div.appendChild(slot);
       return div;
     }
 
     function deal() {
+      revealed = [];
       const out = $('hands'); out.innerHTML = '';
       try {
-        const hands = JSON.parse(deal_hands_web($('deck').value, +$('n').value, $('onplay').value));
-        hands.forEach((h, i) => out.appendChild(handCard(h, i)));
+        const hands = JSON.parse(deal_hands_web($('deck').value, +$('n').value, onplay()));
+        hands.forEach((h, i) => out.appendChild(handCard(h.cards, i)));
       } catch (e) { out.innerHTML = '<div class="muted">error: ' + e + '</div>'; }
     }
 
     function inspect() {
       const raw = $('paste').value.trim(); if (!raw) return;
       const cards = raw.split(/[|,\n]/).map(s => s.trim()).filter(Boolean);
-      try {
-        const rep = JSON.parse(hand_report_web($('deck').value, cards.join('|'),
-          +$('cutoff').value, +$('horizon').value, +$('sims').value, $('onplay').value));
-        const out = $('hands'); out.innerHTML = '';
-        const obj = { cards: rep.cards, est: rep.est };
-        const div = handCard(obj, null);
-        out.appendChild(div);
-        // auto-reveal the pasted hand
-        div.querySelector('button.reveal').click();
-      } catch (e) { $('hands').innerHTML = '<div class="muted">error: ' + e + '</div>'; }
+      revealed = [];
+      const out = $('hands'); out.innerHTML = '';
+      const div = handCard(cards, null);
+      out.appendChild(div);
+      div.querySelector('button.reveal').click(); // auto-reveal the pasted hand
+    }
+
+    // Live: changing Keep re-suggests bottoms on every already-revealed hand (instant, no re-sim).
+    function reSuggest() {
+      for (const r of revealed) {
+        r.renderSug(JSON.parse(keep_suggestion_web(r.cards.join('|'), onplay(), keepSize())));
+      }
     }
 
     (async () => {
@@ -224,6 +273,8 @@
       $('deck').value = SAMPLE;
       $('loading').style.display = 'none'; $('app').style.display = 'grid';
       $('sims').addEventListener('input', () => $('simlbl').textContent = $('sims').value);
+      $('keep').addEventListener('change', reSuggest);
+      $('onplay').addEventListener('change', reSuggest);
       $('deal').onclick = deal;
       $('inspect').onclick = inspect;
       deal();

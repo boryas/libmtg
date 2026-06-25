@@ -199,16 +199,10 @@ pub fn learned_bottom(hand: &[&str], mulls: u32, on_play: bool, obj: LearnedObje
     (0..n).filter(|&i| keep_mask & (1 << i) == 0).collect()
 }
 
-/// The two policies' verdict on an opening 7: keep, or mulligan and bottom these cards.
-#[derive(Serialize)]
-pub struct Verdict {
-    pub keep: bool,
-    /// Cards to bottom if this is kept after one mulligan (the best-6 hint); empty when kept at 7.
-    pub bottom_if_mulled: Vec<String>,
-}
-
-/// Instant model read on an opening hand: both GBDTs + the resource score + each policy's verdict.
-/// No simulation — pure arithmetic over the embedded blobs.
+/// Instant model read on a hand: both GBDTs + the resource score. No simulation, and deliberately
+/// no binary keep/mull verdict — the speed policy mulligans most opening 7s by design, so a bare
+/// "MULL" misleads. The keep/bottom decision lives in [`keep_suggestion`], shown transparently as
+/// score-vs-bar.
 #[derive(Serialize)]
 pub struct HandEstimates {
     pub p_cast: f32,
@@ -216,17 +210,6 @@ pub struct HandEstimates {
     pub resources: f32,
     pub resolve: f32,
     pub interactive_score: f32,
-    pub speed: Verdict,
-    pub interactive: Verdict,
-}
-
-fn verdict(hand: &[&str], on_play: bool, obj: LearnedObjective) -> Verdict {
-    let keep = learned_keep(hand, 0, on_play, obj);
-    let bottom_if_mulled = learned_bottom(hand, 1, on_play, obj)
-        .into_iter()
-        .map(|i| hand[i].to_string())
-        .collect();
-    Verdict { keep, bottom_if_mulled }
 }
 
 pub fn hand_estimates(hand: &[&str], on_play: bool) -> HandEstimates {
@@ -238,7 +221,45 @@ pub fn hand_estimates(hand: &[&str], on_play: bool) -> HandEstimates {
         resources: resources(hand),
         resolve: resolve(hand),
         interactive_score: score(hand, on_play, LearnedObjective::Interactive).clamp(0.0, 1.0),
-        speed: verdict(hand, on_play, LearnedObjective::Speed),
-        interactive: verdict(hand, on_play, LearnedObjective::Interactive),
+    }
+}
+
+/// One objective's suggested split of a hand into `keep_size` cards to keep + the rest to bottom,
+/// with the best-subset score against that size's keep-bar. We show the score AND the bar (not a
+/// binary verdict) so the steep speed bar reads as "this hand is below threshold", not "bad hand".
+#[derive(Serialize)]
+pub struct KeepArm {
+    pub keep: Vec<String>,
+    pub bottom: Vec<String>,
+    pub score: f32,
+    pub bar: f32,
+    pub keeps: bool,
+}
+
+/// Both policies' keep/bottom suggestion at a chosen hand size — the legitimate home of bottoming
+/// (you only bottom when keeping fewer than 7). Instant; pure model arithmetic.
+#[derive(Serialize)]
+pub struct KeepSuggestion {
+    pub keep_size: usize,
+    pub speed: KeepArm,
+    pub interactive: KeepArm,
+}
+
+fn keep_arm(hand: &[&str], on_play: bool, keep_size: usize, obj: LearnedObjective) -> KeepArm {
+    let n = hand.len();
+    let ks = keep_size.clamp(1, n.max(1));
+    let (score, mask) = best_subset(hand, ks, on_play, obj);
+    let keep = (0..n).filter(|&i| mask & (1 << i) != 0).map(|i| hand[i].to_string()).collect();
+    let bottom = (0..n).filter(|&i| mask & (1 << i) == 0).map(|i| hand[i].to_string()).collect();
+    // Keep-bar for size s is D_{8-s} = bars[7-s]; size 1 is a forced keep (bar 0).
+    let bar = if ks <= 1 { 0.0 } else { bars(on_play, obj)[(n - ks).min(5)] };
+    KeepArm { keep, bottom, score, bar, keeps: score >= bar }
+}
+
+pub fn keep_suggestion(hand: &[&str], on_play: bool, keep_size: usize) -> KeepSuggestion {
+    KeepSuggestion {
+        keep_size: keep_size.clamp(1, hand.len().max(1)),
+        speed: keep_arm(hand, on_play, keep_size, LearnedObjective::Speed),
+        interactive: keep_arm(hand, on_play, keep_size, LearnedObjective::Interactive),
     }
 }

@@ -1030,13 +1030,18 @@ mod learned_explorer_smoke {
         let refs: Vec<&str> = hand.iter().map(|s| s.as_str()).collect();
         let est = learned_mull::hand_estimates(&refs, true);
         let rep = run_goldfish_fixed_hand_report(&deck, &hand, 3, 10, 200, true);
-        println!("EST p_cast={:.3} e_ttd={:.2} R={:.2} resolve={:.2} speed.keep={} intr.keep={}",
-            est.p_cast, est.e_ttd, est.resources, est.resolve, est.speed.keep, est.interactive.keep);
+        let sug = learned_mull::keep_suggestion(&refs, true, 6);
+        println!("EST p_cast={:.3} e_ttd={:.2} R={:.2} resolve={:.2}",
+            est.p_cast, est.e_ttd, est.resources, est.resolve);
+        println!("KEEP6 speed: keeps={} bottom={:?} | intr: keeps={} bottom={:?}",
+            sug.speed.keeps, sug.speed.bottom, sug.interactive.keeps, sug.interactive.bottom);
         println!("SIM p_cast={:.3} e_ttd={:.2} p_intr={:.3} e_ttd_intr={:.2} prot@cast={:.2} cards@cast={:.2}",
             rep.p_cast, rep.e_ttd, rep.p_cast_intr, rep.e_ttd_intr, rep.protection_at_cast, rep.cards_at_cast);
         assert!(est.p_cast > 0.3 && est.p_cast < 1.2, "p_cast estimate sane");
         assert!(rep.p_cast > 0.3, "DD+ritual+source casts often");
         assert!(rep.e_ttd >= 1.0 && rep.e_ttd <= 10.0, "ttd in horizon");
         assert!(rep.p_cast_intr <= rep.p_cast + 1e-9, "intr is a subset of cast");
+        assert_eq!(sug.speed.keep.len(), 6, "keep_size respected");
+        assert_eq!(sug.speed.bottom.len(), 1, "one bottomed at keep-6");
     }
 }

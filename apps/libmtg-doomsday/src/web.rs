@@ -25,7 +25,9 @@ use libmtg_decklist::Decklist;
 use crate::{generate_scenario, run_goldfish_asap_mode, MullMode, DEFAULT_PROTECTION};
 #[cfg(target_arch = "wasm32")]
 use crate::goldfish::{
-    deal_opening_hands, learned_mull::hand_estimates, run_goldfish_fixed_hand_report,
+    deal_opening_hands,
+    learned_mull::{hand_estimates, keep_suggestion},
+    run_goldfish_fixed_hand_report,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -291,4 +293,19 @@ pub fn hand_report_web(
     let est = hand_estimates(&refs, on_play);
     let sim = run_goldfish_fixed_hand_report(&deck, &hand, cutoff, horizon, games, on_play);
     serde_json::to_string(&serde_json::json!({ "cards": hand, "est": est, "sim": sim })).unwrap()
+}
+
+/// Instant keep/bottom suggestion for one hand (`cards` joined by `|`) at a chosen `keep_size`:
+/// each policy's best `keep_size`-card subset, the cards to bottom, and the score-vs-bar. No sim.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn keep_suggestion_web(hand_str: &str, play_draw: &str, keep_size: u32) -> String {
+    let on_play = play_draw != "draw";
+    let hand: Vec<String> = hand_str
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let refs: Vec<&str> = hand.iter().map(|s| s.as_str()).collect();
+    serde_json::to_string(&keep_suggestion(&refs, on_play, keep_size as usize)).unwrap()
 }
