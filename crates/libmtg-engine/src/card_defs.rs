@@ -1120,37 +1120,43 @@ fn mox_opal() -> CardDef {
     def
 }
 
-/// **ABNORMAL — sagas are not implemented.** Urza's Saga is a saga; its real
-/// behavior is "add a lore counter on entry and after your draw step; chapter
-/// abilities trigger when the lore-counter passes thresholds; sacrifice as
-/// SBA when lore-count > final chapter (CR 715)." This card stub fakes
-/// chapter III as a sacrifice-self *activated* ability, which is wrong shape
-/// (the sac is automatic, not paid by the controller; the chapter trigger is
-/// not an activated ability). Do not use this stub as a model for any cost
-/// migration — see CARD_INDEX.org "Sagas" gap entry. Replace once the saga
-/// trigger/lore-counter machinery lands.
+/// Urza's Saga (CR 714), an Enchantment Land, on the real Saga machinery: a lore
+/// counter on entry and each precombat main fires chapters I → II → III, and the
+/// SBA sacrifices it after chapter III.
 ///
-/// Cost storage is migrated to IR (same broken sac-self shape) so the catalog
-/// has zero `CostBody::Legacy` users for sac-shaped costs. Tests that exercise
-/// the chapter III predicate (`test_urza_saga_*`) call `eff_fetch_search`
-/// directly — they never instantiate this card, so the storage shape is
-/// irrelevant to test parity.
+/// Chapter III (search your library for a {0}/{1}-mana-value artifact, put it
+/// onto the battlefield, then shuffle) and the lore timing/sacrifice are faithful.
+/// Chapters I ("gains {T}: Add {C}") and II ("gains {T}, Sacrifice: create an
+/// X/X Construct…") *grant the Saga activated abilities*, which the engine can't
+/// yet make usable (granted abilities only feed triggered abilities), so they're
+/// left as no-ops — a known gap, not a machinery limitation.
 fn ursas_saga() -> CardDef {
-    let pred = ir_and(
-        ir_type(CardType::Artifact),
-        ir_and(ir_colorless(), ir_mv_le(1)),
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut def = CardDef::new(
+        "Urza's Saga",
+        CardKind::Land(LandData::default()),
+        vec![], // colorless
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![], vec![],
     );
-    simple("Urza's Saga", CardKind::Artifact(ArtifactData {
-        mana_cost: String::new(),
-        abilities: vec![AbilityDef {
-            costs: ir_sac_self("$saga_self"),
-            ability_factory: Some(Arc::new(move |who, _| {
-                eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
-            })),
-            ..Default::default()
-        }],
-        ..Default::default()
-    }), vec![], None)
+    def.types = vec![CardType::Land, CardType::Enchantment];
+    def.chapters = vec![
+        Action::Noop, // I: gains "{T}: Add {C}" — granted activated ability, not modeled
+        Action::Noop, // II: gains the Construct-token ability — not modeled
+        Action::Search {
+            who: IrWho::You,
+            zone: ZoneKindSel::Library,
+            filter: ir_and(ir_type(CardType::Artifact), ir_and(ir_colorless(), ir_mv_le(1))),
+            count: Expr::Num(1),
+            dest: ZoneKindSel::Battlefield,
+            to_top: false,
+            shuffle: true,
+            bind_as: None,
+        },
+    ];
+    def
 }
 
 /// {1}. Static: creature cards in graveyards and libraries can't enter the battlefield.

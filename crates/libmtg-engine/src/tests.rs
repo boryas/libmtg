@@ -3043,6 +3043,31 @@
             "Saga is sacrificed once its last chapter has resolved (CR 714.4)");
     }
 
+    #[test]
+    fn test_urza_saga_chapter_iii_fetches_then_sacrifices() {
+        // The real Urza's Saga on the machinery: lore 1/2 (chapters I/II no-ops),
+        // lore 3 (chapter III) fetches a {0}/{1}-MV artifact, then the SBA sacs it.
+        let mut state = make_state();
+        state.catalog.insert("Urza's Saga".into(), catalog_card("Urza's Saga"));
+        state.catalog.insert("Lotus Petal".into(), catalog_card("Lotus Petal"));
+        let lotus_id = add_library_card(&mut state, PlayerId::Us, "Lotus Petal");
+        let saga_id = add_hand_card(&mut state, PlayerId::Us, "Urza's Saga");
+
+        change_zone(saga_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us); // lore 1
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        add_lore_counter(&mut state, saga_id, 1); // lore 2
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        add_lore_counter(&mut state, saga_id, 1); // lore 3 → chapter III
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&lotus_id].zone(), Some(Zone::Battlefield),
+            "chapter III fetches Lotus Petal onto the battlefield");
+        recompute(&mut state);
+        check_state_based_actions(&mut state, 1);
+        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == saga_id),
+            "Urza's Saga is sacrificed after its final chapter");
+    }
+
     /// Green Sun's Zenith finds a green creature and puts it on the battlefield.
     /// A non-green creature in the same library is not moved.
     #[test]
