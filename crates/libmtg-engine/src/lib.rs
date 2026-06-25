@@ -995,6 +995,45 @@ pub(crate) fn recompute(state: &mut SimState) {
             state.objects.get_mut(&id).unwrap().materialized = Some(def);
         }
     }
+
+    // Phase 4: make granted abilities (CEMod::GrantAbility, layer 6) usable.
+    // Run the same synthesis build_catalog uses for a card's own IR activated
+    // abilities, now on the materialized `granted_abilities`, so a granted
+    // ability is activatable exactly like a printed one. Mana-ness is *computed*
+    // here (CR 605.1a via `is_mana_ability`), not pre-bucketed: each granted
+    // activated ability lands in `mana_abilities` or `abilities` accordingly —
+    // so both Urza's Saga chapter I (a mana ability) and chapter II (a non-mana
+    // activated ability) fall out of the one `GrantAbility` primitive.
+    for &id in &ids {
+        let granted: Vec<crate::ir::ability::Ability> =
+            match state.objects.get(&id).and_then(|o| o.materialized.as_ref()) {
+                Some(def) if !def.granted_abilities.is_empty() => def.granted_abilities.clone(),
+                _ => continue,
+            };
+        let synth_act: Vec<AbilityDef> = granted
+            .iter()
+            .filter_map(crate::ir::executor::ir_activated_as_legacy)
+            .collect();
+        let synth_mana: Vec<ManaAbility> = granted
+            .iter()
+            .filter_map(crate::ir::executor::ir_activated_as_mana_ability_legacy)
+            .collect();
+        if synth_act.is_empty() && synth_mana.is_empty() {
+            continue;
+        }
+        if let Some(def) = state.objects.get_mut(&id).and_then(|o| o.materialized.as_mut()) {
+            if !synth_act.is_empty() {
+                if let Some(list) = def.abilities_vec_mut() {
+                    list.extend(synth_act);
+                }
+            }
+            if !synth_mana.is_empty() {
+                if let Some(list) = def.mana_abilities_vec_mut() {
+                    list.extend(synth_mana);
+                }
+            }
+        }
+    }
 }
 
 // ── Turn structure ────────────────────────────────────────────────────────────

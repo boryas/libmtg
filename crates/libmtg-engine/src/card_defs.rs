@@ -1124,14 +1124,18 @@ fn mox_opal() -> CardDef {
 /// counter on entry and each precombat main fires chapters I → II → III, and the
 /// SBA sacrifices it after chapter III.
 ///
-/// Chapter III (search your library for a {0}/{1}-mana-value artifact, put it
-/// onto the battlefield, then shuffle) and the lore timing/sacrifice are faithful.
-/// Chapters I ("gains {T}: Add {C}") and II ("gains {T}, Sacrifice: create an
-/// X/X Construct…") *grant the Saga activated abilities*, which the engine can't
-/// yet make usable (granted abilities only feed triggered abilities), so they're
-/// left as no-ops — a known gap, not a machinery limitation.
+/// Chapter I grants the Saga a real `{T}: Add {C}` mana ability (via
+/// `GrantAbility` — usable, mana-ness computed). Chapter III (search for a
+/// {0}/{1}-mana-value artifact → battlefield, shuffle) and the lore timing /
+/// sacrifice are faithful. Chapter II ("gains {T}, Sacrifice: create an X/X
+/// Construct…") is left as a no-op: the grant works now, but the token's X/X
+/// (X = artifacts you control) needs Expr-based `TokenSpec` power/toughness — a
+/// separate gap.
 fn ursas_saga() -> CardDef {
-    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
+    use crate::ir::action::{Action, Expiry as IrExpiry, ManaSpec, Who as IrWho};
+    use crate::ir::ce::CEMod;
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut def = CardDef::new(
         "Urza's Saga",
@@ -1143,8 +1147,27 @@ fn ursas_saga() -> CardDef {
     );
     def.types = vec![CardType::Land, CardType::Enchantment];
     def.chapters = vec![
-        Action::Noop, // I: gains "{T}: Add {C}" — granted activated ability, not modeled
-        Action::Noop, // II: gains the Construct-token ability — not modeled
+        // I: "Urza's Saga gains '{T}: Add {C}.'" Granted as a real activated
+        // ability that classifies (CR 605.1a) as a mana ability, while it's on
+        // the battlefield.
+        Action::ApplyCE {
+            target: Expr::Ctx(Ctx::Source),
+            mods: vec![CEMod::GrantAbility(Box::new(Ability {
+                kind: AbilityKind::Activated {
+                    cost: CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) }),
+                    target_spec: TargetSpec::None,
+                    choice_spec: None,
+                    body: Action::AddMana { who: IrWho::You, count: Expr::Num(1), spec: ManaSpec::Fixed(vec![]) },
+                    timing: ActivationTiming::Default,
+                    activation_condition: None,
+                    active_zone: ZoneKindSel::Battlefield,
+                },
+                text: Some("{T}: Add {C}."),
+            }))],
+            expiry: IrExpiry::WhileSourcePresent,
+        },
+        // II: gains the X/X Construct-token ability — grant works, token P/T gap.
+        Action::Noop,
         Action::Search {
             who: IrWho::You,
             zone: ZoneKindSel::Library,

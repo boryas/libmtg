@@ -3055,6 +3055,10 @@
 
         change_zone(saga_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us); // lore 1
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        // Chapter I granted Urza's Saga a usable {T}: Add {C} mana ability.
+        recompute(&mut state);
+        assert_eq!(state.def_of(saga_id).map(|d| d.mana_abilities().len()), Some(1),
+            "chapter I grants {{T}}: Add {{C}} (a usable, computed mana ability)");
         add_lore_counter(&mut state, saga_id, 1); // lore 2
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
         add_lore_counter(&mut state, saga_id, 1); // lore 3 → chapter III
@@ -3066,6 +3070,53 @@
         check_state_based_actions(&mut state, 1);
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == saga_id),
             "Urza's Saga is sacrificed after its final chapter");
+    }
+
+    #[test]
+    fn test_grant_ability_makes_mana_and_activated_abilities_usable() {
+        // CEMod::GrantAbility must make BOTH a mana ability and a non-mana
+        // activated ability usable, with mana-ness computed (CR 605.1a) — they
+        // land in mana_abilities() vs abilities() by classification, not bucket.
+        use crate::ir::ability::{Ability, AbilityKind, CostBody};
+        use crate::ir::action::{Action, ManaSpec, Who as IrWho};
+        use crate::ir::ce::CEMod;
+        use crate::ir::context::Ctx;
+        use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+        let activated = |body: Action| Ability {
+            kind: AbilityKind::Activated {
+                cost: CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) }),
+                target_spec: TargetSpec::None,
+                choice_spec: None,
+                body,
+                timing: ActivationTiming::Default,
+                activation_condition: None,
+                active_zone: ZoneKindSel::Battlefield,
+            },
+            text: None,
+        };
+        let mana = activated(Action::AddMana { who: IrWho::You, count: Expr::Num(1), spec: ManaSpec::Fixed(vec![]) });
+        let draw = activated(Action::Draw { who: IrWho::You, n: Expr::Num(1) });
+
+        // A creature whose static ability grants itself both abilities.
+        let mut granter = creature("Granter", 1, 1);
+        granter.abilities = vec![Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::GrantAbility(Box::new(mana)), CEMod::GrantAbility(Box::new(draw))],
+                scope: Some(Filter(Expr::Eq(Box::new(Expr::Ctx(Ctx::It)), Box::new(Expr::Ctx(Ctx::Source))))),
+                condition: None,
+            },
+            text: None,
+        }];
+        let mut state = make_state();
+        state.catalog.insert("Granter".into(), granter);
+        let id = add_default_perm(&mut state, PlayerId::Us, "Granter");
+        recompute(&mut state);
+
+        let def = state.def_of(id).expect("materialized");
+        assert_eq!(def.mana_abilities().len(), 1,
+            "granted {{T}}: Add {{C}} is classified (computed) as a usable mana ability");
+        assert_eq!(def.abilities().iter().filter(|a| a.ir_body.is_some()).count(), 1,
+            "granted {{T}}: draw is a usable (non-mana) activated ability");
     }
 
     /// Green Sun's Zenith finds a green creature and puts it on the battlefield.
