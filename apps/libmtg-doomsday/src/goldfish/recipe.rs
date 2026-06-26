@@ -754,28 +754,43 @@ pub fn deterministic_line(state: &SimState, who: PlayerId, max_turn: u32) -> Opt
     // (≤3 black goal) as long as some other source seeds its `B`.
     let ritual_used = need_after_petals > 0 && !s.rituals.is_empty();
 
+    // When we still need to cast the payoff tutor this line (Doomsday not in hand, not
+    // yet staged), its colored pip must be PAYABLE the turn we cast it. A fetch cracks
+    // into a dual that covers that pip, so develop FETCHES BEFORE plain black lands —
+    // otherwise `follow_line` burns the land drop on a Swamp (which can't pay e.g.
+    // Personal Tutor's {U}) and the tutor, hence Doomsday, slips a whole turn.
+    let tutor_pending = dd.is_none() && !staged && payoff_tutor_id(state, who).is_some();
+
     let mut steps = Vec::new();
-    // 1. Tutor first: it must resolve a turn before Doomsday is drawn. Skip it when
-    //    Doomsday is already staged on the known top (it will simply be drawn).
-    if dd.is_none() && !staged {
-        if let Some(tid) = payoff_tutor_id(state, who) {
+    // 1. Tutor first: it must resolve a turn before Doomsday is drawn — but only emit it
+    //    ahead of lands when its pip is already payable; otherwise develop the pip source
+    //    (a fetch/dual) first. Skipped when Doomsday is already staged on the known top.
+    if !tutor_pending {
+        if let Some(tid) = (dd.is_none() && !staged).then(|| payoff_tutor_id(state, who)).flatten() {
             steps.push(LineStep::CastTutor(tid));
         }
     }
-    // 2. Land development: crack in-play fetches, then make land drops (untapped /
-    //    hand-fetch first so they're usable the turn played, then taplands). Fetches
-    //    are skipped while a card is staged on top (they would shuffle it away).
+    // 2. Land development: crack in-play fetches, then make land drops. Fetches come
+    //    ahead of plain black lands so a tutor-turn drop produces the tutor's colour
+    //    (e.g. fetch Underground Sea for {U}, not a Swamp). Fetches are skipped while a
+    //    card is staged on top (they would shuffle it away).
     for &f in inplay_fetch {
         steps.push(LineStep::CrackFetch(f));
-    }
-    for &l in &s.hand_untapped {
-        steps.push(LineStep::PlayLand(l));
     }
     for &f in hand_fetch {
         steps.push(LineStep::PlayLand(f)); // crack is emitted once it's in play (re-emit)
     }
+    for &l in &s.hand_untapped {
+        steps.push(LineStep::PlayLand(l));
+    }
     for &l in &s.hand_tapped {
         steps.push(LineStep::PlayLand(l));
+    }
+    // 1b. Tutor AFTER the pip source is developed (only when it wasn't emitted above).
+    if tutor_pending {
+        if let Some(tid) = payoff_tutor_id(state, who) {
+            steps.push(LineStep::CastTutor(tid));
+        }
     }
     // 3a. Deploy petals. A Lotus Petal in play is an UNSPENT mana source — it's
     //     sacrificed only when mana is actually needed — so deploying it never wastes
