@@ -4272,9 +4272,21 @@ pub fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
                     let id = state.player(PlayerId::Us).library_order.iter().copied().find(|&id| {
                         state.objects.get(&id).map_or(false, |o| &o.catalog_key == name)
                     });
-                    if let Some(id) = id {
-                        state.set_card_zone(id, Zone::Hand { known: false });
-                    }
+                    let id = id.unwrap_or_else(|| {
+                        // The decklist doesn't contain this card. Rather than silently drop it
+                        // (which would leave a < 7-card hand and quietly wrong stats), materialize
+                        // it into the library exactly as deck-build does, so the forced hand is
+                        // honored verbatim. The library still supplies the natural draws / tutor
+                        // targets from the decklist.
+                        let new_id = state.alloc_id();
+                        state.objects.insert(
+                            new_id,
+                            GameObject::new(new_id, name.clone(), PlayerId::Us),
+                        );
+                        state.player_mut(PlayerId::Us).library_order.push_back(new_id);
+                        new_id
+                    });
+                    state.set_card_zone(id, Zone::Hand { known: false });
                 }
                 state.player_mut(who).draws_this_turn = 0;
                 continue;
