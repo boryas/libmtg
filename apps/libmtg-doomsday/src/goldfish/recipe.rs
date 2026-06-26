@@ -754,57 +754,56 @@ pub fn deterministic_line(state: &SimState, who: PlayerId, max_turn: u32) -> Opt
     // (≤3 black goal) as long as some other source seeds its `B`.
     let ritual_used = need_after_petals > 0 && !s.rituals.is_empty();
 
-    // When we still need to cast the payoff tutor this line (Doomsday not in hand, not
-    // yet staged), its colored pip must be PAYABLE the turn we cast it. A fetch cracks
-    // into a dual that covers that pip, so develop FETCHES BEFORE plain black lands —
-    // otherwise `follow_line` burns the land drop on a Swamp (which can't pay e.g.
-    // Personal Tutor's {U}) and the tutor, hence Doomsday, slips a whole turn.
-    let tutor_pending = dd.is_none() && !staged && payoff_tutor_id(state, who).is_some();
+    // The line is built by REDUCTION, not a hand-tuned ordering. Land development comes
+    // first, in DEPENDENCY order: crack in-play fetches, then make the once-per-turn land
+    // drop with FETCHES AHEAD of plain black lands — so the drop produces whatever colour
+    // the next cast needs (a fetched Underground Sea pays Personal Tutor's {U}; a Swamp
+    // can't). Fetches are skipped while a card is staged on top (a shuffle would scatter
+    // it — see `staged` above). The strategy re-derives the line every window, so this
+    // sequences the multi-turn line one drop at a time.
+    let develop = |steps: &mut Vec<LineStep>| {
+        for &f in inplay_fetch {
+            steps.push(LineStep::CrackFetch(f));
+        }
+        for &f in hand_fetch {
+            steps.push(LineStep::PlayLand(f)); // crack re-emitted once it's in play
+        }
+        for &l in &s.hand_untapped {
+            steps.push(LineStep::PlayLand(l));
+        }
+        for &l in &s.hand_tapped {
+            steps.push(LineStep::PlayLand(l));
+        }
+    };
 
     let mut steps = Vec::new();
-    // 1. Tutor first: it must resolve a turn before Doomsday is drawn — but only emit it
-    //    ahead of lands when its pip is already payable; otherwise develop the pip source
-    //    (a fetch/dual) first. Skipped when Doomsday is already staged on the known top.
-    if !tutor_pending {
-        if let Some(tid) = (dd.is_none() && !staged).then(|| payoff_tutor_id(state, who)).flatten() {
-            steps.push(LineStep::CastTutor(tid));
-        }
-    }
-    // 2. Land development: crack in-play fetches, then make land drops. Fetches come
-    //    ahead of plain black lands so a tutor-turn drop produces the tutor's colour
-    //    (e.g. fetch Underground Sea for {U}, not a Swamp). Fetches are skipped while a
-    //    card is staged on top (they would shuffle it away).
-    for &f in inplay_fetch {
-        steps.push(LineStep::CrackFetch(f));
-    }
-    for &f in hand_fetch {
-        steps.push(LineStep::PlayLand(f)); // crack is emitted once it's in play (re-emit)
-    }
-    for &l in &s.hand_untapped {
-        steps.push(LineStep::PlayLand(l));
-    }
-    for &l in &s.hand_tapped {
-        steps.push(LineStep::PlayLand(l));
-    }
-    // 1b. Tutor AFTER the pip source is developed (only when it wasn't emitted above).
-    if tutor_pending {
+
+    // REDUCTION A — acquire the payoff. Doomsday isn't in hand, but a library-top tutor
+    // can stage it: develop the tutor's pip source, cast the tutor, and stop. Doomsday is
+    // drawn next turn and the rest of the line is re-derived then. Casting the tutor only
+    // AFTER developing reduces the goal to "tutor's pip is payable" — which the fetch-first
+    // land development guarantees (no more Swamp-over-Sea).
+    if dd.is_none() && !staged {
         if let Some(tid) = payoff_tutor_id(state, who) {
+            develop(&mut steps);
             steps.push(LineStep::CastTutor(tid));
+            return Some(DetLine { turn, steps });
         }
     }
-    // 3a. Deploy petals. A Lotus Petal in play is an UNSPENT mana source — it's
-    //     sacrificed only when mana is actually needed — so deploying it never wastes
-    //     it, and it can pay the tutor's pip (the {U} for Personal Tutor) just as well
-    //     as it seeds BBB. So petals are not gated on holding the payoff.
+
+    // REDUCTION B — assemble BBB, then cast. Doomsday is in hand (or staged and about to be
+    // drawn). Develop lands; then petals + a single ritual cover ONLY the black the lands
+    // can't reach by the cast turn (the minimal consumable witness, so a dig never spends a
+    // resource the line needs). A petal is unspent mana in play (sacrificed only when the
+    // cost is paid), so deploy it freely; a ritual empties if unused, so fire one only with
+    // Doomsday in hand to spend it on.
+    develop(&mut steps);
     for &p in &s.petals_hand {
         steps.push(LineStep::CastPetal(p));
     }
-    // 3b. A ritual, by contrast, DOES empty if unused (its mana drains at end of step),
-    //     so only cast one with Doomsday in hand to spend it on.
     if dd.is_some() && ritual_used {
         steps.push(LineStep::CastRitual(s.rituals[0]));
     }
-    // 4. Cast Doomsday (once held — for the tutor line it's drawn first).
     if let Some(d) = dd {
         steps.push(LineStep::CastDoomsday(d));
     }
@@ -2635,5 +2634,125 @@ mod tests {
         ];
         want.sort_by_key(|b| (b.lands, b.petals, b.rituals));
         assert_eq!(got, want);
+    }
+
+    // ── reduction ladder: the EMITTED LINE (the witness), not just the cast turn ──
+    //
+    // Each test pins one reduction the deterministic solver makes: casting Doomsday
+    // reduces to assembling BBB, which reduces (ritual / fetch-crack / land-drop /
+    // petal) to a simpler mana position, and acquiring the payoff (a library-top
+    // tutor) reduces across a turn. We assert the ordered `deterministic_line` steps,
+    // so a future change that produces the wrong line — e.g. playing a Swamp over a
+    // Sea/fetch and stranding a tutor (the T2→T3 bug) — fails here, not in production.
+
+    /// The emitted deterministic line as readable `Tag(Card)` steps (`[]` if none).
+    fn line(bf: &[&str], hand: &[&str], library: &[&str], max_turn: u32) -> Vec<String> {
+        let s = setup(bf, hand, library);
+        let nm = |id: ObjId| s.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+        deterministic_line(&s, PlayerId::Us, max_turn)
+            .map(|l| {
+                l.steps.iter().map(|step| match step {
+                    LineStep::PlayLand(i) => format!("Play({})", nm(*i)),
+                    LineStep::CrackFetch(i) => format!("Crack({})", nm(*i)),
+                    LineStep::CastPetal(i) => format!("Petal({})", nm(*i)),
+                    LineStep::CastRitual(i) => format!("Ritual({})", nm(*i)),
+                    LineStep::CastTutor(i) => format!("Tutor({})", nm(*i)),
+                    LineStep::CastDoomsday(i) => format!("DD({})", nm(*i)),
+                }).collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Base case: BBB already up (3 black sources in play) + Doomsday in hand → cast it.
+    #[test]
+    fn line_base_bbb_dd_in_hand() {
+        assert_eq!(
+            line(&["Underground Sea", "Underground Sea", "Underground Sea"], &["Doomsday"], &[], 3),
+            ["DD(Doomsday)"]
+        );
+    }
+
+    /// Ritual reduces to the base: one black source + Dark Ritual + Doomsday → cast the
+    /// ritual (B → BBB), then we're back to "BBB up + DD in hand".
+    #[test]
+    fn line_ritual_reduces_to_base() {
+        assert_eq!(
+            line(&["Underground Sea"], &["Dark Ritual", "Doomsday"], &[], 3),
+            ["Ritual(Dark Ritual)", "DD(Doomsday)"]
+        );
+    }
+
+    /// Land drop reduces: a black land in hand → play it (the once-per-turn drop), then
+    /// reduce as before (ritual → base).
+    #[test]
+    fn line_land_drop_reduces() {
+        assert_eq!(
+            line(&[], &["Underground Sea", "Dark Ritual", "Doomsday"], &[], 3),
+            ["Play(Underground Sea)", "Ritual(Dark Ritual)", "DD(Doomsday)"]
+        );
+    }
+
+    /// Fetch-crack reduces: a fetch already in play (black target in library) → crack it
+    /// into a black source, then reduce.
+    #[test]
+    fn line_crack_inplay_fetch_reduces() {
+        assert_eq!(
+            line(&["Polluted Delta"], &["Dark Ritual", "Doomsday"], &["Underground Sea"], 3),
+            ["Crack(Polluted Delta)", "Ritual(Dark Ritual)", "DD(Doomsday)"]
+        );
+    }
+
+    /// Tutor reduces across a turn AND develops its pip source first. Doomsday is in the
+    /// LIBRARY; Personal Tutor stages it on top. The tutor's {U} must be developed (fetch
+    /// → Underground Sea) BEFORE casting it — and we must NOT spend the land drop on a
+    /// Swamp. This is the exact T2→T3 regression guard.
+    #[test]
+    fn line_tutor_develops_pip_source_not_swamp() {
+        let steps = line(
+            &[],
+            &["Personal Tutor", "Polluted Delta", "Swamp", "Dark Ritual"],
+            &["Doomsday", "Underground Sea"],
+            3,
+        );
+        let pos = |t: &str| steps.iter().position(|s| s == t);
+        assert_eq!(steps.first().map(String::as_str), Some("Play(Polluted Delta)"),
+            "develop the fetch (pip source) first, not a Swamp — got {steps:?}");
+        let f = pos("Play(Polluted Delta)").expect("fetch played");
+        let tut = pos("Tutor(Personal Tutor)").expect("tutor cast");
+        assert!(f < tut, "pip source must precede the tutor — got {steps:?}");
+        if let Some(sw) = pos("Play(Swamp)") {
+            assert!(f < sw, "fetch must precede a Swamp — got {steps:?}");
+        }
+    }
+
+    /// Cross-check: the same tutor hand is a deterministic TURN 2 (tutor T1, draw + cast
+    /// T2) — the line above is what realizes it.
+    #[test]
+    fn line_tutor_is_turn_two() {
+        let s = setup(
+            &[],
+            &["Personal Tutor", "Polluted Delta", "Swamp", "Dark Ritual"],
+            &["Doomsday", "Underground Sea"],
+        );
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(2));
+    }
+
+    /// Petal reduces: BB in play + Lotus Petal + Doomsday → crack the petal for the last
+    /// black pip, then cast.
+    #[test]
+    fn line_petal_reduces() {
+        assert_eq!(
+            line(&["Underground Sea", "Underground Sea"], &["Lotus Petal", "Doomsday"], &[], 3),
+            ["Petal(Lotus Petal)", "DD(Doomsday)"]
+        );
+    }
+
+    /// Fetch in hand reduces: the emitted line opens by developing it (it cracks into a
+    /// black source on the next window).
+    #[test]
+    fn line_fetch_in_hand_developed_first() {
+        let steps = line(&[], &["Polluted Delta", "Dark Ritual", "Doomsday"], &["Underground Sea"], 3);
+        assert_eq!(steps.first().map(String::as_str), Some("Play(Polluted Delta)"),
+            "open by developing the fetch — got {steps:?}");
     }
 }
