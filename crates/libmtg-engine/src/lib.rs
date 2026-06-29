@@ -28,9 +28,11 @@ pub use card_defs::build_catalog;
 
 mod effects;
 pub(crate) use effects::*;
+pub use effects::Who;
 
 mod predicates;
 pub(crate) use predicates::*;
+pub use predicates::TargetSpec;
 
 mod snapshot;
 mod objective;
@@ -444,8 +446,12 @@ pub enum GameEvent {
     /// `Action::Attach` so "whenever ~ becomes equipped/enchanted" triggers fire.
     /// `attachment` is the equipment/aura; `target` is the permanent it attached to.
     BecameAttached { attachment: ObjId, target: ObjId, controller: PlayerId },
-    // Future variants: DamageDealt, SpellResolved, AbilityActivated,
-    //                  CounterChanged, LifeChanged, TokenCreated.
+    /// One token entered the battlefield (CR 111). Fired by `do_create_token`
+    /// after the token object is inserted. `token_key` is its catalog key (e.g.
+    /// "Fantasticar Construct"); objectives observe this to detect token-making
+    /// wincons (The Fantasticar's pop).
+    TokenCreated { controller: PlayerId, token_key: String, id: ObjId },
+    // Future variants: DamageDealt, AbilityActivated, CounterChanged, LifeChanged.
 }
 
 /// Data stored with a triggered ability waiting to be pushed onto the stack.
@@ -1507,8 +1513,6 @@ pub struct PlayerState {
     pub life: i32,
     /// Number of lands played this turn; reset to 0 each Untap step. Engine enforces the one-per-turn rule.
     pub lands_played_this_turn: u8,
-    /// Number of non-land spells cast this turn; reset each Untap. Used for multi-spell probability.
-    spells_cast_this_turn: u8,
     /// Mana produced but not yet spent; drains at end of each step/phase.
     pub pool: ManaPool,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
@@ -1538,7 +1542,6 @@ impl PlayerState {
             life: 20,
             deck_name: deck.to_string(),
             lands_played_this_turn: 0,
-            spells_cast_this_turn: 0,
             pool: ManaPool::default(),
             draws_this_turn: 0,
             life_lost_this_turn: 0,
@@ -1960,6 +1963,21 @@ impl SimState {
             accumulate_source_potential(&hand_mas, false, &mut p);
         }
         p
+    }
+
+    /// Count of NONCREATURE spells `who` has cast this turn, read from the event log (the
+    /// engine's per-turn spell tally — the replacement for a scattered counter field). Used
+    /// by goldfish line-planning: The Fantasticar pops on the controller's fourth noncreature
+    /// spell, so the strategy must know how many have been cast to avoid firing the car as
+    /// that fourth spell (it would be on the stack, not in play, and the trigger would whiff).
+    pub fn noncreature_casts_this_turn(&self, who: PlayerId) -> u32 {
+        self.event_log.count(crate::ir::event_log::Window::ThisTurn, |e| {
+            matches!(e.event, GameEvent::SpellCast { caster, card_id, .. }
+                if caster == who
+                    && self.objects.get(&card_id)
+                        .and_then(|o| self.catalog.get(&o.catalog_key))
+                        .map_or(true, |d| !d.is_creature()))
+        }) as u32
     }
 
     fn life_of(&self, who: PlayerId) -> i32 {
@@ -3364,6 +3382,12 @@ pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         if let Some(obj) = state.objects.get_mut(&new_id) { obj.ci_timestamp = ts; }
     }
     state.log(t, controller, format!("{token_key} created"));
+    // Notify the event pipeline (objectives observe this for token-making
+    // wincons; no replacement/trigger in this deck reacts to it).
+    fire_event(
+        GameEvent::TokenCreated { controller, token_key: token_key.to_string(), id: new_id },
+        state, t, controller,
+    );
     new_id
 }
 
@@ -3707,7 +3731,6 @@ fn handle_priority_round(
                 } else {
                     let result = run_cast_submachine(state, t, who, card_id, face);
                     if let Some(cid) = result {
-                        state.player_mut(who).spells_cast_this_turn += 1;
                         state.stack.push(cid);
                         priority_holder = if who == ap { nap } else { ap };
                         last_passer = None;
@@ -3959,7 +3982,6 @@ fn do_step(
                 }
             }
             state.player_mut(ap).lands_played_this_turn = 0;
-            state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).draws_this_turn = 0;
             state.player_mut(ap).life_lost_this_turn = 0;
             // Expire "until your next turn" trigger and continuous instances for the active player.

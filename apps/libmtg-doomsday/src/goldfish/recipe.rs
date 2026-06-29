@@ -28,6 +28,7 @@ use libmtg_engine::{
 };
 
 const DOOMSDAY: &str = "Doomsday";
+const FANTASTICAR: &str = "The Fantasticar";
 
 // ── Capability projection (read from IR via the existing accessors) ──────────
 
@@ -276,34 +277,128 @@ fn project_inner(state: &SimState, who: PlayerId, count_fetches: bool) -> Caps {
 /// producer gives +1; the land drop gives +1 once; a ritual converts a 1-black
 /// seed into 3. Sound + complete for the all-black goal (every producer is
 /// dominant toward black).
-fn reach_black(need: i32, black: u32, other: u32, ritual_gp: [u32; 4]) -> bool {
-    if need <= 0 {
+/// Generic backward mana reachability: can we pay `blk` colored (black) pips and
+/// `gen` generic pips from `black` black-capable units, `other` non-black units,
+/// and `ritual_gp` rituals? This is the reusable core — *any* mana cost (Doomsday's
+/// `BBB`, The Fantasticar's `{3}`) reduces to a `(blk, gen)` query, so the model
+/// is no longer black-specific (the colored axis is just "the pips that need a
+/// matching source"; for this UB deck that axis is black).
+///
+/// Producers: a black-capable unit pays one black pip OR one generic pip; a
+/// non-black unit pays one generic pip; a ritual costs a 1-black seed + `g` generic
+/// pips and yields 3 black-capable mana (may chain — its output seeds another).
+fn reach_mana(blk: i32, gen: i32, black: u32, other: u32, ritual_gp: [u32; 4]) -> bool {
+    if blk <= 0 && gen <= 0 {
         return true;
     }
-    // pay a black pip of `need` from a black producer (+1).
-    if black > 0 && reach_black(need - 1, black - 1, other, ritual_gp) {
+    // Pay a colored pip from a black-capable unit.
+    if blk > 0 && black > 0 && reach_mana(blk - 1, gen, black - 1, other, ritual_gp) {
         return true;
     }
-    // fire a ritual: it yields 3 black (covers any need ≤ 3). Pay its g generic pips
-    // from `other` (non-black) mana first, the rest from black; then produce the 1
-    // black seed pip plus any generic-paid-from-black from what remains — which may
-    // chain another ritual.
-    if need <= 3 {
+    // Pay a generic pip — prefer non-black mana, then black (conserve black for pips).
+    if gen > 0 && other > 0 && reach_mana(blk, gen - 1, black, other - 1, ritual_gp) {
+        return true;
+    }
+    if gen > 0 && black > 0 && reach_mana(blk, gen - 1, black - 1, other, ritual_gp) {
+        return true;
+    }
+    // Fire a ritual: pay `g` generic pips (non-black first, rest from black) + a
+    // 1-black seed; gain 3 black-capable mana.
+    if blk + gen > 0 {
         for g in 0..ritual_gp.len() {
             if ritual_gp[g] == 0 {
                 continue;
             }
-            let g = g as u32;
-            let from_other = g.min(other);
-            let seed = 1 + (g - from_other); // 1 black seed pip + generic paid from black
-            let mut rg = ritual_gp;
-            rg[g as usize] -= 1;
-            if reach_black(seed as i32, black, other - from_other, rg) {
-                return true;
+            let from_other = (g as u32).min(other);
+            let black_cost = 1 + (g as u32 - from_other); // seed + generic-from-black
+            if black >= black_cost {
+                let mut rg = ritual_gp;
+                rg[g] -= 1;
+                if reach_mana(blk, gen, black - black_cost + 3, other - from_other, rg) {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+/// Black-only specialization (Doomsday's `BBB`): pay `need` black pips. Delegates
+/// to the generic [`reach_mana`] — kept as a named helper for the all-black goal.
+/// Equivalence with the former standalone implementation (for the combo regime,
+/// `need ≤ 3`) is pinned by `reach_black_parity` in the tests.
+fn reach_black(need: i32, black: u32, other: u32, ritual_gp: [u32; 4]) -> bool {
+    reach_mana(need, 0, black, other, ritual_gp)
+}
+
+/// A parsed mana cost: generic pips + colored pips per `Color`. Drives the generic
+/// [`cost_turn`] backward solver, so any line states its requirement as a cost
+/// (Doomsday `BBB`, The Fantasticar `{3}`) rather than a bespoke black query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManaCost {
+    generic: u32,
+    pips: [u32; 5], // indexed by `Color as usize`: W, U, B, R, G
+}
+
+const BLACK: usize = Color::Black as usize;
+
+impl ManaCost {
+    /// Parse "BBB", "1B", "3", etc. Digits → generic; W/U/B/R/G → colored pips;
+    /// {C} → generic (colorless); X/braces/whitespace ignored.
+    fn parse(cost: &str) -> ManaCost {
+        let mut mc = ManaCost { generic: 0, pips: [0; 5] };
+        let mut num = 0u32;
+        let mut saw_digit = false;
+        let flush = |mc: &mut ManaCost, num: &mut u32, saw: &mut bool| {
+            if *saw {
+                mc.generic += *num;
+                *num = 0;
+                *saw = false;
+            }
+        };
+        for ch in cost.trim().chars() {
+            if let Some(d) = ch.to_digit(10) {
+                num = num * 10 + d;
+                saw_digit = true;
+                continue;
+            }
+            flush(&mut mc, &mut num, &mut saw_digit);
+            match ch {
+                'W' => mc.pips[Color::White as usize] += 1,
+                'U' => mc.pips[Color::Blue as usize] += 1,
+                'B' => mc.pips[Color::Black as usize] += 1,
+                'R' => mc.pips[Color::Red as usize] += 1,
+                'G' => mc.pips[Color::Green as usize] += 1,
+                'C' => mc.generic += 1,
+                _ => {}
+            }
+        }
+        flush(&mut mc, &mut num, &mut saw_digit);
+        mc
+    }
+}
+
+/// Can `cost` be paid on turn `turn` with `pool` one-shot tokens available?
+/// Colored pips are charged against black-capable mana (the only colored axis in
+/// this deck); any non-black colored pips are approximated as generic (none occur
+/// in the modeled costs). Generic pips draw from all mana.
+fn cost_on_turn(c: &Caps, cost: &ManaCost, turn: u32, pool: u32) -> bool {
+    let blk = cost.pips[BLACK];
+    let non_black_colored: u32 = cost
+        .pips
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != BLACK)
+        .map(|(_, n)| *n)
+        .sum();
+    let gen = cost.generic + non_black_colored;
+    reach_mana(
+        blk as i32,
+        gen as i32,
+        renew_black_by_turn(c, turn) + pool,
+        other_online_by_turn(c, turn),
+        c.ritual_gp,
+    )
 }
 
 /// How many lands in hand can be ONLINE (untapped, tappable) by turn `turn` —
@@ -352,12 +447,8 @@ fn other_online_by_turn(c: &Caps, turn: u32) -> u32 {
 /// rituals are consumables. `pool` is passed explicitly so a caller that already
 /// spent a token (e.g. a sac'd petal paying a pip) charges BBB the depleted pool.
 fn bbb_on_turn(c: &Caps, turn: u32, pool: u32) -> bool {
-    reach_black(
-        3,
-        renew_black_by_turn(c, turn) + pool,
-        other_online_by_turn(c, turn),
-        c.ritual_gp,
-    )
+    // Doomsday's BBB expressed as a generic cost over the shared solver.
+    cost_on_turn(c, &ManaCost::parse("BBB"), turn, pool)
 }
 
 /// Earliest turn (≤ `max_turn`) BBB is producible with `pool` one-shot tokens, or
@@ -604,6 +695,293 @@ fn deterministic_cast_turn_ex(
     });
 
     [direct, tutor, staged].into_iter().flatten().min()
+}
+
+// ── The Fantasticar: backward solver for the "pop the car" line ──────────────
+//
+// Symmetric to `deterministic_cast_turn` but for the OTHER wincon: sacrifice The
+// Fantasticar to its "fourth noncreature spell" trigger (→ four 4/4 fliers). The
+// requirement is two-part: (1) The Fantasticar in play (or castable for {3} this
+// turn, cast among the first three so it's out for the 4th), and (2) four
+// noncreature spells cast this turn — the car's own cast counts. The cheap fuel is
+// the deck's FREE noncreature spells (Mishra's Bauble / Lotus Petal / LED); a Petal
+// pulls double duty (cast → +1 to the count; sacrifice → +1 mana toward {3}).
+//
+// SPIKE (conservative lower bound, like the rest of this module): only free `{0}`
+// noncreature spells are modeled as count-fuel. Cantrips/rituals also count toward
+// four in reality but pricing them into the same turn needs the per-spell mana
+// solve; deferred. The deck's nine free copies make the line viable regardless, and
+// the realized sim (which counts every noncreature cast via the engine trigger) sees
+// any extra lines this misses.
+
+/// Earliest turn (1-based, ≤ `max_turn`) `who` can pop The Fantasticar using only
+/// the current hand+board (no blind draws), or `None`.
+/// A noncreature spell we can cast *proactively* this turn for the count — i.e. it
+/// doesn't need an opponent OBJECT we don't have. Counterspells / removal (Force,
+/// Daze, Fatal Push: `ObjectInZone { Opp, … }`) are excluded; Thoughtseize (targets a
+/// player) and cantrips (no target) qualify, as do rituals and the {0} artifacts.
+fn is_proactive_noncreature(def: &CardDef) -> bool {
+    use libmtg_engine::{TargetSpec, Who};
+    fn needs_opp_object(ts: &TargetSpec) -> bool {
+        match ts {
+            TargetSpec::ObjectInZone { controller, .. } => matches!(controller, Who::Opp),
+            TargetSpec::Union(v) => v.iter().any(needs_opp_object),
+            _ => false,
+        }
+    }
+    !def.is_land() && !def.is_creature() && !needs_opp_object(def.target_spec())
+}
+
+/// Mana value of a parsed cost.
+fn mana_value(cost: &ManaCost) -> u32 {
+    cost.generic + cost.pips.iter().sum::<u32>()
+}
+
+/// The car's noncreature fuel, partitioned for `car_pop_feasible`.
+///   free_petal = {0} mana artifacts (Lotus Petal): +1 to the count AND +1 pool mana.
+///   free_other = {0} non-mana (Mishra's Bauble, LED): +1 to the count only.
+///   rituals    = Dark-Ritual-shaped: +1 to the count AND net mana.
+///   paid       = other proactive noncreature spells' mana values (Thoughtseize, cantrips).
+#[derive(Clone, Default)]
+struct CarFuel {
+    free_petal: u32,
+    free_other: u32,
+    rituals: u32,
+    paid: Vec<u32>,
+}
+
+impl CarFuel {
+    /// Fold one card into the tally. `*car_seen` skips exactly one Fantasticar (the
+    /// payoff itself is not fuel); pass it already-true when a car is in play.
+    fn add(&mut self, def: &CardDef, key: &str, car_seen: &mut bool) {
+        if key == FANTASTICAR && !*car_seen {
+            *car_seen = true;
+            return;
+        }
+        if !is_proactive_noncreature(def) {
+            return;
+        }
+        if is_black_ritual(def) {
+            self.rituals += 1;
+        } else if def.mana_cost().trim() == "0" {
+            if oneshot_produces_color(def, Color::Black) {
+                self.free_petal += 1;
+            } else {
+                self.free_other += 1;
+            }
+        } else {
+            self.paid.push(mana_value(&ManaCost::parse(def.mana_cost())));
+        }
+    }
+}
+
+pub fn car_pop_turn(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
+    car_pop_turn_full(state, who, &[], &[], false, max_turn)
+}
+
+/// [`car_pop_turn`] with `extra_hand` cards gained THIS turn (a Brainstorm burst you
+/// keep) and a KNOWN top-of-library prefix that arrives over the coming turns (Ponder
+/// ordering / a Brainstorm put-back left on top). Mirrors `deterministic_cast_turn_full`:
+/// extras fold in immediately, prefix cards by their draw turn. This is what lets the
+/// selection find a guaranteed car line in revealed pieces — e.g. Brainstorm into
+/// petal/car/petal → keep them → car the next turn.
+fn car_pop_turn_full(
+    state: &SimState,
+    who: PlayerId,
+    extra_hand: &[&str],
+    known_top: &[&str],
+    immediate: bool,
+    max_turn: u32,
+) -> Option<u32> {
+    let car_in_play = state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR);
+
+    // Base mana caps: project() already folds the hand; add extra_hand mana on top.
+    // Base fuel: classified from hand + extra_hand. (Hand mana is in project(); we only
+    // need the fuel COUNT here, so hand cards go through `CarFuel::add`, not fold_known_card.)
+    let mut base_caps = project(state, who);
+    let mut base_fuel = CarFuel::default();
+    let mut base_car = car_in_play;
+    let mut base_seen = car_in_play; // a car in play already accounts for the payoff
+    for card in state.hand_of(who) {
+        if let Some(def) = state.catalog.get(&card.catalog_key) {
+            if card.catalog_key == FANTASTICAR {
+                base_car = true;
+            }
+            base_fuel.add(def, &card.catalog_key, &mut base_seen);
+        }
+    }
+    for &k in extra_hand {
+        if let Some(def) = state.catalog.get(k) {
+            if k == FANTASTICAR {
+                base_car = true;
+            }
+            let mut dd = false;
+            fold_known_card(&mut base_caps, &mut dd, def, k);
+            base_fuel.add(def, k, &mut base_seen);
+        }
+    }
+
+    for t in 1..=max_turn {
+        let seen = if immediate { t as usize } else { t.saturating_sub(1) as usize };
+        let mut caps = base_caps;
+        let mut fuel = base_fuel.clone();
+        let mut car = base_car;
+        let mut cseen = base_seen;
+        for &k in known_top.iter().take(seen) {
+            if let Some(def) = state.catalog.get(k) {
+                if k == FANTASTICAR {
+                    car = true;
+                }
+                let mut dd = false;
+                fold_known_card(&mut caps, &mut dd, def, k);
+                fuel.add(def, k, &mut cseen);
+            }
+        }
+        if car {
+            fuel.paid.sort_unstable();
+            // We must CAST the car ({3}) unless it is already in play.
+            if car_pop_feasible(&caps, t, !car_in_play, &fuel) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Can the car pop on turn `t`? Thin per-turn wrapper over [`solve_pop`] — it just supplies
+/// the resources for a FRESH turn (`spells_this_turn = 0`): `base` = generic-capable mana
+/// online by turn `t` MINUS hand Petals (which `solve_pop` re-adds as fuel, so they are not
+/// double-counted), i.e. lands + in-play one-shots (`c.pool` already includes hand petals).
+/// This is the deterministic-solver caller; `can_pop_this_turn` is the live-execution caller
+/// — same rule, same `solve_pop`. SPIKE: paid pips and ritual seeding approximated as generic
+/// (not strictly black), exact enough for this mostly-black manabase.
+fn car_pop_feasible(c: &Caps, t: u32, car_in_hand: bool, fuel: &CarFuel) -> bool {
+    let lands_m = renew_black_by_turn(c, t) + other_online_by_turn(c, t);
+    let base_mana = (lands_m + c.pool).saturating_sub(fuel.free_petal);
+    solve_pop(base_mana, 0, fuel, !car_in_hand)
+}
+
+/// Can `who` COMPLETE a car pop THIS turn from the current MID-turn state? Unlike
+/// `car_pop_turn` (which assumes a fresh turn and projects future land drops), this gates
+/// real-time execution: it accounts for noncreature spells already cast this turn and the
+/// mana available right now (floating + untapped, via `potential_mana`). The hard rule it
+/// enforces is ordering: the car must be castable as the **≤3rd** noncreature spell of the
+/// turn (so the FOURTH cast triggers with the car already IN PLAY) with ≥1 castable spell
+/// after it. The strategy spends the car / ramp / pop-fuel only when this holds — otherwise
+/// it conserves and pops next turn, never firing the car as the doomed 4th-or-later spell.
+/// PURE resource solver — the one place the per-turn pop rule lives. Both callers
+/// (`can_pop_this_turn` for live execution, and ultimately the deterministic per-turn
+/// check) fill these resources; they differ only in how:
+///   - `base_mana`: generic-capable mana available WITHOUT casting fuel (lands online +
+///     floating + in-play one-shots);
+///   - `spells_this_turn`: noncreature casts already made this turn — the **temporal
+///     cast-slot** resource already consumed;
+///   - `fuel`: the noncreature spells in hand. A Petal is BOTH a cast and {1} mana; a
+///     ritual a cast and net mana; `free_other`/`paid` are casts (paid ones cost mana);
+///   - `car_in_play`: the car is already a permanent (else it must be CAST — paying {3}).
+/// Rule: reach 4 noncreature casts this turn with the car in play before the 4th. If the
+/// car must be cast, it has to occupy cast-slot ≤3 with ≥1 castable spell after it — that
+/// ordering IS the temporal resource, and it is what stops the car being fired as the
+/// doomed 4th spell (on the stack, not in play → the trigger whiffs).
+fn solve_pop(base_mana: u32, spells_this_turn: u32, fuel: &CarFuel, car_in_play: bool) -> bool {
+    if spells_this_turn >= 4 {
+        return false; // the 4th cast has passed; if it was going to pop, it already did
+    }
+    let seedable = base_mana >= 1 || fuel.free_petal >= 1;
+    let ritual_mana = if seedable { 2 * fuel.rituals } else { 0 };
+    let free = fuel.free_petal + fuel.free_other; // {0} casts (Petals also sac for mana)
+    let total_mana = base_mana + fuel.free_petal + ritual_mana;
+    // Greedily fit the paid spells (cantrips/Thoughtseize) into `avail` mana.
+    let fit_paid = |avail: u32| -> u32 {
+        let mut rem = avail;
+        let mut n = 0;
+        for &cmc in &fuel.paid {
+            if rem >= cmc { rem -= cmc; n += 1; } else { break; }
+        }
+        n
+    };
+    if car_in_play {
+        // Any 4 noncreature casts this turn pop it — need (4 - spells_this_turn) more.
+        let castable = free + fuel.rituals + fit_paid(total_mana);
+        return spells_this_turn + castable >= 4;
+    }
+    // Car in hand → must afford {3} AND land as the ≤3rd noncreature spell of the turn.
+    if total_mana < 3 {
+        return false;
+    }
+    let ramp_before = min_ramp_for_three(base_mana, fuel);
+    let car_pos = spells_this_turn + ramp_before + 1;
+    if car_pos > 3 {
+        return false; // the car would be the 4th-or-later spell → no pop this turn
+    }
+    let castable_non_car = free + fuel.rituals + fit_paid(total_mana.saturating_sub(3));
+    let post_car = castable_non_car.saturating_sub(ramp_before);
+    post_car >= 4 - car_pos
+}
+
+/// Can `who` COMPLETE a car pop THIS turn from the current MID-turn state? Fills the
+/// resources for [`solve_pop`] from live state — cast-slots already used =
+/// `noncreature_casts_this_turn`, base mana = `potential_mana` (floating + untapped, NOT
+/// future land drops). The strategy gates spending the car/ramp/fuel on this; otherwise it
+/// conserves and pops next turn. See [`solve_pop`] for the rule.
+pub fn can_pop_this_turn(state: &SimState, who: PlayerId) -> bool {
+    let car_in_play = state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR);
+    let car_in_hand = state.hand_of(who).any(|c| c.catalog_key == FANTASTICAR);
+    if !car_in_play && !car_in_hand {
+        return false;
+    }
+    let mut fuel = CarFuel::default();
+    let mut seen = car_in_play; // a car in play already accounts for the payoff
+    for card in state.hand_of(who) {
+        if let Some(def) = state.catalog.get(&card.catalog_key) {
+            fuel.add(def, &card.catalog_key, &mut seen);
+        }
+    }
+    fuel.paid.sort_unstable();
+    let base = state.potential_mana(who).total.max(0) as u32;
+    solve_pop(base, state.noncreature_casts_this_turn(who), &fuel, car_in_play)
+}
+
+/// Minimum number of mana-producing spells (rituals first — fewer casts; a {0} Petal must
+/// lead to seed a ritual when there is no black yet) cast BEFORE the car to fund its {3},
+/// given `base` mana already available now.
+fn min_ramp_for_three(base: u32, fuel: &CarFuel) -> u32 {
+    if base >= 3 {
+        return 0;
+    }
+    let (mut mana, mut spells) = (base, 0u32);
+    let (mut petals, mut rituals) = (fuel.free_petal, fuel.rituals);
+    if base == 0 && rituals > 0 && petals > 0 {
+        mana += 1; petals -= 1; spells += 1; // a Petal seeds the first ritual
+    }
+    while mana < 3 && rituals > 0 { mana += 2; rituals -= 1; spells += 1; }
+    while mana < 3 && petals > 0 { mana += 1; petals -= 1; spells += 1; }
+    spells
+}
+
+/// Earliest turn `who` can "send" — resolve Doomsday OR pop The Fantasticar — from the
+/// current hand+board with no blind draws.
+pub fn deterministic_send_turn(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
+    deterministic_send_turn_full(state, who, &[], &[], false, max_turn)
+}
+
+/// [`deterministic_send_turn`] with the `extra_hand`/`known_top` look-ahead — the
+/// min of the Doomsday and car lines, each evaluated with the same revealed pieces.
+fn deterministic_send_turn_full(
+    state: &SimState,
+    who: PlayerId,
+    extra_hand: &[&str],
+    known_top: &[&str],
+    immediate: bool,
+    max_turn: u32,
+) -> Option<u32> {
+    [
+        deterministic_cast_turn_full(state, who, extra_hand, known_top, immediate, max_turn),
+        car_pop_turn_full(state, who, extra_hand, known_top, immediate, max_turn),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 // ── Concrete deterministic-line emission ─────────────────────────────────────
@@ -1317,6 +1695,152 @@ pub fn p_cast_by_with_known_top(
     p_cast_by_full(state, who, &[], known_top, immediate, cutoff)
 }
 
+// ── The unified SEND objective: P(Doomsday OR car by cutoff) ──────────────────
+
+/// Hypergeometric P(draw ≥ `k` of `outs` in `draws` from `library`).
+fn p_at_least_k(library: u32, outs: u32, draws: u32, k: u32) -> f64 {
+    if k == 0 {
+        return 1.0;
+    }
+    if outs < k || draws < k {
+        return 0.0;
+    }
+    let (n, m, d) = (library as i64, outs as i64, draws as i64);
+    // P(X = 0): every draw is a non-out.
+    let mut pj = 1.0f64;
+    for i in 0..d {
+        let nb = n - m - i;
+        if nb <= 0 {
+            return 1.0; // outs saturate the draws → certainly ≥ k
+        }
+        pj *= nb as f64 / (n - i) as f64;
+    }
+    let mut below = pj; // accumulate P(X < k)
+    let mut j = 0i64;
+    while j + 1 < k as i64 {
+        let den = (j + 1) * (n - m - d + j + 1);
+        if den <= 0 {
+            break;
+        }
+        pj = pj * ((m - j) * (d - j)) as f64 / den as f64;
+        below += pj;
+        j += 1;
+    }
+    (1.0 - below).clamp(0.0, 1.0)
+}
+
+/// A card's contribution to the car line: (is the payoff, is cheap fuel, is a mana source).
+fn car_card_roles(state: &SimState, key: &str) -> (bool, bool, bool) {
+    if key == FANTASTICAR {
+        return (true, false, false);
+    }
+    let Some(def) = state.catalog.get(key) else {
+        return (false, false, false);
+    };
+    // Fuel: a cheap proactive noncreature — free, a ritual, or mana value ≤ 1
+    // (Petal/Bauble/LED/Dark Ritual/cantrip/Thoughtseize). Counterspells are excluded
+    // by `is_proactive_noncreature` (no opponent object to target in a goldfish).
+    let fuel = is_proactive_noncreature(def)
+        && (def.mana_cost().trim() == "0"
+            || is_black_ritual(def)
+            || mana_value(&ManaCost::parse(def.mana_cost())) <= 1);
+    // Mana source toward the {3}: a land, a {0} mana artifact (Petal), or a ritual.
+    let mana = def.is_land()
+        || (def.mana_cost().trim() == "0" && !def.mana_abilities().is_empty())
+        || is_black_ritual(def);
+    (false, fuel, mana)
+}
+
+/// Stochastic P(pop the car by `cutoff`) given `draws` + cantrip looks: P(have a car) ×
+/// P(have ≥3 fuel) × P(have {3} mana), each hypergeometric. Crude independence; v1,
+/// mirroring `p_cast_stochastic`. `extra_hand` cards count as already held.
+fn p_car_pop_stochastic(
+    state: &SimState,
+    who: PlayerId,
+    extra_hand: &[&str],
+    cutoff: u32,
+    draws: u32,
+) -> f64 {
+    let library = state.library_of(who).count() as u32;
+    if library == 0 {
+        return 0.0;
+    }
+    let draws = draws + cantrip_looks(state, who, cutoff);
+
+    let (mut have_car, mut hand_fuel, mut hand_mana) = (
+        state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR),
+        0u32,
+        0u32,
+    );
+    let hand_iter = state
+        .hand_of(who)
+        .map(|c| c.catalog_key.clone())
+        .chain(extra_hand.iter().map(|s| s.to_string()));
+    for key in hand_iter {
+        let (p, f, m) = car_card_roles(state, &key);
+        have_car |= p;
+        hand_fuel += f as u32;
+        hand_mana += m as u32;
+    }
+    let (mut lib_car, mut lib_fuel, mut lib_mana) = (0u32, 0u32, 0u32);
+    for c in state.library_of(who) {
+        let (p, f, m) = car_card_roles(state, &c.catalog_key);
+        lib_car += p as u32;
+        lib_fuel += f as u32;
+        lib_mana += m as u32;
+    }
+
+    let p_car = if have_car { 1.0 } else { p_at_least_one(library, lib_car, draws) };
+    let p_fuel = p_at_least_k(library, lib_fuel, draws, 3u32.saturating_sub(hand_fuel));
+    let p_mana = p_at_least_k(library, lib_mana, draws, 3u32.saturating_sub(hand_mana));
+    p_car * p_fuel * p_mana
+}
+
+/// `P(SEND by cutoff)` = P(resolve Doomsday OR pop the car). 1.0 if a deterministic send
+/// line exists; otherwise the (roughly independent) OR of the two stochastic estimates.
+/// THIS is the single objective the strategy maximises, so digging toward, keeping, and
+/// mulliganing for whichever wincon is closer all fall out of it.
+pub fn p_send_by(state: &SimState, who: PlayerId, cutoff: u32) -> f64 {
+    p_send_by_full(state, who, &[], &[], false, cutoff)
+}
+
+pub fn p_send_by_full(
+    state: &SimState,
+    who: PlayerId,
+    extra_hand: &[&str],
+    known_top: &[&str],
+    immediate: bool,
+    cutoff: u32,
+) -> f64 {
+    if deterministic_send_turn_full(state, who, extra_hand, known_top, immediate, cutoff).is_some() {
+        return 1.0;
+    }
+    let p_dd = p_cast_by_full(state, who, extra_hand, known_top, immediate, cutoff);
+    let draws = cutoff.saturating_sub(1);
+    let p_car = p_car_pop_stochastic(state, who, extra_hand, cutoff, draws);
+    1.0 - (1.0 - p_dd) * (1.0 - p_car)
+}
+
+/// `p_send_by` with a known top-of-library prefix (Ponder / a Brainstorm put-back).
+pub fn p_send_by_with_known_top(
+    state: &SimState,
+    who: PlayerId,
+    known_top: &[&str],
+    immediate: bool,
+    cutoff: u32,
+) -> f64 {
+    p_send_by_full(state, who, &[], known_top, immediate, cutoff)
+}
+
+/// `P(pop the car by cutoff)` alone — 1.0 if a deterministic car line exists, else the
+/// stochastic estimate. Used to choose between the two plans when NEITHER is guaranteed.
+pub fn p_car_pop_by(state: &SimState, who: PlayerId, cutoff: u32) -> f64 {
+    if car_pop_turn(state, who, cutoff).is_some() {
+        return 1.0;
+    }
+    p_car_pop_stochastic(state, who, &[], cutoff, cutoff.saturating_sub(1))
+}
+
 /// All orderings of `items` (factorial — intended for small slices, e.g. Ponder's
 /// top 3).
 fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
@@ -1361,11 +1885,11 @@ pub fn best_top_choice(
 ) -> (TopChoice, f64) {
     let mut best = (
         TopChoice::Shuffle,
-        if can_shuffle { p_cast_by(state, who, cutoff) } else { 0.0 },
+        if can_shuffle { p_send_by(state, who, cutoff) } else { 0.0 },
     );
     for perm in permutations(revealed) {
         let keys: Vec<&str> = perm.iter().map(String::as_str).collect();
-        let p = p_cast_by_with_known_top(state, who, &keys, true, cutoff);
+        let p = p_send_by_with_known_top(state, who, &keys, true, cutoff);
         if p > best.1 {
             best = (TopChoice::Keep(perm), p);
         }
@@ -1378,7 +1902,22 @@ pub fn best_top_choice(
 /// Prefers burying real bricks from `pool` (hand ∪ drawn); pads with whatever's
 /// left if fewer than 2 bricks exist.
 fn worst_two_to_bury<'a>(state: &SimState, who: PlayerId, pool: &[&'a str]) -> Vec<&'a str> {
-    let useful = |key: &str| prefix_useful_count(state, who, &[key]) > 0;
+    // "Useful" for EITHER wincon: a Doomsday piece (prefix_useful_count), OR a car PIECE we
+    // actually spend — the car itself, a {0} pop spell (Petal/Bauble/LED), a ritual, or any
+    // land (generic mana for the {3}). NOT cmc≥1 cantrips/Thoughtseize: a Brainstorm has done
+    // its dig and is buriable (so this keeps Petals/Baubles/cars without hoarding spent
+    // diggers — the Doomsday bury still bins the extra Brainstorms). Reactive Force/Daze stay
+    // binnable too.
+    let useful = |key: &str| {
+        if prefix_useful_count(state, who, &[key]) > 0 || key == FANTASTICAR {
+            return true;
+        }
+        state.catalog.get(key).is_some_and(|d| {
+            d.is_land()
+                || is_black_ritual(d)
+                || (!d.is_creature() && !d.is_land() && d.mana_cost().trim() == "0")
+        })
+    };
     let mut bricks: Vec<&str> = pool.iter().copied().filter(|k| !useful(k)).collect();
     let mut rest: Vec<&str> = pool.iter().copied().filter(|k| useful(k)).collect();
     bricks.append(&mut rest);
@@ -1661,6 +2200,352 @@ mod tests {
         for &h in hand { s.place_card(PlayerId::Us, h, Zone::Hand { known: false }); }
         for n in &rest { s.place_card(PlayerId::Us, n, Zone::Library); }
         tamiyo_flip_turn(&s, PlayerId::Us, 4)
+    }
+
+    /// The former standalone black-only reachability, kept here verbatim to pin
+    /// equivalence with the generic `reach_mana` it was replaced by. For the combo
+    /// regime (need ≤ 3, Dark-Ritual-shaped rituals) the two must agree exactly.
+    fn reach_black_old(need: i32, black: u32, other: u32, ritual_gp: [u32; 4]) -> bool {
+        if need <= 0 {
+            return true;
+        }
+        if black > 0 && reach_black_old(need - 1, black - 1, other, ritual_gp) {
+            return true;
+        }
+        if need <= 3 {
+            for g in 0..ritual_gp.len() {
+                if ritual_gp[g] == 0 {
+                    continue;
+                }
+                let g = g as u32;
+                let from_other = g.min(other);
+                let seed = 1 + (g - from_other);
+                let mut rg = ritual_gp;
+                rg[g as usize] -= 1;
+                if reach_black_old(seed as i32, black, other - from_other, rg) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn reach_black_parity_with_generic_solver() {
+        // Exhaustive over the BBB combo regime: need ≤ 3, black/other ≤ 8, Dark
+        // Ritual (g=0) ≤ 4 and a Cabal-shaped g=1 ritual ≤ 2. The new black helper
+        // (→ reach_mana) must equal the old standalone implementation everywhere.
+        for need in 0..=3i32 {
+            for black in 0..=8u32 {
+                for other in 0..=6u32 {
+                    for d in 0..=4u32 {
+                        for c1 in 0..=2u32 {
+                            let rg = [d, c1, 0, 0];
+                            assert_eq!(
+                                reach_black(need, black, other, rg),
+                                reach_black_old(need, black, other, rg),
+                                "mismatch at need={need} black={black} other={other} rg={rg:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mana_cost_parse_and_generic_reach() {
+        assert_eq!(ManaCost::parse("BBB"), ManaCost { generic: 0, pips: [0, 0, 3, 0, 0] });
+        assert_eq!(ManaCost::parse("3"), ManaCost { generic: 3, pips: [0; 5] });
+        assert_eq!(ManaCost::parse("1B"), ManaCost { generic: 1, pips: [0, 0, 1, 0, 0] });
+        // {3} generic: any 3 mana pays it — 3 non-black sources suffice, 2 don't.
+        assert!(reach_mana(0, 3, 0, 3, [0; 4]));
+        assert!(!reach_mana(0, 3, 0, 2, [0; 4]));
+        // {3} via a Dark Ritual off one black source; unseedable with no black.
+        assert!(reach_mana(0, 3, 1, 0, [1, 0, 0, 0]));
+        assert!(!reach_mana(0, 3, 0, 0, [1, 0, 0, 0]));
+    }
+
+    /// Build a state with `hand` in hand (rest of the library empty — these tests
+    /// only exercise the hand+board solver, no draws).
+    fn hand_state(hand: &[&str]) -> SimState {
+        let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s.catalog = build_catalog();
+        for &h in hand {
+            s.place_card(PlayerId::Us, h, Zone::Hand { known: false });
+        }
+        s
+    }
+
+    fn abbrev(name: &str) -> &str {
+        match name {
+            "The Fantasticar" => "car", "Doomsday" => "dd", "Dark Ritual" => "ritual",
+            "Lotus Petal" => "petal", "Mishra's Bauble" => "bauble", "Lion's Eye Diamond" => "led",
+            "Thoughtseize" => "ts", "Brainstorm" => "bs", "Ponder" => "ponder",
+            "Consider" => "consider", "Edge of Autumn" => "edge", "Street Wraith" => "wraith",
+            "Force of Will" => "fow", "Daze" => "daze", "Thassa's Oracle" => "oracle",
+            "Underground Sea" => "sea", "Island" => "island", "Swamp" => "swamp",
+            "Undercity Sewers" => "sewers", "Cavern of Souls" => "cavern",
+            "Polluted Delta" | "Verdant Catacombs" | "Flooded Strand" | "Misty Rainforest"
+            | "Scalding Tarn" => "fetch",
+            other => other,
+        }
+    }
+
+    /// DEBUG (`cargo test debug_sample_car_hands -- --ignored --nocapture`): deal vroomsday
+    /// opening 7s and report the per-payoff pop cadence + a sample of car hands, to see
+    /// where the car line is (or isn't) found.
+    #[test]
+    #[ignore]
+    fn debug_sample_car_hands() {
+        use rand::seq::SliceRandom;
+        use rand::SeedableRng;
+        let names: Vec<String> = crate::vroomsday_deck().iter()
+            .flat_map(|(n, q, _)| std::iter::repeat(n.clone()).take((*q).max(0) as usize))
+            .collect();
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(7);
+        let cat = build_catalog();
+
+        // `car_pop_turn`/`deterministic_cast_turn` over the first `sz` cards of `cards`
+        // (as if all `sz` were in hand) — a cheap proxy for "by T3 after drawing `sz-7`
+        // more cards while making land drops". Not a real sim (it doesn't gate drawn
+        // cards by turn), but an upper bound on what a cantrip strategy could reach.
+        let pop_by = |cards: &[String], sz: usize| -> bool {
+            let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+            s.catalog = cat.clone();
+            for n in &cards[..sz] { s.place_card(PlayerId::Us, n, Zone::Hand { known: false }); }
+            car_pop_turn(&s, PlayerId::Us, 3).is_some()
+        };
+        let cast_by = |cards: &[String], sz: usize| -> bool {
+            let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+            s.catalog = cat.clone();
+            for n in &cards[..sz] { s.place_card(PlayerId::Us, n, Zone::Hand { known: false }); }
+            deterministic_cast_turn(&s, PlayerId::Us, 3).is_some()
+        };
+
+        const SIZES: [usize; 3] = [7, 9, 11]; // opening 7, +2 natural draws, +cantrips
+        let mut car_pop = [0u32; 3];
+        let mut dd_cast = [0u32; 3];
+        let (mut car_hands, mut dd_hands) = (0u32, 0u32);
+        let mut shown = 0;
+
+        println!("\n=== sample car hands (car @ 7|9|11 cards = poppable by T3?) ===");
+        for _ in 0..30000 {
+            let mut sh = names.clone();
+            sh.shuffle(&mut rng);
+            let open7 = &sh[..7];
+            let car_in_open = open7.iter().any(|n| n == "The Fantasticar");
+            let dd_in_open = open7.iter().any(|n| n == "Doomsday");
+            if car_in_open {
+                car_hands += 1;
+                for (i, &sz) in SIZES.iter().enumerate() {
+                    if pop_by(&sh, sz) { car_pop[i] += 1; }
+                }
+                if shown < 30 {
+                    let flag = |b: bool| if b { 'Y' } else { '·' };
+                    let mut h: Vec<&str> = open7.iter().map(|n| abbrev(n)).collect();
+                    h.sort();
+                    println!("[{}{}{}] {}",
+                        flag(pop_by(&sh, 7)), flag(pop_by(&sh, 9)), flag(pop_by(&sh, 11)), h.join(" "));
+                    shown += 1;
+                }
+            }
+            if dd_in_open {
+                dd_hands += 1;
+                for (i, &sz) in SIZES.iter().enumerate() {
+                    if cast_by(&sh, sz) { dd_cast[i] += 1; }
+                }
+            }
+        }
+        let pct = |n: u32, d: u32| 100.0 * n as f64 / d.max(1) as f64;
+        println!("\n=== P(send by T3 | payoff in opening 7), as the effective hand grows ===");
+        println!("            7 cards   9 cards  11 cards   (proxy for draws/cantrips by T3)");
+        println!("car  pop:  {:6.1}%  {:6.1}%  {:6.1}%   (n={})",
+            pct(car_pop[0], car_hands), pct(car_pop[1], car_hands), pct(car_pop[2], car_hands), car_hands);
+        println!("DD   cast: {:6.1}%  {:6.1}%  {:6.1}%   (n={})",
+            pct(dd_cast[0], dd_hands), pct(dd_cast[1], dd_hands), pct(dd_cast[2], dd_hands), dd_hands);
+    }
+
+    #[test]
+    fn car_pop_turn_with_car_in_play() {
+        // Car already out + four free noncreature spells → pop this turn (no mana).
+        let mut s = hand_state(&["Mishra's Bauble", "Mishra's Bauble", "Lotus Petal", "Lotus Petal"]);
+        s.place_card(PlayerId::Us, "The Fantasticar", Zone::Battlefield);
+        assert_eq!(car_pop_turn(&s, PlayerId::Us, 4), Some(1));
+    }
+
+    #[test]
+    fn car_pop_turn_car_in_hand_t1_off_petals() {
+        // Car + 3 Petals + 1 black land: land + two sacked petals = {3} for the car,
+        // then the third petal is the 4th noncreature spell → pop on T1.
+        let s = hand_state(&[
+            "The Fantasticar", "Lotus Petal", "Lotus Petal", "Lotus Petal", "Underground Sea",
+        ]);
+        assert_eq!(car_pop_turn(&s, PlayerId::Us, 4), Some(1));
+    }
+
+    #[test]
+    fn car_pop_turn_car_in_hand_three_baubles_t3() {
+        // Car + 3 Baubles (no mana of their own) + 3 lands: cast the car off three land
+        // drops on T3, the three baubles fill the count → pop T3 (on the play).
+        let s = hand_state(&[
+            "The Fantasticar", "Mishra's Bauble", "Mishra's Bauble", "Mishra's Bauble",
+            "Underground Sea", "Swamp", "Island",
+        ]);
+        assert_eq!(car_pop_turn(&s, PlayerId::Us, 4), Some(3));
+    }
+
+    #[test]
+    fn car_pop_turn_three_petals_no_land_fails() {
+        // Car + 3 Petals, no land: making {3} sacks all three petals, which forces the
+        // car to be the 4th spell (on the stack → no pop); reserving one leaves only {2}.
+        let s = hand_state(&["The Fantasticar", "Lotus Petal", "Lotus Petal", "Lotus Petal"]);
+        assert_eq!(car_pop_turn(&s, PlayerId::Us, 4), None);
+    }
+
+    #[test]
+    fn car_pop_turn_needs_car_and_enough_free() {
+        // No car at all → None.
+        assert_eq!(
+            car_pop_turn(&hand_state(&["Lotus Petal", "Lotus Petal", "Lotus Petal", "Lotus Petal"]), PlayerId::Us, 4),
+            None
+        );
+        // Car but only two free spells → None.
+        assert_eq!(
+            car_pop_turn(&hand_state(&["The Fantasticar", "Lotus Petal", "Mishra's Bauble", "Underground Sea"]), PlayerId::Us, 4),
+            None
+        );
+    }
+
+    /// Concrete vroomsday hands with a car, the pop turn worked by hand. These pin the
+    /// richer fuel model: the four noncreature spells can be a ritual, Thoughtseize, a
+    /// cantrip, Baubles, Petals — not just {0} spells. (On the play, no draws.)
+    #[test]
+    fn car_pop_sample_hands() {
+        let car = |h: &[&str]| car_pop_turn(&hand_state(h), PlayerId::Us, 4);
+
+        // Ritual → BBB, Car, Petal, Petal — four casts, car in play for the 4th. T1.
+        assert_eq!(car(&["Underground Sea", "Dark Ritual", "The Fantasticar",
+                         "Lotus Petal", "Lotus Petal", "Mishra's Bauble", "Mishra's Bauble"]), Some(1));
+
+        // Cast 2 Petals for mana, Car, then a Petal as the 4th. T1.
+        assert_eq!(car(&["Underground Sea", "The Fantasticar", "Lotus Petal", "Lotus Petal",
+                         "Lotus Petal", "Mishra's Bauble", "Brainstorm"]), Some(1));
+
+        // 2 lands + Ritual fund Car{3} + Thoughtseize{B}; Bauble is the 4th. T2 (needs the
+        // 2nd land for Thoughtseize). Force of Will is NOT castable fuel (needs a target).
+        assert_eq!(car(&["Underground Sea", "Underground Sea", "Dark Ritual", "Thoughtseize",
+                         "The Fantasticar", "Mishra's Bauble", "Force of Will"]), Some(2));
+
+        // Same shape with a cantrip ({U}) as the paid filler instead of Thoughtseize. T2.
+        assert_eq!(car(&["Underground Sea", "Underground Sea", "Dark Ritual", "Brainstorm",
+                         "The Fantasticar", "Mishra's Bauble", "Force of Will"]), Some(2));
+
+        // No ritual/petal: cast Car off three land drops, three Baubles fill the count. T3.
+        assert_eq!(car(&["Underground Sea", "Swamp", "Island", "The Fantasticar",
+                         "Mishra's Bauble", "Mishra's Bauble", "Mishra's Bauble"]), Some(3));
+
+        // Car + one Bauble + Force (no target) + 4 lands → only two castable noncreature
+        // spells (Car, Bauble); can never reach four. None.
+        assert_eq!(car(&["Underground Sea", "Underground Sea", "Underground Sea", "Underground Sea",
+                         "The Fantasticar", "Mishra's Bauble", "Force of Will"]), None);
+    }
+
+    // The user's two acceptance examples for the unified, re-planned deterministic engine.
+    #[test]
+    fn replan_finds_faster_line_on_new_info() {
+        // "3 useas dd, draw ritual for t2 → cast doomsday t2." Three Seas alone cast
+        // Doomsday on T3 (three land drops → BBB); drawing a Dark Ritual for T2 re-plans
+        // to a T2 cast — found deterministically by folding the drawn card in.
+        let s = hand_state(&["Underground Sea", "Underground Sea", "Underground Sea", "Doomsday"]);
+        assert_eq!(deterministic_cast_turn(&s, PlayerId::Us, 3), Some(3));
+        assert_eq!(
+            deterministic_cast_turn_full(&s, PlayerId::Us, &[], &["Dark Ritual"], false, 3),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn put_back_finds_car_in_revealed_pieces() {
+        // "land ritual brainstorm X Y Z W, brainstorm into petal car petal → car the turn
+        // after." Keeping the revealed petal/car/petal (extra_hand) must DETERMINISTICALLY
+        // find the car line: ritual → BBB, car, petal, petal = four casts.
+        let s = hand_state(&["Underground Sea", "Dark Ritual", "Force of Will", "Daze",
+                             "Force of Will", "Daze"]);
+        assert_eq!(car_pop_turn(&s, PlayerId::Us, 3), None, "no car yet → nothing");
+        let kept = ["Lotus Petal", "The Fantasticar", "Lotus Petal"];
+        assert_eq!(car_pop_turn_full(&s, PlayerId::Us, &kept, &[], false, 3), Some(1));
+        assert_eq!(deterministic_send_turn_full(&s, PlayerId::Us, &kept, &[], false, 3), Some(1));
+    }
+
+    #[test]
+    #[ignore] // JOTTED (per user): NOT yet supported — and it is blocked deeper than the solver.
+              // Findings while testing the line:
+              //  (1) ENGINE/CARD: Daze AND Force target `TargetSpec::ObjectInZone{controller:
+              //      Who::Opp, ...}`, and the `Who` enum is only {Actor, Opp} — there is no way
+              //      to target your OWN spell. Real Daze/Force counter "target spell" (any). Needs
+              //      a `Who::Any` (ripples through the targeting core) + Daze/Force defs widened.
+              //  (2) SOLVER: count Daze/Force as a noncreature-cast (temporal resource) gated on a
+              //      spell-on-the-stack to target AND their alt-costs (Daze: bounce an Island;
+              //      Force: pitch a blue card). `is_proactive_noncreature` excludes them today.
+              //  (3) STRATEGY: hold priority on our own spell, then cast the counter on it.
+    fn car_line_via_self_daze() {
+        // Canonical line, T1: Sea→B, ritual(1)→BBB, car(2), petal(3, hold priority), Daze(4)
+        // on the petal — paid by bouncing the Underground Sea. KEY: Underground Sea is a
+        // "Land — Island Swamp", so it IS an Island and is legal to bounce for Daze's free
+        // alt-cost (bounce works on the tapped Sea; we no longer need the land). Four
+        // noncreature casts with the car in play → pop.
+        let s = hand_state(&["Underground Sea", "Dark Ritual", "The Fantasticar",
+                             "Lotus Petal", "Daze"]);
+        assert_eq!(car_pop_turn(&s, PlayerId::Us, 3), Some(1),
+            "Daze on our own petal, paid by bouncing the Sea (an Island), is the 4th cast");
+    }
+
+    /// BASELINE ORACLE for the pop-discipline rule (`solve_pop`): explicit resource tuples →
+    /// expected feasibility. Pins the behavior validated end-to-end at P(send|only car)=99%,
+    /// so the resource-solver refactor cannot silently change it. Each case names the line.
+    #[test]
+    fn solve_pop_contract() {
+        let fuel = |p: u32, o: u32, r: u32, paid: &[u32]| CarFuel {
+            free_petal: p, free_other: o, rituals: r, paid: paid.to_vec(),
+        };
+        // --- car in hand ---
+        // 3 lands fund the {3}: car is the 1st cast, then 3 baubles → pop.
+        assert!(solve_pop(3, 0, &fuel(0, 3, 0, &[]), false));
+        // THE BUG it prevents: a dig cantrip already cast (s=1), 0 base, petal+ritual ramp
+        // (2 casts) → the car would be the 4th spell → must NOT fire this turn.
+        assert!(!solve_pop(0, 1, &fuel(1, 1, 1, &[]), false));
+        // Same pieces on a FRESH turn: petal(1), ritual(2), car(3), bauble(4) → pop.
+        assert!(solve_pop(0, 0, &fuel(1, 1, 1, &[]), false));
+        // Only {1} of mana → can't even cast the {3} car.
+        assert!(!solve_pop(0, 0, &fuel(1, 0, 0, &[]), false));
+        // 3 noncreature spells already cast → the car can only be the 4th → no pop.
+        assert!(!solve_pop(5, 3, &fuel(0, 4, 0, &[]), false));
+        // --- car already in play ---
+        assert!(solve_pop(0, 0, &fuel(0, 4, 0, &[]), true)); // 4 free casts → pop
+        assert!(!solve_pop(0, 0, &fuel(0, 3, 0, &[]), true)); // only 3 → one short
+        assert!(solve_pop(0, 2, &fuel(0, 2, 0, &[]), true)); // 2 already + 2 more → pop
+        assert!(!solve_pop(0, 4, &fuel(0, 5, 0, &[]), true)); // the 4th cast already happened
+    }
+
+    #[test]
+    fn deterministic_send_turn_takes_the_faster_wincon() {
+        // Doomsday line, no car → send == the Doomsday turn.
+        let dd = hand_state(&["Doomsday", "Dark Ritual", "Underground Sea", "Lotus Petal"]);
+        assert!(car_pop_turn(&dd, PlayerId::Us, 4).is_none());
+        assert_eq!(
+            deterministic_send_turn(&dd, PlayerId::Us, 4),
+            deterministic_cast_turn(&dd, PlayerId::Us, 4)
+        );
+        // Car line, no Doomsday → send == the car turn.
+        let car = hand_state(&[
+            "The Fantasticar", "Lotus Petal", "Lotus Petal", "Lotus Petal", "Underground Sea",
+        ]);
+        assert!(deterministic_cast_turn(&car, PlayerId::Us, 4).is_none());
+        assert_eq!(
+            deterministic_send_turn(&car, PlayerId::Us, 4),
+            car_pop_turn(&car, PlayerId::Us, 4)
+        );
     }
 
     #[test]

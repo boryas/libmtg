@@ -42,6 +42,7 @@ pub use goldfish::{
     run_goldfish_compare, sample_doomsday_deck, DDGoldfishStrategy, GoldfishStats, MullMode,
     DEFAULT_CUTOFF, DEFAULT_PROTECTION,
 };
+pub use goldfish::{deterministic_send_report, run_goldfish_send, vroomsday_deck, SendReport};
 
 #[cfg(test)]
 mod tests;

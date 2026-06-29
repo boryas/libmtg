@@ -46,19 +46,29 @@ pub const DEFAULT_PROTECTION: &[&str] =
 /// pilegen objective it has no side effects (no life accounting) — goldfish reads
 /// *when* DD resolved (`SimState::current_turn`) and *what protection* is held off
 /// the final state.
+/// `count_car`: when true, popping The Fantasticar (its sacrifice trigger creating
+/// the Construct tokens) also ends the run as a "send". When false the run is the
+/// Doomsday-only baseline — the apples-to-apples comparison for the two-wincon speedup.
 #[derive(Default)]
-pub struct GoldfishObjective;
+pub struct GoldfishObjective {
+    pub count_car: bool,
+}
 
 impl Objective for GoldfishObjective {
     fn observe(&mut self, event: &GameEvent, state: &mut SimState) -> bool {
-        if let GameEvent::SpellResolved { card_id, controller } = event {
-            return *controller == PlayerId::Us
-                && state
-                    .objects
-                    .get(card_id)
-                    .map_or(false, |o| o.catalog_key == "Doomsday");
+        match event {
+            GameEvent::SpellResolved { card_id, controller } => {
+                *controller == PlayerId::Us
+                    && state.objects.get(card_id).map_or(false, |o| o.catalog_key == "Doomsday")
+            }
+            // The Fantasticar popped: its trigger created a "Fantasticar Construct".
+            GameEvent::TokenCreated { controller, token_key, .. } => {
+                self.count_car
+                    && *controller == PlayerId::Us
+                    && token_key == "Fantasticar Construct"
+            }
+            _ => false,
         }
-        false
     }
 }
 
@@ -187,6 +197,7 @@ fn run_goldfish_inner<F>(
     make_us: F,
     evaluator: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync>,
     on_play: Option<bool>, // None = randomize 50/50 per game (the default)
+    count_car: bool,       // also end the run on a Fantasticar pop (two-wincon mode)
 ) -> GoldfishStats
 where
     F: Fn() -> Box<dyn Strategy>,
@@ -211,7 +222,7 @@ where
             us_strategy: make_us(),
             opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
             evaluate_card: Arc::clone(&evaluator),
-            objective: Box::new(GoldfishObjective::default()),
+            objective: Box::new(GoldfishObjective { count_car }),
             // The cutoff IS the horizon: there is no reason to simulate past the turn
             // by which the objective is judged. (`.max(1)` guards a degenerate 0.)
             max_turns: cutoff.max(1),
@@ -312,6 +323,7 @@ pub fn run_goldfish(
         || Box::new(DoomsdayStrategy::new(MatchupInfo::default())),
         evaluator,
         None, // randomized play/draw (default)
+        false, // Doomsday-only
     )
 }
 
@@ -346,6 +358,33 @@ pub fn run_goldfish_asap_mode(
         move || Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, mode)),
         dd_goldfish_evaluator(),
         on_play,
+        false, // Doomsday-only (see run_goldfish_send for the two-wincon variant)
+    )
+}
+
+/// Realized two-wincon goldfish: like [`run_goldfish_asap_mode`], but when `car` is
+/// true the pilot also pursues The Fantasticar pop and a pop counts as a "send"
+/// (`stats.cast_by(cutoff)` then = P(send by cutoff)). Run with `car=false` for the
+/// Doomsday-only baseline and `car=true` for the two-wincon number — same deck, same
+/// mulligan, so the difference is exactly the car's contribution.
+pub fn run_goldfish_send(
+    deck: &[(String, i32, String)],
+    games: u32,
+    protection: &[&str],
+    cutoff: u32,
+    mode: MullMode,
+    on_play: Option<bool>,
+    car: bool,
+) -> GoldfishStats {
+    run_goldfish_inner(
+        deck,
+        games,
+        protection,
+        cutoff.min(u8::MAX as u32) as u8,
+        move || Box::new(DDGoldfishStrategy::with_mull_mode(cutoff, mode).with_car(car)),
+        dd_goldfish_evaluator(),
+        on_play,
+        car,
     )
 }
 
@@ -797,6 +836,7 @@ pub fn run_goldfish_baseline_aggro(
         )),
         dd_card_evaluator(MatchupInfo::default()),
         None, // randomized play/draw (default)
+        false, // Doomsday-only
     )
 }
 
@@ -957,9 +997,356 @@ pub fn sample_doomsday_deck() -> Vec<(String, i32, String)> {
     .collect()
 }
 
+/// "vroomsday 8 guys" — the user's Legacy Doomsday + The Fantasticar list
+/// (moxfield.com/decks/GQGfAbcEa3qBQAdBgVgl1w), 60-card mainboard. Two payoffs:
+/// resolve Doomsday, or pop The Fantasticar off its fourth-noncreature-spell trigger.
+pub fn vroomsday_deck() -> Vec<(String, i32, String)> {
+    [
+        ("Underground Sea", 4),
+        ("Polluted Delta", 4),
+        ("Verdant Catacombs", 1),
+        ("Flooded Strand", 1),
+        ("Misty Rainforest", 1),
+        ("Scalding Tarn", 1),
+        ("Island", 1),
+        ("Swamp", 1),
+        ("Undercity Sewers", 1),
+        ("Cavern of Souls", 1),
+        ("Lotus Petal", 4),
+        ("Lion's Eye Diamond", 1),
+        ("Mishra's Bauble", 4),
+        ("Dark Ritual", 4),
+        ("Doomsday", 4),
+        ("The Fantasticar", 4),
+        ("Brainstorm", 4),
+        ("Ponder", 4),
+        ("Consider", 1),
+        ("Edge of Autumn", 1),
+        ("Street Wraith", 1),
+        ("Force of Will", 4),
+        ("Daze", 4),
+        ("Thoughtseize", 3),
+        ("Thassa's Oracle", 1),
+    ]
+    .iter()
+    .map(|(n, q)| (n.to_string(), *q, "main".to_string()))
+    .collect()
+}
+
+/// Deterministic two-wincon "send" report (the backward-solver headline). For each
+/// of `games` random opening hands (Keep7, on the play unless `on_draw`), ask the
+/// solver: can it *guarantee* a send by `cutoff` with no blind draws — via Doomsday
+/// (`deterministic_cast_turn`), via The Fantasticar (`car_pop_turn`), or either
+/// (`deterministic_send_turn`)? Splits the either-wincon sends by whether the hand
+/// also holds ≥1 disruption (`protection`). This measures the deck's redundancy,
+/// independent of how well any pilot plays the line out.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SendReport {
+    pub games: u32,
+    pub cutoff: u8,
+    /// Hands that can guarantee Doomsday by `cutoff`.
+    pub dd_by: u32,
+    /// Hands that can guarantee a car pop by `cutoff`.
+    pub car_by: u32,
+    /// Hands that can guarantee EITHER (the union — Doomsday or car).
+    pub send_by: u32,
+    /// Of the `send_by` hands, those also holding ≥1 protection card.
+    pub send_protected: u32,
+    /// Of the `send_by` hands, those holding 0 protection.
+    pub send_naked: u32,
+}
+
+impl SendReport {
+    pub fn pct(&self, n: u32) -> f64 {
+        if self.games == 0 { 0.0 } else { 100.0 * n as f64 / self.games as f64 }
+    }
+}
+
+/// Run the deterministic send report (see [`SendReport`]).
+pub fn deterministic_send_report(
+    deck: &[(String, i32, String)],
+    games: u32,
+    protection: &[&str],
+    cutoff: u8,
+    on_draw: bool,
+) -> SendReport {
+    use rand::seq::SliceRandom;
+    let catalog = build_catalog();
+    // Expand the mainboard to a flat list of card names.
+    let names: Vec<String> = deck
+        .iter()
+        .filter(|(_, _, board)| board == "main")
+        .flat_map(|(n, q, _)| std::iter::repeat(n.clone()).take((*q).max(0) as usize))
+        .collect();
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let hand_size = if on_draw { 8 } else { 7 }; // on the draw you've seen one extra card by your first main
+
+    let mut r = SendReport { games, cutoff, ..Default::default() };
+    let cutoff_u32 = cutoff.max(1) as u32;
+    for _ in 0..games {
+        let mut shuffled = names.clone();
+        shuffled.shuffle(&mut rng);
+        let mut s = SimState::new(PlayerState::new("us"), PlayerState::new("opp"));
+        s.catalog = catalog.clone();
+        for (i, n) in shuffled.iter().enumerate() {
+            if i < hand_size {
+                s.place_card(PlayerId::Us, n, Zone::Hand { known: false });
+            } else {
+                s.place_card(PlayerId::Us, n, Zone::Library);
+            }
+        }
+        let dd = recipe::deterministic_cast_turn(&s, PlayerId::Us, cutoff_u32).is_some();
+        let car = recipe::car_pop_turn(&s, PlayerId::Us, cutoff_u32).is_some();
+        let send = dd || car;
+        if dd { r.dd_by += 1; }
+        if car { r.car_by += 1; }
+        if send {
+            r.send_by += 1;
+            let prot = s.hand_of(PlayerId::Us)
+                .filter(|c| protection.contains(&c.catalog_key.as_str()))
+                .count();
+            if prot >= 1 { r.send_protected += 1; } else { r.send_naked += 1; }
+        }
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DEBUG (`cargo test debug_trace_car_game -- --ignored --nocapture`): run ONE
+    /// car-enabled game on a fixed hand and dump the decision log + whether the car popped.
+    #[test]
+    #[ignore]
+    fn debug_trace_car_game() {
+        // Car-only deck (no Doomsday) so the dig has only the car to aim at.
+        let deck: Vec<(String, i32, String)> = [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Verdant Catacombs", 1),
+            ("Flooded Strand", 1), ("Misty Rainforest", 1), ("Scalding Tarn", 1),
+            ("Island", 1), ("Swamp", 1), ("Undercity Sewers", 1), ("Cavern of Souls", 1),
+            ("Lotus Petal", 6), ("Lion's Eye Diamond", 1), ("Mishra's Bauble", 7),
+            ("Dark Ritual", 4), ("The Fantasticar", 4), ("Brainstorm", 4), ("Ponder", 4),
+            ("Consider", 1), ("Edge of Autumn", 1), ("Street Wraith", 1),
+            ("Force of Will", 4), ("Daze", 4), ("Thoughtseize", 3),
+        ].iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect();
+        let catalog = build_catalog();
+        // The user's example: dig for the car WITHOUT spending the petal/bauble/ritual.
+        let hand: Vec<String> = ["Underground Sea", "Underground Sea", "Dark Ritual",
+            "Lotus Petal", "Mishra's Bauble", "Ponder", "Ponder"]
+            .iter().map(|s| s.to_string()).collect();
+        // Engine verdict on this exact opening (before any play): does the solver SEE a
+        // deterministic car line? If yes but the game below fails to pop, execution is broken.
+        {
+            let mut s0 = SimState::new(
+                libmtg_engine::PlayerState::new("us"), libmtg_engine::PlayerState::new("opp"));
+            s0.catalog = catalog.clone();
+            for h in &hand { s0.place_card(PlayerId::Us, h, libmtg_engine::Zone::Hand { known: false }); }
+            for (n, q, _) in &deck { for _ in 0..*q { s0.place_card(PlayerId::Us, n, libmtg_engine::Zone::Library); } }
+            println!("ENGINE car_pop_turn(cutoff 3) = {:?}", recipe::car_pop_turn(&s0, PlayerId::Us, 3));
+            println!("ENGINE deterministic_send_turn = {:?}", recipe::deterministic_send_turn(&s0, PlayerId::Us, 3));
+        }
+        let mut rng = rand::rngs::SmallRng::from_entropy();
+        let scenario = Scenario {
+            us_label: "us".into(), opp_label: "opp".into(),
+            catalog: catalog.clone(), us_deck: deck.clone(),
+            opp_deck: vec![("Island".to_string(), 60, "main".to_string())],
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(3, MullMode::Keep7).with_car(true)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective { count_car: true }),
+            max_turns: 3, on_play: Some(true), fixed_us_hand: Some(hand.clone()),
+        };
+        let state = run_game(scenario, &mut rng);
+        println!("\nhand: {:?}", hand);
+        println!("popped/sent: {}  (terminal turn {})", state.terminal, state.current_turn);
+        println!("--- engine play log (actual casts) ---");
+        for line in &state.log { println!("  {line}"); }
+        println!("--- decision log ---");
+        for line in &state.decision_log { println!("{line}"); }
+    }
+
+    /// DEBUG (`cargo test debug_twohead_hand -- --ignored --nocapture`): the user's
+    /// fuel-rich two-headed hand on the FULL deck (both wincons). It has the mana + fuel +
+    /// two Ponders to dig into EITHER payoff, so it should send ~every game, ~50/50
+    /// car/Doomsday. Reports the send rate, the car/Doomsday split, and dumps no-send traces.
+    #[test]
+    #[ignore]
+    fn debug_twohead_hand() {
+        let deck = vroomsday_deck(); // full deck: 4 Doomsday + 4 Fantasticar
+        let catalog = build_catalog();
+        let hand: Vec<String> = ["Underground Sea", "Underground Sea", "Dark Ritual",
+            "Lotus Petal", "Mishra's Bauble", "Ponder", "Ponder"]
+            .iter().map(|s| s.to_string()).collect();
+        let mut rng = rand::rngs::SmallRng::from_entropy();
+        let (mut via_car, mut via_dd, mut fail_shown) = (0u32, 0u32, 0u32);
+        // Partition by WHICH payoff(s) were found, and the send rate within each — the
+        // conversion test: P(send | only car), P(send | only dd), P(send | both) should all be 100%.
+        let (mut only_car, mut only_car_sent) = (0u32, 0u32);
+        let (mut only_dd, mut only_dd_sent) = (0u32, 0u32);
+        let (mut both, mut both_sent) = (0u32, 0u32);
+        const N: u32 = 500;
+        for _ in 0..N {
+            let scenario = Scenario {
+                us_label: "us".into(), opp_label: "opp".into(),
+                catalog: catalog.clone(), us_deck: deck.clone(),
+                opp_deck: vec![("Island".to_string(), 60, "main".to_string())],
+                us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(3, MullMode::Keep7).with_car(true)),
+                opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+                evaluate_card: dd_goldfish_evaluator(),
+                objective: Box::new(GoldfishObjective { count_car: true }),
+                max_turns: 3, on_play: Some(true), fixed_us_hand: Some(hand.clone()),
+            };
+            let state = run_game(scenario, &mut rng);
+            let car_via = state.objects.values().any(|o| o.catalog_key == "Fantasticar Construct");
+            let cars_lib = state.library_of(PlayerId::Us).filter(|c| c.catalog_key == "The Fantasticar").count();
+            let dds_lib = state.library_of(PlayerId::Us).filter(|c| c.catalog_key == "Doomsday").count();
+            let car_d = cars_lib < 4;
+            let dd_d = dds_lib < 4;
+            if state.terminal {
+                if car_via { via_car += 1; } else { via_dd += 1; }
+            }
+            let bucket = match (car_d, dd_d) {
+                (true, false) => { only_car += 1; if state.terminal { only_car_sent += 1; } Some("ONLY CAR") }
+                (false, true) => { only_dd += 1; if state.terminal { only_dd_sent += 1; } None }
+                (true, true) => { both += 1; if state.terminal { both_sent += 1; } Some("BOTH") }
+                (false, false) => None,
+            };
+            // Dump the pure car-conversion failures: only-a-car-found (no DD fallback) that didn't send.
+            if bucket == Some("ONLY CAR") && !state.terminal && fail_shown < 8 {
+                fail_shown += 1;
+                println!("\n===== ONLY CAR FOUND, NO SEND (turn {}) =====", state.current_turn);
+                for line in &state.log { println!("  {line}"); }
+            }
+        }
+        let pct = |a: u32, b: u32| 100.0 * a as f64 / b.max(1) as f64;
+        println!("\n=== two-headed hand (sea sea ritual petal bauble ponder ponder) — N={N}, full deck, T3 ===");
+        println!("P(send | found ONLY car) = {:.1}%  (n={only_car})  <-- pure car conversion, TARGET 100%", pct(only_car_sent, only_car));
+        println!("P(send | found ONLY dd)  = {:.1}%  (n={only_dd})", pct(only_dd_sent, only_dd));
+        println!("P(send | found BOTH)     = {:.1}%  (n={both})", pct(both_sent, both));
+        println!("selection split of sends: via car={via_car}  via doomsday={via_dd}");
+    }
+
+    /// DEBUG (`cargo test debug_car_only_decomp -- --ignored --nocapture`): on a CAR-ONLY
+    /// deck (Doomsday/Oracle removed, fuel added — every send is a car pop), decompose the
+    /// T3 rate into P(car drawn) × P(fire | car drawn) to locate the bottleneck (drawing
+    /// the car vs assembling/sequencing the pop), and dump traces of drawn-but-no-pop games.
+    #[test]
+    #[ignore]
+    fn debug_car_only_decomp() {
+        let car_only: Vec<(String, i32, String)> = [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Verdant Catacombs", 1),
+            ("Flooded Strand", 1), ("Misty Rainforest", 1), ("Scalding Tarn", 1),
+            ("Island", 1), ("Swamp", 1), ("Undercity Sewers", 1), ("Cavern of Souls", 1),
+            ("Lotus Petal", 6), ("Lion's Eye Diamond", 1), ("Mishra's Bauble", 7),
+            ("Dark Ritual", 4), ("The Fantasticar", 4), ("Brainstorm", 4), ("Ponder", 4),
+            ("Consider", 1), ("Edge of Autumn", 1), ("Street Wraith", 1),
+            ("Force of Will", 4), ("Daze", 4), ("Thoughtseize", 3),
+        ].iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect();
+        let catalog = build_catalog();
+        let mut rng = rand::rngs::SmallRng::from_entropy();
+        let (mut drawn, mut fired, mut shown) = (0u32, 0u32, 0u32);
+        let (mut det, mut det_fired) = (0u32, 0u32);
+        const N: u32 = 3000;
+        for _ in 0..N {
+            let scenario = Scenario {
+                us_label: "us".into(), opp_label: "opp".into(),
+                catalog: catalog.clone(), us_deck: car_only.clone(),
+                opp_deck: vec![("Island".to_string(), 60, "main".to_string())],
+                us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(3, MullMode::Keep7).with_car(true)),
+                opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+                evaluate_card: dd_goldfish_evaluator(),
+                objective: Box::new(GoldfishObjective { count_car: true }),
+                max_turns: 3, on_play: Some(true), fixed_us_hand: None,
+            };
+            let state = run_game(scenario, &mut rng);
+            let car_fired = state.objects.values().any(|o| o.catalog_key == "Fantasticar Construct");
+            let cars_in_lib = state.library_of(PlayerId::Us)
+                .filter(|c| c.catalog_key == "The Fantasticar").count();
+            if cars_in_lib < 4 { drawn += 1; }
+            if car_fired { fired += 1; }
+            // Reconstruct the OPENING state (no draws/play yet) for the engine's deterministic
+            // verdict at game start — the only fair "was a line THERE" signal (the final-state
+            // verdict is meaningless: resources get spent during play). car_pop_turn reads only
+            // hand+board, so the empty library is fine.
+            let mut s0 = SimState::new(
+                libmtg_engine::PlayerState::new("us"), libmtg_engine::PlayerState::new("opp"));
+            s0.catalog = catalog.clone();
+            for h in &state.opening_hand_us {
+                s0.place_card(PlayerId::Us, h, libmtg_engine::Zone::Hand { known: false });
+            }
+            let opening_line = recipe::car_pop_turn(&s0, PlayerId::Us, 3);
+            if opening_line.is_some() {
+                det += 1;
+                if car_fired { det_fired += 1; }
+                if !car_fired && shown < 8 {
+                    shown += 1;
+                    let open: Vec<&str> = state.opening_hand_us.iter().map(|n| abbrev_g(n)).collect();
+                    println!("\n===== ENGINE SAW LINE {:?} BUT NO POP (turn {}) =====", opening_line, state.current_turn);
+                    println!("opening: {}", open.join(" "));
+                    for line in &state.log { println!("  {line}"); }
+                }
+            }
+        }
+        println!("\n=== car-only decomposition (N={N}, Keep7, on play, cutoff T3) ===");
+        println!("P(car drawn by T3)         = {:.1}%", 100.0 * drawn as f64 / N as f64);
+        println!("P(fire)                    = {:.1}%", 100.0 * fired as f64 / N as f64);
+        println!("P(fire | car drawn)        = {:.1}%", 100.0 * fired as f64 / drawn.max(1) as f64);
+        println!("P(opening has a det LINE)  = {:.1}%  (n={det})", 100.0 * det as f64 / N as f64);
+        println!("P(fire | opening det LINE) = {:.1}%  <-- EXECUTION fidelity", 100.0 * det_fired as f64 / det.max(1) as f64);
+    }
+
+    /// DEBUG (`cargo test debug_car_game_logs -- --ignored --nocapture`): run car-enabled
+    /// vroomsday games and dump the play-by-play for a few of each outcome (sent via car,
+    /// sent via Doomsday, or no send) so we can see how the strategy actually plays.
+    #[test]
+    #[ignore]
+    fn debug_car_game_logs() {
+        let deck = vroomsday_deck();
+        let catalog = build_catalog();
+        let mut rng = rand::rngs::SmallRng::from_entropy();
+        let (mut n_car, mut n_dd, mut n_none) = (0, 0, 0);
+        const WANT: usize = 3;
+        let mut games = 0;
+        while (n_car < WANT || n_dd < WANT || n_none < WANT) && games < 5000 {
+            games += 1;
+            let scenario = Scenario {
+                us_label: "us".into(), opp_label: "opp".into(),
+                catalog: catalog.clone(), us_deck: deck.clone(),
+                opp_deck: vec![("Island".to_string(), 60, "main".to_string())],
+                us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(3, MullMode::Keep7).with_car(true)),
+                opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+                evaluate_card: dd_goldfish_evaluator(),
+                objective: Box::new(GoldfishObjective { count_car: true }),
+                max_turns: 3, on_play: Some(true), fixed_us_hand: None,
+            };
+            let state = run_game(scenario, &mut rng);
+            let via_car = state.objects.values().any(|o| o.catalog_key == "Fantasticar Construct");
+            let (label, slot) = if state.terminal && via_car { ("CAR", &mut n_car) }
+                else if state.terminal { ("DOOMSDAY", &mut n_dd) }
+                else { ("no-send", &mut n_none) };
+            if *slot >= WANT { continue; }
+            *slot += 1;
+            let open: Vec<&str> = state.opening_hand_us.iter().map(|n| abbrev_g(n)).collect();
+            println!("\n========= sent via {label} (turn {}) =========", state.current_turn);
+            println!("opening: {}", open.join(" "));
+            for line in &state.log { println!("  {line}"); }
+        }
+        println!("\n(scanned {games} games)");
+    }
+
+    fn abbrev_g(name: &str) -> &str {
+        match name {
+            "The Fantasticar" => "car", "Doomsday" => "dd", "Dark Ritual" => "ritual",
+            "Lotus Petal" => "petal", "Mishra's Bauble" => "bauble", "Lion's Eye Diamond" => "led",
+            "Thoughtseize" => "ts", "Brainstorm" => "bs", "Ponder" => "ponder", "Consider" => "consider",
+            "Edge of Autumn" => "edge", "Street Wraith" => "wraith", "Force of Will" => "fow",
+            "Daze" => "daze", "Thassa's Oracle" => "oracle", "Underground Sea" => "sea",
+            "Island" => "island", "Swamp" => "swamp", "Undercity Sewers" => "sewers", "Cavern of Souls" => "cavern",
+            "Polluted Delta" | "Verdant Catacombs" | "Flooded Strand" | "Misty Rainforest" | "Scalding Tarn" => "fetch",
+            other => other,
+        }
+    }
 
     #[test]
     fn goldfish_runs_and_casts_sometimes() {
@@ -986,6 +1373,49 @@ mod tests {
             stats.cast_turn
         );
         assert!(stats.cast_turn.keys().all(|&t| (1..=10).contains(&t)));
+    }
+
+    #[test]
+    fn vroomsday_deck_is_sixty_and_all_known() {
+        let deck = vroomsday_deck();
+        let total: i32 = deck.iter().map(|(_, q, _)| q).sum();
+        assert_eq!(total, 60, "vroomsday mainboard should be 60 cards");
+        let cat = build_catalog();
+        for (n, _, _) in &deck {
+            assert!(cat.get(n).is_some(), "vroomsday card not in catalog: {n}");
+        }
+    }
+
+    #[test]
+    fn realized_car_pop_sends_without_any_doomsday() {
+        // A car-only deck (no Doomsday): the Doomsday-only pilot can NEVER send, while
+        // the two-wincon pilot pops The Fantasticar off its free noncreature spells.
+        // Exercises the full realized chain: strategy → cast car + free spells → engine
+        // 4th-spell trigger → TokenCreated → objective.
+        let deck: Vec<(String, i32, String)> = [
+            ("The Fantasticar", 8), ("Lotus Petal", 12), ("Mishra's Bauble", 12),
+            ("Lion's Eye Diamond", 4), ("Underground Sea", 16), ("Dark Ritual", 8),
+        ]
+        .iter()
+        .map(|(n, q)| (n.to_string(), *q, "main".to_string()))
+        .collect();
+        let dd = run_goldfish_send(&deck, 300, DEFAULT_PROTECTION, 4, MullMode::Keep7, Some(true), false);
+        let car = run_goldfish_send(&deck, 300, DEFAULT_PROTECTION, 4, MullMode::Keep7, Some(true), true);
+        assert_eq!(dd.successes(), 0, "no Doomsday in the deck → DD-only pilot can't send");
+        assert!(car.successes() > 0, "two-wincon pilot should pop the car at least sometimes");
+    }
+
+    #[test]
+    fn car_enabled_never_lowers_the_send_rate() {
+        // On the real list, the car is a SECOND wincon — enabling it can only add sends.
+        let deck = vroomsday_deck();
+        let dd = run_goldfish_send(&deck, 400, DEFAULT_PROTECTION, 3, MullMode::Realistic, Some(true), false);
+        let car = run_goldfish_send(&deck, 400, DEFAULT_PROTECTION, 3, MullMode::Realistic, Some(true), true);
+        assert!(
+            car.cast_by(3) + 0.05 >= dd.cast_by(3),
+            "car-enabled send {:.3} should be >= DD-only {:.3}",
+            car.cast_by(3), dd.cast_by(3)
+        );
     }
 
     #[test]

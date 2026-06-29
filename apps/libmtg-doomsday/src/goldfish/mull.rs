@@ -185,7 +185,10 @@ fn stably_castable(s: &HandSignals, def: &CardDef) -> bool {
 /// cards (see [`AIR`]) are skipped in every count, as if they weren't drawn.
 pub fn hand_signals(state: &SimState, who: PlayerId, cutoff: u32) -> HandSignals {
     let mut s = HandSignals {
-        det_line: recipe::deterministic_cast_turn(state, who, cutoff).is_some(),
+        // A guaranteed line by the cutoff via EITHER wincon (Doomsday or the car) — the engine
+        // detects both, so a deterministic car hand is kept, not thrown back for lacking a
+        // Doomsday line. (No bespoke car rule beyond this — the solver does the work.)
+        det_line: recipe::deterministic_send_turn(state, who, cutoff).is_some(),
         // Fast Tamiyo plan: a deterministic flip by turn 2 (see `recipe::tamiyo_flip_turn`).
         tami_fast_flip: recipe::tamiyo_flip_turn(state, who, 2).is_some(),
         ..Default::default()

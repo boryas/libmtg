@@ -1468,17 +1468,21 @@ fn match_event(
 ) -> bool {
     use crate::ir::expr::EventFilter;
     match filter {
-        EventFilter::SpellCast { caster } => {
-            let crate::GameEvent::SpellCast { caster: c, .. } = &logged.event else {
+        EventFilter::SpellCast { caster, spell_filter } => {
+            let crate::GameEvent::SpellCast { caster: c, card_id, .. } = &logged.event else {
                 return false;
             };
-            match caster {
+            let caster_ok = match caster {
                 None => true,
-                Some(expr) => match eval_expr(expr, state, env) {
-                    Value::Player(p) => p == *c,
-                    _ => false,
-                },
-            }
+                Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *c),
+            };
+            // The cast object persists post-resolution (moved to graveyard/exile but
+            // still in `state.objects` with its catalog_key), so its types resolve.
+            let spell_ok = match spell_filter {
+                None => true,
+                Some(filter) => matches(filter, *card_id, state, env),
+            };
+            caster_ok && spell_ok
         }
     }
 }
@@ -2202,9 +2206,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
 fn walk_event_filter(filter: &crate::ir::expr::EventFilter, out: &mut Vec<Axis>) {
     use crate::ir::expr::EventFilter;
     match filter {
-        EventFilter::SpellCast { caster } => {
+        EventFilter::SpellCast { caster, spell_filter } => {
             if let Some(e) = caster {
                 walk_reads(e, out);
+            }
+            if let Some(f) = spell_filter {
+                walk_reads(&f.0, out);
             }
         }
     }

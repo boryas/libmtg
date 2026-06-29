@@ -223,8 +223,6 @@
             entered_this_turn: true,
             ..BattlefieldState::new()
         });
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
-
         let step = Step { kind: StepKind::Untap, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
@@ -232,7 +230,6 @@
         assert!(!state.permanent_bf(ragavan_id).unwrap().tapped, "permanent should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().entered_this_turn, "summoning sickness should clear");
         assert_eq!(state.player(PlayerId::Us).lands_played_this_turn, 0, "land drop count should reset");
-        assert_eq!(state.player(PlayerId::Us).spells_cast_this_turn, 0);
     }
 
     #[test]
@@ -5813,13 +5810,19 @@
         let alt = &trap_def.alternate_costs[0];
         let condition = alt.condition.as_ref().unwrap();
 
-        // Opponent (Us from their perspective) has cast 2 spells — condition false for Opp caster.
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
+        // Spell counts come from the event log (the spells_cast_this_turn counter
+        // was removed). Log Us casts; the condition reads "opponent of Opp" = Us.
+        let log_us_cast = |state: &mut SimState| state.event_log.push(
+            1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
+
+        // Opponent has cast 2 spells — condition false for Opp caster.
+        log_us_cast(&mut state);
+        log_us_cast(&mut state);
         assert!(!condition(PlayerId::Opp, &state),
             "trap condition should be false when opponent cast only 2 spells");
 
-        // Opponent has cast 3 spells — condition true.
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 3;
+        // Opponent has cast a third spell — condition true.
+        log_us_cast(&mut state);
         assert!(condition(PlayerId::Opp, &state),
             "trap condition should be true when opponent cast 3+ spells");
     }
@@ -7775,8 +7778,8 @@
 
         let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        // Simulate second spell: first spell already counted.
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 1;
+        // Log one prior spell this turn; the SpellCast fired below is the 2nd.
+        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
 
         let spell_id = {
             let id = state.alloc_id();
@@ -7814,7 +7817,7 @@
         state.catalog = test_catalog();
 
         let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 0;
+        // No prior spells this turn; the SpellCast fired below is the 1st.
 
         let spell_id = {
             let id = state.alloc_id();
@@ -7851,7 +7854,9 @@
         state.catalog = test_catalog();
 
         let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
+        // Log two prior spells this turn; the SpellCast fired below is the 3rd.
+        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
+        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
 
         let spell_id = {
             let id = state.alloc_id();
@@ -7880,6 +7885,128 @@
             .filter(|c| c.catalog_key == "Monk Token")
             .count();
         assert_eq!(monk_count, 0, "flurry should NOT trigger on third spell");
+    }
+
+    // ── The Fantasticar: pop on the EXACTLY fourth noncreature spell ────────────
+
+    /// Insert a spell-shell object with `name`'s catalog key (zone is irrelevant to
+    /// the EventCount noncreature filter; it resolves the card_id's types). Returns id.
+    fn fanta_mk_spell(state: &mut SimState, name: &str) -> ObjId {
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
+            id,
+            catalog_key: name.to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            is_token: false,
+            materialized: None,
+            counters: HashMap::new(),
+            ci_timestamp: 0,
+            role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
+        });
+        id
+    }
+
+    /// Log a prior noncreature SpellCast by Us this turn (counts toward the 4th).
+    fn fanta_log_prior(state: &mut SimState, name: &str) {
+        let id = fanta_mk_spell(state, name);
+        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: id, mana_spent: true });
+    }
+
+    /// Cast (fire) a SpellCast for `name` and resolve any triggers it produces.
+    fn fanta_cast(state: &mut SimState, name: &str) {
+        let id = fanta_mk_spell(state, name);
+        fire_event(GameEvent::SpellCast { caster: PlayerId::Us, card_id: id, mana_spent: true }, state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(state, 1, &[]); }
+    }
+
+    fn fanta_car_count(state: &SimState) -> usize {
+        state.permanents_of(PlayerId::Us).filter(|c| c.catalog_key == "The Fantasticar").count()
+    }
+    fn fanta_token_count(state: &SimState) -> usize {
+        state.permanents_of(PlayerId::Us).filter(|c| c.catalog_key == "Fantasticar Construct").count()
+    }
+
+    #[test]
+    fn test_fantasticar_pops_on_exactly_fourth_noncreature_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "The Fantasticar");
+
+        // Three prior noncreature spells this turn, then cast the 4th.
+        fanta_log_prior(&mut state, "Lotus Petal");
+        fanta_log_prior(&mut state, "Mishra's Bauble");
+        fanta_log_prior(&mut state, "Dark Ritual");
+        fanta_cast(&mut state, "Brainstorm");
+
+        assert_eq!(fanta_car_count(&state), 0, "The Fantasticar should be sacrificed on the pop");
+        assert_eq!(fanta_token_count(&state), 4, "the pop should make four Construct tokens");
+
+        // Tokens are 4/4 with flying and haste.
+        recompute(&mut state);
+        let tok = state.permanents_of(PlayerId::Us)
+            .find(|c| c.catalog_key == "Fantasticar Construct").map(|o| o.id).unwrap();
+        let eff = state.def_of(tok).expect("token in materialized defs");
+        let CardKind::Creature(c) = &eff.kind else { panic!("expected creature token") };
+        assert_eq!((c.power(), c.toughness()), (4, 4), "Construct should be 4/4");
+        assert!(creature_has_keyword(tok, Keyword::Flying, &state), "Construct should have flying");
+        assert!(creature_has_keyword(tok, Keyword::Haste, &state), "Construct should have haste");
+    }
+
+    #[test]
+    fn test_fantasticar_no_pop_with_four_spells_before_car_then_more_after() {
+        // "Casting 4 spells before the car doesn't work, even if you cast more after."
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Four noncreature spells this turn — but The Fantasticar is NOT in play yet,
+        // so the 4th-spell trigger isn't armed (active_zone = Battlefield).
+        fanta_log_prior(&mut state, "Lotus Petal");
+        fanta_log_prior(&mut state, "Mishra's Bauble");
+        fanta_log_prior(&mut state, "Dark Ritual");
+        fanta_cast(&mut state, "Brainstorm"); // the 4th — no car in play
+        assert_eq!(fanta_token_count(&state), 0, "no pop when the 4th is cast with no car in play");
+
+        // Now the car lands and we cast MORE spells (the 5th, 6th, …). The "fourth
+        // noncreature spell" has already passed, so it never pops this turn.
+        add_default_perm(&mut state, PlayerId::Us, "The Fantasticar");
+        fanta_cast(&mut state, "Ponder"); // 5th
+        fanta_cast(&mut state, "Consider"); // 6th
+        assert_eq!(fanta_token_count(&state), 0, "casting more after the car must not pop (not the 4th)");
+        assert_eq!(fanta_car_count(&state), 1, "the car survives — it never popped");
+    }
+
+    #[test]
+    fn test_fantasticar_as_the_fourth_spell_does_not_pop() {
+        // If The Fantasticar IS the 4th noncreature spell, it's on the stack (not the
+        // battlefield) when its own cast fires, so the trigger isn't armed.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        fanta_log_prior(&mut state, "Lotus Petal");
+        fanta_log_prior(&mut state, "Mishra's Bauble");
+        fanta_log_prior(&mut state, "Dark Ritual");
+        fanta_cast(&mut state, "The Fantasticar"); // 4th cast, but on the stack
+        assert_eq!(fanta_token_count(&state), 0, "the car as the 4th spell cannot sacrifice itself (still on the stack)");
+    }
+
+    #[test]
+    fn test_fantasticar_creature_spell_does_not_count_toward_four() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "The Fantasticar");
+
+        // Three noncreature spells, then a CREATURE spell — the creature is not the
+        // "fourth noncreature spell", so no pop.
+        fanta_log_prior(&mut state, "Lotus Petal");
+        fanta_log_prior(&mut state, "Mishra's Bauble");
+        fanta_log_prior(&mut state, "Dark Ritual");
+        fanta_cast(&mut state, "Thassa's Oracle"); // creature — doesn't count
+        assert_eq!(fanta_token_count(&state), 0, "a creature spell is not the 4th noncreature spell");
+
+        // A genuine 4th NONCREATURE spell now pops it.
+        fanta_cast(&mut state, "Brainstorm");
+        assert_eq!(fanta_token_count(&state), 4, "the 4th noncreature spell pops the car");
     }
 
     #[test]

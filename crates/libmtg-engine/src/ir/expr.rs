@@ -124,8 +124,13 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub enum EventFilter {
     /// A spell was cast. `caster` optionally filters by the player who cast it
-    /// (resolves against the event's `caster` field).
-    SpellCast { caster: Option<Box<Expr>> },
+    /// (resolves against the event's `caster` field). `spell_filter` optionally
+    /// filters by the cast object itself (its `card_id`, resolved against the
+    /// catalog) — e.g. "noncreature spells this turn" for The Fantasticar.
+    SpellCast {
+        caster: Option<Box<Expr>>,
+        spell_filter: Option<Box<Filter>>,
+    },
 }
 
 /// Which zone to scan, possibly controller-scoped.

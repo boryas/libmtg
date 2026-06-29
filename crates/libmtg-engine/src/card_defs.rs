@@ -227,6 +227,7 @@ fn all_cards() -> Vec<CardDef> {
         grafdiggers_cage(),
         mishras_bauble(),
         cori_steel_cutter(),
+        the_fantasticar(),
         batterskull(),
         meteor_sword(),
         pre_war_formalwear(),
@@ -319,6 +320,7 @@ fn all_cards() -> Vec<CardDef> {
         clue_token(),
         monk_token(),
         phyrexian_germ_token(),
+        fantasticar_construct_token(),
         mysterious_creature_token(),
     ]
 }
@@ -1925,6 +1927,7 @@ fn flusterstorm() -> CardDef {
             window: Window::ThisTurn,
             filter: Box::new(EventFilter::SpellCast {
                 caster: Some(Box::new(Expr::Ctx(Ctx::Controller))),
+                spell_filter: None,
             }),
         }),
         Box::new(Expr::Num(1)),
@@ -2014,7 +2017,13 @@ fn mindbreak_trap() -> CardDef {
             // condition is met. IR Action::Noop.
             costs: CostBody::Ir(crate::ir::action::Action::Noop),
             condition: Some(Arc::new(|caster, state| {
-                state.player(caster.opp()).spells_cast_this_turn >= 3
+                // "If an opponent cast three or more spells this turn" — counted
+                // from the event log (replaces the spells_cast_this_turn counter).
+                let opp = caster.opp();
+                state.event_log.count(
+                    crate::ir::event_log::Window::ThisTurn,
+                    |e| matches!(e.event, GameEvent::SpellCast { caster: c, .. } if c == opp),
+                ) >= 3
             })),
             ..Default::default()
         },
@@ -4236,6 +4245,16 @@ fn phyrexian_germ_token() -> CardDef {
     simple("Phyrexian Germ", CardKind::Creature(data), vec![Color::Black], None)
 }
 
+/// 4/4 colorless Construct artifact creature token with flying and haste — made
+/// four-at-a-time when The Fantasticar pops. (Artifact-creature typing is cosmetic
+/// for goldfishing; modeled as a plain creature token like the others.)
+fn fantasticar_construct_token() -> CardDef {
+    let mut data = CreatureData::new("", 4, 4);
+    data.creature_subtypes = vec!["Construct".into()];
+    data.keywords = Keywords::from_slice(&[Keyword::Flying, Keyword::Haste]);
+    simple("Fantasticar Construct", CardKind::Creature(data), vec![], None)
+}
+
 /// 2/2 colorless face-down creature token produced by the "cloak" keyword (CR 702.169).
 /// ABNORMAL: real cloak puts the actual top card of library onto the battlefield face-down
 /// (still that specific card, just hidden/characteristic-stripped), and grants ward {2} and
@@ -4245,6 +4264,108 @@ fn phyrexian_germ_token() -> CardDef {
 fn mysterious_creature_token() -> CardDef {
     let data = CreatureData::new("", 2, 2);
     simple("Mysterious Creature", CardKind::Creature(data), vec![], None)
+}
+
+/// The Fantasticar — {3} Legendary Artifact — Vehicle (4/4, flying).
+/// "Whenever you cast your fourth noncreature spell each turn, you may sacrifice
+///  The Fantasticar. If you do, create four 4/4 colorless Construct artifact
+///  creature tokens with flying and haste."
+///
+/// Pure-IR triggered ability. The 4th-spell count is read from the event log
+/// (`EventCount` over noncreature `SpellCast`s this turn) — the triggering cast
+/// is logged by `fire_event` before triggers dispatch, so `== 4` means "this is
+/// the 4th". `active_zone: Battlefield` is what makes the "exactly the 4th"
+/// rules-text exact: if The Fantasticar isn't in play when the 4th spell is cast
+/// (e.g. it *is* the 4th spell, still on the stack, or it landed only after the
+/// 4th), the trigger isn't armed and there is no pop.
+///
+/// The printed "you may … if you do" optionality is collapsed to an always-pop
+/// (mandatory) effect: declining is never correct for the goldfish, and a `MayDo`
+/// gate would collide with the goldfish strategy's `Mode` handling (Ponder's
+/// shuffle). Faithful optionality is deferred (see plan).
+fn the_fantasticar() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, EventPattern, TriggerSpec};
+    use crate::ir::action::{Action, TokenSpec, Who};
+    use crate::ir::context::Ctx;
+    use crate::ir::event_log::Window;
+    use crate::ir::expr::{EventFilter, Expr, Filter, ZoneKindSel};
+
+    let mut card = simple(
+        "The Fantasticar",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "3".to_string(),
+            subtypes: vec!["Vehicle".into()],
+            ..Default::default()
+        }),
+        vec![], // colorless
+        Some(25),
+    );
+    card.supertypes = vec![Supertype::Legendary];
+
+    // "noncreature spell" predicate, reused by the trigger pattern and the count.
+    let noncreature = || ir_not(ir_type(CardType::Creature));
+
+    // Condition: you cast it, and it is your 4th noncreature spell this turn.
+    let condition = Expr::And(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Ctx(Ctx::Var("triggered_actor"))),
+            Box::new(Expr::Ctx(Ctx::Controller)),
+        )),
+        Box::new(Expr::Eq(
+            Box::new(Expr::EventCount {
+                window: Window::ThisTurn,
+                filter: Box::new(EventFilter::SpellCast {
+                    caster: Some(Box::new(Expr::Ctx(Ctx::Controller))),
+                    spell_filter: Some(Box::new(noncreature())),
+                }),
+            }),
+            Box::new(Expr::Num(4)),
+        )),
+    );
+
+    // Sacrifice this (It == Source), then create four Construct tokens.
+    let sac_self = Action::Sacrifice {
+        who: Who::You,
+        filter: Filter(Expr::Eq(
+            Box::new(Expr::Ctx(Ctx::It)),
+            Box::new(Expr::Ctx(Ctx::Source)),
+        )),
+        count: Expr::Num(1),
+        bind_as: None,
+    };
+    let make_tokens = Action::CreateToken {
+        who: Who::You,
+        // do_create_token resolves the token by name from the catalog; the other
+        // fields are documentary (mirror the registered token).
+        spec: TokenSpec {
+            name: "Fantasticar Construct",
+            types: vec![CardType::Artifact, CardType::Creature],
+            subtypes: vec!["Construct"],
+            colors: vec![],
+            power: Some(4),
+            toughness: Some(4),
+            keywords: vec![Keyword::Flying, Keyword::Haste],
+        },
+        n: Expr::Num(4),
+    };
+
+    card.abilities = vec![Ability {
+        kind: AbilityKind::Triggered {
+            spec: TriggerSpec::When {
+                pattern: EventPattern::SpellCast { spell_filter: noncreature() },
+                condition: Some(condition),
+            },
+            target_spec: TargetSpec::None,
+            body: Action::Sequence(vec![sac_self, make_tokens]),
+            active_zone: ZoneKindSel::Battlefield,
+        },
+        text: Some(
+            "Whenever you cast your fourth noncreature spell each turn, sacrifice The \
+             Fantasticar. If you do, create four 4/4 colorless Construct artifact creature \
+             tokens with flying and haste.",
+        ),
+    }];
+    card
 }
 
 /// Cori-Steel Cutter — {1}{R} Artifact — Equipment.
@@ -4285,9 +4406,14 @@ fn cori_steel_cutter() -> CardDef {
             check: Arc::new(|event, source_id, controller, state, pending| {
                 if let GameEvent::SpellCast { caster, .. } = event {
                     if *caster != controller { return; }
-                    // spells_cast_this_turn is incremented AFTER SpellCast fires,
-                    // so == 1 means the first spell was counted and this is the second.
-                    if state.player(controller).spells_cast_this_turn != 1 { return; }
+                    // Count spells cast by us this turn from the event log (the
+                    // triggering cast is already logged by `fire_event` before
+                    // triggers dispatch), so == 2 means this is the second spell.
+                    let cast = state.event_log.count(
+                        crate::ir::event_log::Window::ThisTurn,
+                        |e| matches!(e.event, GameEvent::SpellCast { caster: c, .. } if c == controller),
+                    );
+                    if cast != 2 { return; }
                     pending.push(TriggerContext {
                         source_name: "Cori-Steel Cutter (flurry)".into(),
                         controller,

@@ -25,6 +25,7 @@ use libmtg_engine::*;
 use super::recipe::{self, CardRole};
 
 const DOOMSDAY: &str = "Doomsday";
+const FANTASTICAR: &str = "The Fantasticar";
 
 /// The cutoff turn past which a Doomsday is assumed too slow (Wastelanded / raced).
 /// The strategy plays to maximise `P(cast Doomsday by cutoff)`.
@@ -47,6 +48,10 @@ pub struct DDGoldfishStrategy {
     /// selection decision and log (`DIFF …`) wherever it disagrees with the
     /// principled policy. Off in normal play.
     compare: bool,
+    /// When true, also pursue The Fantasticar pop (cast the car + dump free noncreature
+    /// spells) whenever it can send strictly sooner than Doomsday. False = Doomsday-only
+    /// baseline (the two-wincon-speedup comparison).
+    car_enabled: bool,
     decisions: Vec<String>,
 }
 
@@ -64,8 +69,15 @@ impl DDGoldfishStrategy {
             mull_mode,
             pending_shuffle: false,
             compare: false,
+            car_enabled: false,
             decisions: Vec::new(),
         }
+    }
+
+    /// Enable pursuing The Fantasticar pop as a second wincon (see `car_enabled`).
+    pub fn with_car(mut self, on: bool) -> Self {
+        self.car_enabled = on;
+        self
     }
 
     /// Like [`new`], but logs `DIFF …` at every selection decision where the
@@ -158,16 +170,17 @@ impl DDGoldfishStrategy {
         None
     }
 
-    /// P(cast by cutoff) if `id` were acquired now — staged on top (`to_top`, a tutor:
-    /// drawn next turn) or drawn into hand this turn (a dig). Lets each search/dig pick
-    /// the candidate that most advances the objective, with no value table.
+    /// P(SEND by cutoff) if `id` were acquired now — staged on top (`to_top`, a tutor:
+    /// drawn next turn) or drawn into hand this turn (a dig). The unified objective (P of
+    /// resolving Doomsday OR popping the car), so a revealed car / car fuel scores just
+    /// like a Doomsday piece — this is what makes the deck dig toward and keep the car.
     fn candidate_p(&self, state: &SimState, id: ObjId, to_top: bool) -> f64 {
         let who = self.player_id;
         let key = state.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_default();
         if to_top {
-            recipe::p_cast_by_with_known_top(state, who, &[key.as_str()], false, self.cutoff)
+            recipe::p_send_by_with_known_top(state, who, &[key.as_str()], false, self.cutoff)
         } else {
-            recipe::p_cast_by_full(state, who, &[key.as_str()], &[], true, self.cutoff)
+            recipe::p_send_by_full(state, who, &[key.as_str()], &[], true, self.cutoff)
         }
     }
 
@@ -357,6 +370,104 @@ fn follow_line(state: &SimState, who: PlayerId, legal: &[LegalAction], max_turn:
     Some(line.steps.iter().find_map(|&s| line_step_action(s, legal)).unwrap_or(LegalAction::Pass))
 }
 
+/// `mana value` of a cost string (digits → generic, each W/U/B/R/G/C → 1).
+fn cmc_of(cost: &str) -> u32 {
+    let (mut n, mut num, mut saw) = (0u32, 0u32, false);
+    for ch in cost.trim().chars() {
+        if let Some(d) = ch.to_digit(10) {
+            num = num * 10 + d;
+            saw = true;
+            continue;
+        }
+        if saw {
+            n += num;
+            num = 0;
+            saw = false;
+        }
+        if matches!(ch, 'W' | 'U' | 'B' | 'R' | 'G' | 'C') {
+            n += 1;
+        }
+    }
+    n + if saw { num } else { 0 }
+}
+
+/// The cheapest legal noncreature CastSpell that's fuel for the pop — any spell the
+/// engine offers here is castable (it has already excluded counterspells with no legal
+/// target), excluding Doomsday and the car itself. Cheapest-first maximizes the number
+/// of casts we can pay for this turn.
+fn cast_cheapest_fuel(state: &SimState, legal: &[LegalAction]) -> Option<LegalAction> {
+    legal.iter()
+        .filter(|a| match a {
+            LegalAction::CastSpell { card_id, .. } => {
+                let key = state.objects.get(card_id).map(|o| o.catalog_key.as_str()).unwrap_or("");
+                key != DOOMSDAY
+                    && key != FANTASTICAR
+                    && state.def_of(*card_id).map_or(false, |d| !d.is_land() && !d.is_creature())
+            }
+            _ => false,
+        })
+        .min_by_key(|a| match a {
+            LegalAction::CastSpell { card_id, .. } => {
+                state.def_of(*card_id).map_or(99, |d| cmc_of(d.mana_cost()))
+            }
+            _ => 99,
+        })
+        .cloned()
+}
+
+/// A legal mana-positive noncreature cast to ramp toward the car's {3}. RITUAL FIRST:
+/// a ritual nets more mana per cast, so the car becomes affordable in FEWER noncreature
+/// casts — which leaves the free {0} artifacts (Petals/Baubles) to be cast AFTER the car
+/// for the 4th-spell trigger. Casting a Petal here is the last resort: spent as ramp it
+/// no longer counts as a post-car spell, and that mis-ordering (car ends up the 4th spell,
+/// on the stack rather than in play) is exactly what dropped the realized pop rate.
+fn cast_ramp(state: &SimState, legal: &[LegalAction]) -> Option<LegalAction> {
+    let is_ritual = |id: &ObjId| state.def_of(*id).map_or(false, |d| d.added_mana_on_resolve().is_some());
+    let is_petal = |id: &ObjId| state.def_of(*id).map_or(false, |d|
+        !d.is_land() && !d.is_creature() && d.mana_cost().trim() == "0" && !d.mana_abilities().is_empty());
+    legal.iter()
+        .find(|a| matches!(a, LegalAction::CastSpell { card_id, .. } if is_ritual(card_id)))
+        .or_else(|| legal.iter().find(|a| matches!(a, LegalAction::CastSpell { card_id, .. } if is_petal(card_id))))
+        .cloned()
+}
+
+
+/// Pursue the car with POP DISCIPLINE: develop a land, then spend the car / ramp / pop-fuel
+/// ONLY on a turn where a pop actually completes — the car can be cast as the ≤3rd
+/// noncreature spell with a cast after it (`recipe::can_pop_this_turn`). On any other turn
+/// it CONSERVES the pop fuel (Petals/Baubles/LED/rituals) and digs with cantrips only, then
+/// pops next turn with the resources intact. The old "cast the car the instant it's
+/// castable" fired it as the doomed 4th spell after a dig cantrip (on the stack, not in
+/// play → no trigger) and burned the ramp — the dominant failure-to-fire.
+fn pursue_car(state: &SimState, who: PlayerId, legal: &[LegalAction]) -> Option<LegalAction> {
+    use CardRole::*;
+    // 1) Develop first — a land drop is free progress and the car's {3} needs it.
+    if let Some(a) = best_land_drop(state, who, legal, &[BlackLandUntapped, Fetch, BlackLandTapped, BlueSource]) {
+        return Some(a);
+    }
+    if let Some(a) = fetch_activation(state, legal) {
+        return Some(a);
+    }
+    // 2) Pop only if it COMPLETES this turn.
+    if recipe::can_pop_this_turn(state, who) {
+        let car_in_play = state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR);
+        if car_in_play {
+            if let Some(a) = cast_cheapest_fuel(state, legal) {
+                return Some(a); // dump fuel — the 4th cast pops it
+            }
+        } else if let Some(a) = cast_named(state, legal, FANTASTICAR) {
+            return Some(a); // affordable now → cast it (guaranteed ≤3rd this turn)
+        } else if let Some(a) = cast_ramp(state, legal) {
+            return Some(a); // ritual-first ramp toward the {3}
+        }
+    }
+    // 3) Can't pop this turn → CONSERVE the pop fuel; dig with cantrips only.
+    if let Some(a) = first_cast(state, who, legal, &[Cantrip]) {
+        return Some(a);
+    }
+    Some(LegalAction::Pass)
+}
+
 /// A legal fetch-land activation (sac → search), if any.
 fn fetch_activation(state: &SimState, legal: &[LegalAction]) -> Option<LegalAction> {
     legal.iter()
@@ -429,8 +540,41 @@ impl Strategy for DDGoldfishStrategy {
             self.dlog(format!("T{}: cast Doomsday", state.current_turn));
             return a;
         }
-        // 2) SETTLE vs GAMBLE — keyed on the solver's det-ttd / min-ttd (no thresholds).
+        // 1b) Two-wincon: commit to The Fantasticar as a first-class plan when we hold a
+        // car and Doomsday is NOT a ready, faster line (or the car is already in play).
+        // The car line is STOCHASTIC — we dig toward it with cantrips + land drops while
+        // conserving the pop fuel — so we do NOT gate on a deterministic car line already
+        // existing; `pursue_car` digs until it assembles, then pops.
         let det = recipe::deterministic_cast_turn(state, who, self.cutoff.max(1));
+        if self.car_enabled {
+            let car = recipe::car_pop_turn(state, who, self.cutoff.max(1));
+            let car_in_play = state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR);
+            let car_in_hand = state.hand_of(who).any(|c| c.catalog_key == FANTASTICAR);
+            // Pick the plan that maximises P(send), re-evaluated every window:
+            //   - car already in play → finish it;
+            //   - both lines guaranteed → take the faster one;
+            //   - exactly one guaranteed → take it;
+            //   - neither guaranteed → take whichever is stochastically more likely.
+            // This subsumes "Doomsday-first, car-backup": we develop/dig toward whichever
+            // combo the objective favours, and switch as new draws shift it.
+            let prefer_car = match (car, det) {
+                (Some(c), Some(d)) => c <= d,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => {
+                    recipe::p_car_pop_by(state, who, self.cutoff.max(1))
+                        >= recipe::p_cast_by(state, who, self.cutoff.max(1))
+                }
+            };
+            if car_in_play || (car_in_hand && prefer_car) {
+                self.dlog(format!("T{}: car plan (car-ttd={:?}, dd-ttd={:?}, out={})",
+                    state.current_turn, car, det, car_in_play));
+                if let Some(a) = pursue_car(state, who, legal) {
+                    return a;
+                }
+            }
+        }
+        // 2) SETTLE vs GAMBLE — keyed on the solver's det-ttd / min-ttd (no thresholds).
         let mn = recipe::min_ttd(state, who, self.cutoff.max(1));
         if det.is_some() {
             // A GUARANTEED line lands by the cutoff → SETTLE: execute it, and ONLY it.
@@ -473,7 +617,7 @@ impl Strategy for DDGoldfishStrategy {
 
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
         let who = self.player_id;
-        let p = recipe::p_cast_by(state, who, self.cutoff);
+        let p = recipe::p_send_by(state, who, self.cutoff);
         // The keep/mull decision is the selected mulligan mode's (Keep7 / Realistic /
         // Aggressive — see `super::mull`). `p` is computed only for the logging below.
         let mull = super::mull::should_mulligan(self.mull_mode, state, who, self.cutoff, mulligans_taken);
@@ -630,8 +774,8 @@ impl Strategy for DDGoldfishStrategy {
     fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool {
         let who = self.player_id;
         let Some(key) = state.objects.get(&id).map(|o| o.catalog_key.clone()) else { return false };
-        let keep_p = recipe::p_cast_by_with_known_top(state, who, &[key.as_str()], true, self.cutoff);
-        let base_p = recipe::p_cast_by(state, who, self.cutoff);
+        let keep_p = recipe::p_send_by_with_known_top(state, who, &[key.as_str()], true, self.cutoff);
+        let base_p = recipe::p_send_by(state, who, self.cutoff);
         let principled_bin = keep_p < base_p; // a known keep worse than an unknown draw → bin
         if self.compare {
             let heur_bin = heur_surveil_bin(state, who, id);
@@ -653,10 +797,10 @@ impl Strategy for DDGoldfishStrategy {
             .filter_map(|&id| state.objects.get(&id).map(|o| (id, o.catalog_key.clone())))
             .collect();
         let mut best_keep: Vec<ObjId> = Vec::new();
-        let mut best_p = recipe::p_cast_by(state, who, self.cutoff); // keep nothing on top
+        let mut best_p = recipe::p_send_by(state, who, self.cutoff); // keep nothing on top
         for arrangement in ordered_subsets(&keyed) {
             let keys: Vec<&str> = arrangement.iter().map(|(_, k)| k.as_str()).collect();
-            let p = recipe::p_cast_by_with_known_top(state, who, &keys, true, self.cutoff);
+            let p = recipe::p_send_by_with_known_top(state, who, &keys, true, self.cutoff);
             if p > best_p {
                 best_p = p;
                 best_keep = arrangement.iter().map(|(id, _)| *id).collect();

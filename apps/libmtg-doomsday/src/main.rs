@@ -104,6 +104,19 @@ struct Args {
     /// success rate (is our estimate accurate?).
     #[arg(long)]
     calibrate: bool,
+    /// Deterministic two-wincon "send" report: over `--games` opening hands (Keep7),
+    /// the share that can GUARANTEE a send by `--cutoff` via Doomsday, via The
+    /// Fantasticar, or either — with the either-wincon sends split protected/naked.
+    /// Uses the built-in `vroomsday` list unless `--deck` is given. Honors `--play`
+    /// (default) / `--draw`.
+    #[arg(long)]
+    send_report: bool,
+    /// Realized two-wincon send simulation: goldfish the deck twice (Doomsday-only vs
+    /// Doomsday+Fantasticar) and print P(send by `--cutoff`) for each + the speedup and
+    /// the protected/naked split. Uses the built-in `vroomsday` list unless `--deck` is
+    /// given, the `--mull-mode`, and `--play` (default) / `--draw`.
+    #[arg(long)]
+    send_sim: bool,
 }
 
 fn main() -> ExitCode {
@@ -119,6 +132,67 @@ fn main() -> ExitCode {
         },
         None => sample_doomsday_deck(),
     };
+
+    if args.send_report {
+        // Default to the built-in vroomsday (Doomsday + Fantasticar) list when no
+        // --deck was given; otherwise report on the loaded deck.
+        let deck = if args.deck.is_none() { libmtg_doomsday::vroomsday_deck() } else { deck };
+        let on_draw = args.draw;
+        let cutoff = args.cutoff.min(u8::MAX as u32) as u8;
+        let on = if on_draw { "draw" } else { "play" };
+        let total: i32 = deck.iter().filter(|(_, _, b)| b == "main").map(|(_, q, _)| *q).sum();
+        eprintln!(
+            "Deterministic two-wincon send report: {} hands, on the {on}, cutoff T{cutoff}…",
+            args.games
+        );
+        let r = libmtg_doomsday::deterministic_send_report(
+            &deck, args.games, DEFAULT_PROTECTION, cutoff, on_draw,
+        );
+        let share = |n: u32| if r.send_by > 0 { 100.0 * n as f64 / r.send_by as f64 } else { 0.0 };
+        println!("Deck: {total} mainboard | {} opening hands (Keep7, on the {on}) | cutoff T{cutoff}", r.games);
+        println!();
+        println!("  P(send by T{cutoff})             = {:6.2}%   ({} / {})", r.pct(r.send_by), r.send_by, r.games);
+        println!("    via Doomsday   (cast by T{cutoff}) = {:6.2}%", r.pct(r.dd_by));
+        println!("    via Fantasticar (pop by T{cutoff}) = {:6.2}%", r.pct(r.car_by));
+        println!("    two-wincon speedup vs DD-only  = +{:.2} pts", r.pct(r.send_by) - r.pct(r.dd_by));
+        println!();
+        println!("  of those T{cutoff} sends:");
+        println!("    protected (≥1 disruption held) = {:6.2}%   ({} / {})", share(r.send_protected), r.send_protected, r.send_by);
+        println!("    naked     (0 disruption held)  = {:6.2}%   ({} / {})", share(r.send_naked), r.send_naked, r.send_by);
+        return ExitCode::SUCCESS;
+    }
+
+    if args.send_sim {
+        let deck = if args.deck.is_none() { libmtg_doomsday::vroomsday_deck() } else { deck };
+        let on_play = if args.draw { Some(false) } else { Some(true) };
+        let on = if args.draw { "draw" } else { "play" };
+        let cutoff = args.cutoff;
+        let mode: MullMode = args.mull_mode.into();
+        eprintln!(
+            "Realized two-wincon send sim: {} games x2 (DD-only vs +car), on the {on}, cutoff T{cutoff}, mull={:?}…",
+            args.games, mode
+        );
+        let dd = libmtg_doomsday::run_goldfish_send(&deck, args.games, DEFAULT_PROTECTION, cutoff, mode, on_play, false);
+        let both = libmtg_doomsday::run_goldfish_send(&deck, args.games, DEFAULT_PROTECTION, cutoff, mode, on_play, true);
+        let c = cutoff.min(u8::MAX as u32) as u8;
+        let dd_pct = 100.0 * dd.cast_by(c);
+        let both_pct = 100.0 * both.cast_by(c);
+        // Protected/naked split of the +car sends (protection held in hand at the send).
+        let protected: u32 = both.protection.iter().filter(|(&p, _)| p >= 1).map(|(_, &n)| n).sum();
+        let naked: u32 = both.protection.get(&0).copied().unwrap_or(0);
+        let sends = protected + naked;
+        let share = |n: u32| if sends > 0 { 100.0 * n as f64 / sends as f64 } else { 0.0 };
+        println!("Realized P(send by T{c}) on the {on}  ({} games, mull={:?}):", args.games, mode);
+        println!();
+        println!("  Doomsday only          = {dd_pct:6.2}%");
+        println!("  Doomsday + Fantasticar = {both_pct:6.2}%");
+        println!("  two-wincon speedup     = +{:.2} pts  (x{:.2})", both_pct - dd_pct,
+            if dd_pct > 0.0 { both_pct / dd_pct } else { 0.0 });
+        println!();
+        println!("  of the +car sends (≈{} games): protected {:.1}%, naked {:.1}%",
+            sends, share(protected), share(naked));
+        return ExitCode::SUCCESS;
+    }
 
     // Surface cards the engine can't simulate (dropped / inert) before running.
     // Skip for machine-readable stdout modes (--dump-keep-data, --sim-hands).
