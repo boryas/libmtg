@@ -3,13 +3,17 @@ use super::*;
 use crate::ir::expr::Filter;
 
 /// Actor-relative player reference used in effect primitives.
-/// `Actor` = the spell's controller; `Opp` = their opponent.
+/// `Actor` = the spell's controller; `Opp` = their opponent; `Any` = either player —
+/// a TARGET-controller relaxation (e.g. a counter that may hit your OWN spell, as in
+/// "Daze your own Lotus Petal" to advance a per-turn spell count). `Any` is only meaningful
+/// as the `controller` of an `ObjectInZone` target spec, where `legal_targets` special-cases
+/// it; `resolve` keeps a total fallback for any stray non-target use.
 #[derive(Clone, Copy, Debug)]
-pub enum Who { Actor, Opp }
+pub enum Who { Actor, Opp, Any }
 
 impl Who {
     pub(crate) fn resolve(&self, actor: PlayerId) -> PlayerId {
-        match self { Who::Actor => actor, Who::Opp => actor.opp() }
+        match self { Who::Actor => actor, Who::Opp => actor.opp(), Who::Any => actor }
     }
 }
 

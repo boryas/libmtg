@@ -3342,6 +3342,23 @@
         assert!(!targets.contains(&ab_id), "an ability is NOT a legal counter-spell target");
     }
 
+    /// `Who::Any` (real Daze / Force of Will) may target your OWN spell on the stack — the
+    /// "Daze your own Lotus Petal to advance the per-turn spell count" line — while a normal
+    /// `Who::Opp` counter still cannot (the self-owner guard stays for opponent-only counters).
+    #[test]
+    fn counter_targets_own_spell_only_with_who_any() {
+        let mut state = make_state();
+        let petal = catalog_card("Lotus Petal");
+        let own = add_stack_spell(&mut state, PlayerId::Us, &petal);
+
+        let any = TargetSpec::ObjectInZone { controller: Who::Any, zone: ZoneId::Stack, filter: ir_spell() };
+        let opp = TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_spell() };
+        assert!(legal_targets(&any, PlayerId::Us, ObjId(0), &state).contains(&own),
+            "Who::Any may target our own spell (Daze your own Petal)");
+        assert!(!legal_targets(&opp, PlayerId::Us, ObjId(0), &state).contains(&own),
+            "Who::Opp must NOT target our own spell");
+    }
+
     // ── Section 57: Stoneforge Mystic (Equipment subtype + tutor + put-from-hand) ──
 
     /// Stoneforge's ETB tutor finds an Equipment in the library and puts it into hand;

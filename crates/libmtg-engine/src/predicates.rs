@@ -248,7 +248,8 @@ pub fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: ObjId, 
         TargetSpec::None => vec![],
         TargetSpec::Player(who) => vec![state.player_id(who.resolve(controller))],
         TargetSpec::ObjectInZone { controller: who, zone, filter } => {
-            let target_who = who.resolve(controller);
+            let any_controller = matches!(who, Who::Any);
+            let target_who = if any_controller { None } else { Some(who.resolve(controller)) };
             let env = crate::ir::executor::BindEnv::new()
                 .with_controller(controller)
                 .with_source(source_id);
@@ -256,8 +257,10 @@ pub fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: ObjId, 
                 .filter(|&id| {
                     if *zone == ZoneId::Stack {
                         let actor_id = state.player_id(controller);
-                        if state.stack_item_owner(id) == actor_id
-                            || !state.stack_item_is_counterable(id) { return false; }
+                        // A normal counter cannot target the actor's OWN spell; an Any-controller
+                        // counter (e.g. dazing your own Lotus Petal for the spell count) may.
+                        if !any_controller && state.stack_item_owner(id) == actor_id { return false; }
+                        if !state.stack_item_is_counterable(id) { return false; }
                     }
                     // CR 702.16d: protection prevents targeting.
                     if is_protected_from(id, source_id, state) { return false; }
@@ -300,10 +303,11 @@ pub fn has_valid_target(
 
 
 
-/// Iterate over ObjIds in the given zone controlled (or owned) by `who`.
+/// Iterate over ObjIds in the given zone controlled (or owned) by `who` — or by ANYONE
+/// when `who` is `None` (a `Who::Any` target, e.g. a counter that may hit your own spell).
 fn objects_in_zone<'a>(
     zone: &ZoneId,
-    who: PlayerId,
+    who: Option<PlayerId>,
     state: &'a SimState,
 ) -> impl Iterator<Item = ObjId> + 'a {
     let zone_card = match zone {
@@ -321,7 +325,7 @@ fn objects_in_zone<'a>(
                 Some(z) => z == zone_card,
                 None => false,
             };
-            zone_match && (o.controller == who || o.owner == who)
+            zone_match && who.map_or(true, |w| o.controller == w || o.owner == w)
         })
         .map(|o| o.id)
 }

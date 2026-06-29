@@ -1357,7 +1357,9 @@ fn daze() -> CardDef {
     c.abilities = vec![Ability {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
-                target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_spell() },
+                // Who::Any: real Daze counters "target spell" (any). The deck also self-targets
+                // (Daze your own Lotus Petal) to advance the per-turn noncreature-spell count.
+                target_spec: TargetSpec::ObjectInZone { controller: Who::Any, zone: ZoneId::Stack, filter: ir_spell() },
                 body: counter_unless_pays_body(parse_mana_cost("1")),
             }],
         },
@@ -1468,7 +1470,9 @@ fn force_of_will() -> CardDef {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
                 target_spec: TargetSpec::ObjectInZone {
-                    controller: Who::Opp,
+                    // Who::Any: real Force of Will counters "target spell" (any), including
+                    // your own (pitch-fix / advancing a per-turn spell count).
+                    controller: Who::Any,
                     zone: ZoneId::Stack,
                     filter: ir_any(),
                 },
