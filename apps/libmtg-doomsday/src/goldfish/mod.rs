@@ -1173,17 +1173,15 @@ mod tests {
     #[test]
     #[ignore]
     fn compare_vroomsday_vs_tempo_t3() {
-        let n = 30_000;
+        let n = 20_000;
         let (cut, mode, play) = (3u32, MullMode::Realistic, Some(true));
         let tempo = run_goldfish_send(&sample_doomsday_deck(), n, &[], cut, mode, play, false);
-        let vroom_dd = run_goldfish_send(&vroomsday_deck(), n, &[], cut, mode, play, false);
         let vroom_car = run_goldfish_send(&vroomsday_deck(), n, &[], cut, mode, play, true);
         let p = |s: &GoldfishStats| 100.0 * s.cast_by(3);
         println!("\n=== P(send by T3), on the play, Realistic mull, {n} games ===");
-        println!("  old UB-tempo DD list (DD only)        = {:.2}%", p(&tempo));
-        println!("  vroomsday, DD only                    = {:.2}%", p(&vroom_dd));
-        println!("  vroomsday, DD + Fantasticar (send)     = {:.2}%", p(&vroom_car));
-        println!("  vroomsday two-wincon vs old tempo      = {:+.2} pts", p(&vroom_car) - p(&tempo));
+        println!("  old UB-tempo DD list (race to DD)      = {:.2}%", p(&tempo));
+        println!("  vroomsday two-wincon (DD or car)       = {:.2}%", p(&vroom_car));
+        println!("  vroomsday vs old tempo                 = {:+.2} pts", p(&vroom_car) - p(&tempo));
     }
 
     /// VALIDATION (`cargo test --release validate_almost_car_keep_hands -- --ignored --nocapture`):
