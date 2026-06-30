@@ -155,8 +155,8 @@ prioritized first; this is its own architectural pass.
 | Card                 | Choice type  | Stored in            | Drives                                                                                                                                                                                                                                                                                                                                                                 |
 |----------------------+--------------+----------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Cavern of Souls      | CreatureType | ~bf.etb_choice~      | Colored mana restricted to creature spells (coarsened — ignores named type). Uncounterable (TODO: not enforced). *TODO*: proper fix requires tagging mana with conditions/effects so the engine can track "this mana was produced by Cavern for creature type X" and enforce uncounterable + type restriction at spend time. |
-| Painter's Servant    | Color        | ~bf.etb_choice~      | L5 CE adding chosen color globally                                                                                                                                                                                                                                                                                                                                     |
-| Disruptor Flute      | CardName     | ~bf.etb_choice~      | L3 CE: +3 cost & suppress abilities                                                                                                                                                                                                                                                                                                                                    |
+| Painter's Servant    | Color        | ~bf.etb_choice~      | IR ~Static{AddColor(ChosenColor(Source))}~ (L5, scope None = every object)                                                                                                                                                                                                                                                                                              |
+| Disruptor Flute      | CardName     | ~bf.etb_choice~      | IR ~Static{CastingCostPlus(3)}~ (+3 cost) & ~Restriction{Activate}~ whose subject is ~Name(It)==ChosenName(Source) ∧ Not(activating_mana_ability)~ (suppress non-mana abilities of the named card) |
 | Engineered Explosives | (sunburst)  | ~obj.counters[Charge]~ | Reads ~resolving_costs_ctx.chosen_x~                                                                                                                                                                                                                                                                                                                                 |
 
 ** Placeholder/incomplete ETB
@@ -174,9 +174,9 @@ Modify the ZoneChange event itself rather than triggering after it.
 |-------------------------+---------------------------------------------+------------------------------------------------------------------------------------------------|
 | Murktide Regent         | Sets counters from delve exile count        | Reads ~resolving_costs_ctx.objects_moved~                                                      |
 | Dauthi Voidwalker       | Opponent GY → Exile + Void counter          | ~dv_replacement_check~                                                                         |
-| Painter's Servant       | Stores color, registers L5 CE               | ~etb_self_replacement~                                                                         |
+| Painter's Servant       | Stores color only (effect is an IR ability) | ~etb_self_replacement~                                                                         |
 | Cavern of Souls         | Stores creature type                         | ~etb_self_replacement~                                                                         |
-| Disruptor Flute         | Stores card name, registers L3 CE           | ~etb_self_replacement~                                                                         |
+| Disruptor Flute         | Stores card name only (effects are IR abilities) | ~etb_self_replacement~                                                                    |
 | Engineered Explosives   | Sets Charge counters from X                 | ~etb_self_check~                                                                               |
 | MKM surveil duals (10)  | Sets ~bf.tapped = true~                     | IR ~Replacement~ + ~EventMod::EnterTapped~                                                     |
 | Mistrise Village        | Conditionally sets ~bf.tapped~              | IR ~Replacement~ + ~condition~ over battlefield (lowercase "mountain"/"forest" subtypes)       |
@@ -225,7 +225,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card                       | When              | Effect                                                                                           |
 |----------------------------+-------------------+--------------------------------------------------------------------------------------------------|
-| Sneak Attack               | Next end step     | Sacrifice creature; ~OneShot~ ~TriggerInstance~                                                  |
+| Sneak Attack               | Next end step     | IR ~ScheduleDelayedTrigger{AtStep End}~ → ~Sacrifice(It == target)~                              |
 | Fury (evoke)               | Self ETB with ~alt_cost_index~ set | Sacrifice self                                                                   |
 | Mishra's Bauble            | Next upkeep       | Draw 1; ~OneShot~ delayed ~TriggerInstance~                                                      |
 | Phelia, Exuberant Shepherd | Next end step     | Return exiled card under owner's control; +1/+1 counter if it returned under your control       |
@@ -235,7 +235,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card             | Cost   | Notes                                                                          |
 |------------------+--------+--------------------------------------------------------------------------------|
-| Hexing Squelcher | 2 life | ~ward_pay_or_counter~; also grants Ward to other creatures via L6 CE           |
+| Hexing Squelcher | 2 life | IR ~ir_ward~ (self) + ~Static{GrantAbility(ir_ward)}~ (other creatures); ~Action::Ward~ → ~ward_pay_or_counter~ |
 
 * Replacement Effects (CR 614.1)
 
@@ -254,7 +254,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 |------------------+-------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------|
 | Emrakul          | Self only                                             | ~ProhibitionDef~ on ~SpellBeingCountered~                                                                                          |
 | Long Goodbye     | Self only                                             | Same                                                                                                                               |
-| Hexing Squelcher | Self (stack) + all controller's spells (BF)           | Two ~ProhibitionDef~ entries                                                                                                       |
+| Hexing Squelcher | Self (stack) + all controller's spells (BF)           | ~cant_be_countered_self~ + IR ~Prohibition~ on ~SpellBeingCountered~ (Controller(It)==Controller, active_zone BF)                   |
 | Mistrise Village | Next spell this turn                                  | IR ~Action::GrantCEToNextSpellCast~ + ~CEMod::Uncounterable~ → ~LatentSpellMod~ → CI pushes ~ProhibitionDef~ onto the spell        |
 
 ** "Can't enter the battlefield"
@@ -276,8 +276,8 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card                         | Effect                                                        |
 |------------------------------+---------------------------------------------------------------|
-| Omniscience                  | Adds free-cast ~AlternateCost~ to all non-lands               |
-| Disruptor Flute              | +3 casting cost + suppress abilities for named card           |
+| Omniscience                  | IR ~Static{AltCost(Free)}~, scope = controller's non-lands (zone-agnostic) |
+| Disruptor Flute              | +3 casting cost + suppress non-mana abilities for named card (now IR — see ETB-choice table) |
 | Dauthi Voidwalker (activated) | ~castable = true~ + free-cast on exiled card (EndOfTurn)     |
 | Grafdigger's Cage            | ~castable = false~ for GY/library cards                       |
 
@@ -302,8 +302,8 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Karn, the Great Creator    | Suppress all abilities on opponent artifacts                                                                           |
 | Null Rod                   | Suppress all activated abilities on all artifacts (both players)                                                       |
 | Lavinia                    | ~castable = false~ on opponent noncreature spells                                                                      |
-| Hexing Squelcher           | Grants Ward trigger to other creatures via ~granted_trigger_defs~                                                      |
-| Sneak Attack               | Grants Haste to sneaked creature                                                                                       |
+| Hexing Squelcher           | Grants Ward to other creatures via IR ~CEMod::GrantAbility~ → ~granted_abilities~                                      |
+| Sneak Attack               | Grants Haste to sneaked creature (IR ~ApplyCE{AddKeyword(Haste)}~, EndOfTurn)                                          |
 | Cori-Steel Cutter          | Grants Trample + Haste to equipped creature via ~bf.attached_to~ filter                                                |
 | Mistrise Village           | IR ~Action::GrantCEToNextSpellCast~ with ~CEMod::Uncounterable~ — latent mod applies CE to the next spell cast that turn |
 | Dragon's Rage Channeler    | Delirium: grants Flying when ≥4 card types in GY                                                                       |
@@ -313,7 +313,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card                     | Effect                                                              |
 |--------------------------+---------------------------------------------------------------------|
-| Toxic Deluge             | All creatures get -X/-X (EndOfTurn); SBA handles death at 0 toughness |
+| Toxic Deluge             | All creatures get -X/-X (EndOfTurn); IR ~ApplyCE{ target: AllObjects(creatures), PumpPT(-X,-X) }~ → one L7 CI (layer from ~writes~); SBA handles death at 0 toughness |
 | Dragon's Rage Channeler  | Delirium: +2/+2 when ≥4 card types in GY                            |
 | Cori-Steel Cutter        | +1/+1 to equipped creature via ~bf.attached_to~ filter              |
 | Monk Token (prowess)     | +1/+1 until EOT per noncreature spell (stacking CIs)                |
@@ -355,7 +355,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card                        | Condition                                           |
 |-----------------------------+-----------------------------------------------------|
 | Mindbreak Trap              | Opponent cast 3+ spells                             |
-| Omniscience (granted)       | L3 CE adds ~AlternateCost::default()~               |
+| Omniscience (granted)       | IR ~Static{AltCost(Free)}~ → ~AlternateCost::default()~ via ~cemod_to_modifier~ |
 | Dauthi Voidwalker (granted) | Activated ability grants free-cast                  |
 
 * Activation Timing (CR 602.5b, 605.3a)
@@ -400,7 +400,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | First Strike  | Engine-supported via split combat damage step (CR 510.5); no printed card currently has it                                    |
 | Double Strike | Fury — functional: deals damage in both the first-strike and regular combat damage steps                                       |
 | Trample       | Granted by Cori-Steel Cutter via L6 CE; functional in CombatDamage step (lethal-to-blockers, excess to player/PW)             |
-| Haste         | Granted by Sneak Attack via L6 CE; also by Cori-Steel Cutter                                                                   |
+| Haste         | Granted by Sneak Attack via IR ~ApplyCE{AddKeyword(Haste)}~; also by Cori-Steel Cutter                                         |
 | Vigilance     | Granted by Batterskull, Pre-War Formalwear via L6 CE; functional in DeclareAttackers (skips tap)                              |
 | Lifelink      | Griselbrand, Atraxa; granted by Batterskull via L6 CE; functional in CombatDamage (controller gains life equal to damage dealt) |
 | Deathtouch    | Atraxa; functional in CombatDamage (any nonzero damage = lethal; trample-DT assigns 1 to blockers)                             |
@@ -413,7 +413,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Delve          | Murktide Regent                       | ~data.delve = true~                                                        |
 | Storm          | Flusterstorm                          | Self-cast trigger creates ~StackAbility~ copies                             |
 | Replicate      | Consign to Memory                     | ~Action::Replicate(ManaCost)~ (in ~CostBody::Ir~ additional cost)          |
-| Ward           | Hexing Squelcher                      | ~ward_pay_or_counter~ helper                                               |
+| Ward           | Hexing Squelcher                      | IR ~ir_ward~ (Triggered + ~Action::Ward~ → ~ward_pay_or_counter~)          |
 | Protection     | Emrakul                               | ~protection_from: vec![obj_pred_colored_spell()]~                          |
 | Annihilator 6  | Emrakul                               | Stored as keyword; *not functionally modeled*                              |
 | Cycling        | Street Wraith, Edge of Autumn         | Street Wraith: hand ~AbilityDef~; Edge: *strategy-only*                    |
@@ -428,12 +428,12 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card               | Target                              | Primitive                                                                                               |
 |--------------------+-------------------------------------+---------------------------------------------------------------------------------------------------------|
 | Force of Will      | Any spell                            | ~eff_counter_target~                                                                                    |
-| Force of Negation  | Noncreature                          | ~eff_counter_and_exile~                                                                                 |
+| Force of Negation  | Noncreature                          | IR ~Sequence([Counter, Exile])~ — countered to GY, then exiled from GY (end state: exile)               |
 | Daze               | Any spell                            | ~eff_counter_unless_pays~ ({1})                                                                         |
 | Spell Pierce       | Noncreature                          | ~eff_counter_unless_pays~ ({2})                                                                         |
 | Flusterstorm       | Instant/sorcery                      | ~eff_counter_unless_pays~ ({1}) + storm copies                                                          |
 | Mindbreak Trap     | Any number                           | ~eff_exile_all_targets~ (exiles, doesn't counter)                                                       |
-| Consign to Memory  | Triggered ability or colorless       | ~eff_counter_target~                                                                                    |
+| Consign to Memory  | Triggered ability or colorless       | IR ~Action::Counter~; ~Replicate {1}~ additional cost                                                   |
 | Stifle             | Activated or triggered ability       | ~eff_counter_target~; ~ObjectInZone { Stack, ir_ability() }~ (mana abilities never hit stack — CR 605.3a) |
 
 ** Destroy (CR 701.7)
@@ -457,9 +457,9 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Card                       | Target                                        | Notes                                                           |
 |----------------------------+-----------------------------------------------+-----------------------------------------------------------------|
 | Swords to Plowshares       | Creature                                       | ~eff_exile_target_gain_power~                                   |
-| Surgical Extraction        | GY card + all copies                          | Custom effect iterating zones                                   |
+| Surgical Extraction        | GY card + all copies                          | IR ~Sequence~ of 3× ~ForEach~ over ~AllObjects{Scoped(zone, Owner(target)), Name(it)=Name(target)}~ → ~Exile~ (GY/Hand/Library) |
 | Mindbreak Trap             | All targeted spells                            | ~eff_exile_all_targets~                                         |
-| Prismatic Ending           | Nonland permanent MV ≤ converge               | Inline ~change_zone~; reads ~chosen_x~ from factory arg         |
+| Prismatic Ending           | Nonland permanent MV ≤ converge               | IR ~IfThen(Mv(target) ≤ Ctx::Var("x")+1, Exile)~; ~XMana~ additional cost (converge = X+1) |
 | Phelia, Exuberant Shepherd | Other nonland permanent (up to one)            | Inline ~change_zone~; pairs with delayed return trigger         |
 
 ** Search (CR 701.19)
@@ -477,7 +477,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 
 | Card              | What                | Trigger                              |
 |-------------------+---------------------+--------------------------------------|
-| Sheoldred's Edict | Opponent (modal)    | ~eff_sacrifice~                      |
+| Sheoldred's Edict | Opponent (modal)    | IR ~Action::Sacrifice { who: Opponent }~ (3-mode OnResolve) |
 | Fury (evoke)      | Self                | ETB when alt cost used               |
 | Sneak Attack      | Creature            | Delayed end-step trigger             |
 | City of Traitors  | Self                | Another-land-played trigger          |
@@ -606,9 +606,9 @@ Artifact subtype ~"Equipment"~ is stored in ~ArtifactData.subtypes~ and matched 
 | Card              | Pattern                                                   | Why unusual                                                                                       |
 |-------------------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------|
 | Urza's Saga       | Artifact not Enchantment Land Saga; chapter III faked as a sacrifice-self *activated* ability | Saga system absent: no lore counters, no chapter triggers (CR 715), no SBA-driven sac when lore-count > final chapter. The current stub is the wrong shape — sac is automatic per CR 715.4, not paid by the controller as activation cost. **Do not use as a model for cost migration.** Replace once saga machinery lands. |
-| Hexing Squelcher  | Ward grant via ~granted_trigger_defs~ in L6 modifier      | Verbose but correct                                                                               |
+| Hexing Squelcher  | Ward (~ir_ward~) granted to other creatures via ~CEMod::GrantAbility~ | First card to exercise IR Ward + IR CE-ability-granting (~granted_abilities~ + fire_triggers Part 5) |
 | Mistrise Village  | IR ~Action::GrantCEToNextSpellCast~ — latent, not a recompute-time CE | CR 611.2f spell-mod pattern: CE only exists once the qualifying spell is on the stack |
-| Painter's Servant | CE registered in replacement, not ~static_ability_defs~   | Needs ~etb_choice~ to know the color                                                              |
+| Painter's Servant | IR ~Static{AddColor(ChosenColor(Source))}~; ETB stores the color | ~ChosenColor~ reads ~etb_choice~ at recompute, so no closure CE                            |
 
 ** Intentional simplifications
 

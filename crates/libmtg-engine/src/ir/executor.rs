@@ -32,8 +32,11 @@ pub struct BindEnv {
     /// `ManaSpec::AnyOneColor`. Set by the activated-ability dispatch when
     /// the strategy picks a color; consumed by the AddMana executor arm.
     pub(crate) chosen_color: Option<crate::Color>,
-    // Triggering/ThisCast event fields left as TODOs for now — they require
-    // the EventLog wired through. Added with the mutation slice.
+    /// The event that triggered/replaced us, projected by `Ctx::Triggering`.
+    /// Captured at match time (so it survives to a triggered ability's deferred
+    /// resolution) and during a replacement's synchronous body. `ThisCast` does
+    /// not use this — it scans the log for the source's own `SpellCast`.
+    pub(crate) triggering_event: Option<crate::GameEvent>,
 }
 
 impl BindEnv {
@@ -63,6 +66,11 @@ impl BindEnv {
 
     pub(crate) fn with_chosen_color(mut self, c: Option<crate::Color>) -> Self {
         self.chosen_color = c;
+        self
+    }
+
+    pub(crate) fn with_triggering_event(mut self, e: crate::GameEvent) -> Self {
+        self.triggering_event = Some(e);
         self
     }
 
@@ -148,14 +156,30 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::PutCounters { on, kind, n } => {
             let id = expect_obj(eval_expr(on, state, env));
             let n = expect_num(eval_expr(n, state, env));
-            // +1/+1 counters live on BattlefieldState.counters (legacy storage
-            // read by the fold into P/T). All other kinds use the generic map.
-            if matches!(kind, crate::CounterType::PlusOnePlusOne) {
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.counters += n as i32;
+            // +1/+1 and loyalty counters are zone-scoped and folded into a stat,
+            // so they live on BattlefieldState (counters / loyalty) rather than
+            // the cross-zone generic map. All other kinds use the generic map.
+            match kind {
+                crate::CounterType::PlusOnePlusOne => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.counters += n as i32;
+                    }
                 }
-            } else if let Some(obj) = state.objects.get_mut(&id) {
-                *obj.counters.entry(*kind).or_insert(0) += n as u32;
+                crate::CounterType::Loyalty => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.loyalty += n as i32;
+                    }
+                }
+                crate::CounterType::Stun => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.stun_counters += n as u32;
+                    }
+                }
+                _ => {
+                    if let Some(obj) = state.objects.get_mut(&id) {
+                        *obj.counters.entry(*kind).or_insert(0) += n as u32;
+                    }
+                }
             }
             ExecResult::Ok
         }
@@ -163,13 +187,28 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::RemoveCounters { from, kind, n } => {
             let id = expect_obj(eval_expr(from, state, env));
             let n = expect_num(eval_expr(n, state, env));
-            if matches!(kind, crate::CounterType::PlusOnePlusOne) {
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.counters = (bf.counters - n as i32).max(0);
+            match kind {
+                crate::CounterType::PlusOnePlusOne => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.counters = (bf.counters - n as i32).max(0);
+                    }
                 }
-            } else if let Some(obj) = state.objects.get_mut(&id) {
-                if let Some(c) = obj.counters.get_mut(kind) {
-                    *c = c.saturating_sub(n as u32);
+                crate::CounterType::Loyalty => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.loyalty = (bf.loyalty - n as i32).max(0);
+                    }
+                }
+                crate::CounterType::Stun => {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.stun_counters = bf.stun_counters.saturating_sub(n as u32);
+                    }
+                }
+                _ => {
+                    if let Some(obj) = state.objects.get_mut(&id) {
+                        if let Some(c) = obj.counters.get_mut(kind) {
+                            *c = c.saturating_sub(n as u32);
+                        }
+                    }
                 }
             }
             ExecResult::Ok
@@ -328,6 +367,24 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::Counter { target } => {
             let id = expect_obj(eval_expr(target, state, env));
             crate::effects::counter_one(id, state, t, actor);
+            ExecResult::Ok
+        }
+
+        Action::Ward { cost } => {
+            // Resolves a ward trigger: the targeting spell (triggered_obj) and its
+            // caster (triggered_actor) come from the trigger's bind env; the warded
+            // permanent is the ability source, the holder is its controller. The
+            // helper runs the opponent's pay-or-counter decision.
+            let (Some(Value::Obj(spell)), Some(Value::Player(caster))) =
+                (env.get("triggered_obj").cloned(), env.get("triggered_actor").cloned())
+            else {
+                return ExecResult::Ok;
+            };
+            let ward_source = env.source.unwrap_or(ObjId::UNSET);
+            let ward_holder = env.controller.unwrap_or(actor);
+            crate::effects::ward_pay_or_counter(
+                ward_source, cost, spell, caster, ward_holder, state, t,
+            );
             ExecResult::Ok
         }
 
@@ -687,6 +744,121 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::CreateEmblem { abilities } => {
+            // "You get an emblem with …" (CR 114). Register a command-zone emblem
+            // controlled by the resolving player; recompute gathers its static
+            // abilities each cycle and it never expires.
+            let id = state.alloc_id();
+            let timestamp = state.next_ci_timestamp();
+            state.emblems.push(crate::EmblemInstance {
+                id,
+                controller: actor,
+                abilities: abilities.clone(),
+                timestamp,
+            });
+            ExecResult::Ok
+        }
+
+        Action::SimultaneousPut { who, from, filter, optional } => {
+            use crate::ir::expr::ZoneKindSel;
+            // Collect every selected player's choice (APNAP order) before placing
+            // anything (CR 101.4): no player sees another's card first, and the
+            // deferred pending_triggers fire together after this resolves.
+            let players: Vec<PlayerId> = match who {
+                Who::You => vec![actor],
+                Who::Opponent | Who::EachOpponent => vec![actor.opp()],
+                Who::Each => vec![actor, actor.opp()],
+                Who::Player(e) => match eval_expr(e, state, env) {
+                    Value::Player(p) => vec![p],
+                    _ => Vec::new(),
+                },
+            };
+            let mut to_place: Vec<(ObjId, PlayerId)> = Vec::new();
+            for player in players {
+                let in_zone: Vec<ObjId> = match from {
+                    ZoneKindSel::Hand => state.hand_of(player).map(|c| c.id).collect(),
+                    ZoneKindSel::Graveyard => state.graveyard_of(player).map(|c| c.id).collect(),
+                    _ => Vec::new(),
+                };
+                let penv = BindEnv::new().with_controller(player);
+                let candidates: Vec<ObjId> = in_zone
+                    .into_iter()
+                    .filter(|&id| matches(filter, id, state, &penv))
+                    .collect();
+                if candidates.is_empty() {
+                    continue;
+                }
+                let chosen: Option<ObjId> = if *optional {
+                    // "may" — the player chooses one or declines (CR 101.4).
+                    let req = crate::ChoiceRequest::MayPutOnBattlefield { candidates: candidates.clone() };
+                    match state.with_strategy(player, |s, st| s.resolve_choice(ObjId::UNSET, &req, st)) {
+                        crate::ChoiceResult::OptionalObject(Some(id)) if candidates.contains(&id) => Some(id),
+                        _ => None,
+                    }
+                } else {
+                    // Mandatory — the player must put one if able.
+                    state
+                        .with_strategy(player, |s, st| s.choose_for_effect(ObjId::UNSET, &candidates, st))
+                        .filter(|id| candidates.contains(id))
+                        .or_else(|| candidates.first().copied())
+                };
+                if let Some(id) = chosen {
+                    to_place.push((id, player));
+                }
+            }
+            // Simultaneous placement — back-to-back change_zones whose triggers are
+            // batched in pending_triggers (no triggers/SBAs fire between them).
+            for (id, player) in to_place {
+                crate::change_zone(id, crate::ZoneId::Battlefield, state, t, player);
+            }
+            ExecResult::Ok
+        }
+
+        Action::NinjutsuEnter => {
+            // CR 702.49: put the ninja (Source, in hand) onto the battlefield
+            // tapped and attacking, taking over the returned attacker's combat
+            // slot. The returned creature's pre-move `attack_target` was captured
+            // into CostsPaidCtx (it has since left the battlefield).
+            let Some(source_id) = env.source else { return ExecResult::Ok };
+            if !state.objects.contains_key(&source_id) { return ExecResult::Ok; }
+            let attack_target = state
+                .resolving_costs_ctx
+                .returned_attack_targets
+                .first()
+                .copied()
+                .flatten();
+            crate::change_zone(source_id, crate::ZoneId::Battlefield, state, t, actor);
+            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                bf.tapped = true;
+                bf.entered_this_turn = true;
+                bf.attacking = true;
+                bf.unblocked = true;
+                bf.attack_target = attack_target;
+            }
+            state.combat_attackers.push(source_id);
+            ExecResult::Ok
+        }
+
+        Action::RecordEtbChoice { kind } => {
+            // "As ~ enters, choose ..." (CR 614.12): ask the source's controller
+            // and record the result on the source permanent's `etb_choice`, read
+            // back by `Expr::ChosenColor`/`ChosenName`. Runs after the entry Move,
+            // so the permanent is on the battlefield to store on.
+            use crate::ir::action::EtbChoiceKind;
+            if let Some(src) = env.source {
+                let request = match kind {
+                    EtbChoiceKind::Color => ChoiceRequest::Color,
+                    EtbChoiceKind::CreatureType => ChoiceRequest::CreatureType,
+                    EtbChoiceKind::CardName => ChoiceRequest::CardName,
+                };
+                let result = state.with_strategy(actor, |s, st| s.resolve_choice(src, &request, st));
+                if let Some(bf) = state.permanent_bf_mut(src) {
+                    bf.etb_choice = Some(result);
+                }
+            }
+            ExecResult::Ok
+        }
+
         Action::Choose { who, prompt: _, options, bind_as } => {
             let who = resolve_who(who, state, env, actor);
             let src = env.source.unwrap_or(ObjId::default());
@@ -742,11 +914,15 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
-        Action::CreateToken { who, spec, n } => {
+        Action::CreateToken { who, spec, n, bind_as } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(n, state, env)) as usize;
+            let mut last = None;
             for _ in 0..n {
-                crate::do_create_token(spec.name, who, state, t);
+                last = Some(crate::do_create_token(spec.name, who, state, t));
+            }
+            if let (Some(name), Some(id)) = (bind_as, last) {
+                env.bindings.insert(name, Value::Obj(id));
             }
             ExecResult::Ok
         }
@@ -938,50 +1114,72 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::RegisterContinuous { scope, mods, expiry } => {
+            // Dynamic-filter sibling of ApplyCE: `scope` is re-evaluated each
+            // recompute (so it catches objects matching later — e.g. attackers
+            // declared after this resolves), with the given expiry.
+            let source_id = env.source.unwrap_or(ObjId::UNSET);
+            let ctrl = env.controller.unwrap_or(actor);
+            let engine_expiry = map_ir_expiry(expiry);
+            let scope_opt = Some(scope.clone());
+            let mut built: Vec<ContinuousInstance> = Vec::new();
+            for m in mods {
+                let Some(build) = cemod_to_modifier(m, env, state) else { continue };
+                let ts = state.next_ci_timestamp();
+                built.push(ContinuousInstance {
+                    source_id,
+                    controller: ctrl,
+                    layer: build.layer,
+                    reads: build.reads,
+                    writes: build.writes,
+                    timestamp: ts,
+                    filter: build_filter(source_id, ctrl, &scope_opt),
+                    modifier: build.modifier,
+                    expiry: engine_expiry.clone(),
+                });
+            }
+            state.continuous_instances.extend(built);
+            ExecResult::Ok
+        }
+
         Action::ApplyCE { target, mods, expiry } => {
-            let Value::Obj(target_id) = eval_expr(target, state, env) else {
-                return ExecResult::Ok;
-            };
-            if target_id == ObjId::UNSET {
+            // Target may be a single object (Mistrise/Dauthi: a chosen card) or a
+            // set (Toxic Deluge: every creature). The affected id set is locked at
+            // resolution (CR 611.2c — later-entering objects are not affected);
+            // each mod becomes one CI sharing that membership filter, so each gets
+            // its own correct CR-613 layer (via the shared `cemod_to_modifier`).
+            let target_ids: Vec<ObjId> = obj_ids_of(eval_expr(target, state, env))
+                .into_iter()
+                .filter(|id| *id != ObjId::UNSET)
+                .collect();
+            if target_ids.is_empty() {
                 return ExecResult::Ok;
             }
             let source_id = env.source.unwrap_or(ObjId::UNSET);
             let ctrl = env.controller.unwrap_or(actor);
             let engine_expiry = map_ir_expiry(expiry);
-            let ts = state.next_ci_timestamp();
 
-            let mut writes: Vec<crate::CeWrites> = Vec::new();
+            // Build each CI up front (needs `&state` for `cemod_to_modifier`'s
+            // Expr eval), then push — avoids borrowing `state` mutably and
+            // immutably at once.
+            let mut built: Vec<ContinuousInstance> = Vec::new();
             for m in mods {
-                for axis in writes_of(m) {
-                    if let Some(w) = axis_to_cewrites(axis) {
-                        if !writes.contains(&w) {
-                            writes.push(w);
-                        }
-                    }
-                }
+                let Some(build) = cemod_to_modifier(m, env, state) else { continue };
+                let ts = state.next_ci_timestamp();
+                let filter_ids = target_ids.clone();
+                built.push(ContinuousInstance {
+                    source_id,
+                    controller: ctrl,
+                    layer: build.layer,
+                    reads: build.reads,
+                    writes: build.writes,
+                    timestamp: ts,
+                    filter: std::sync::Arc::new(move |id, _ctr, _state| filter_ids.contains(&id)),
+                    modifier: build.modifier,
+                    expiry: engine_expiry.clone(),
+                });
             }
-
-            let mods_cloned = mods.clone();
-            state.continuous_instances.push(ContinuousInstance {
-                source_id,
-                controller: ctrl,
-                // Cast-permission / characteristic-text modifications are CR
-                // 613.1b layer 3 effects (rules-text). Other CE layers land
-                // when a card needs P/T pump / type override / etc. via
-                // ApplyCE — the correct layer can be picked by inspecting
-                // `writes` if needed.
-                layer: ContinuousLayer::L3TextEffects,
-                reads: Vec::new(),
-                writes,
-                timestamp: ts,
-                filter: std::sync::Arc::new(move |id, _ctr, _state| id == target_id),
-                modifier: std::sync::Arc::new(move |def, _state| {
-                    for m in &mods_cloned {
-                        apply_cemod_to_spell_def(def, m);
-                    }
-                }),
-                expiry: engine_expiry,
-            });
+            state.continuous_instances.extend(built);
             ExecResult::Ok
         }
 
@@ -993,7 +1191,23 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::AddMana { who, count, spec } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(count, state, env)) as usize;
-            let mana_spec = build_mana_spec_string(spec, n, env.chosen_color);
+            // `AnyOneColor`: prefer the activation-time hint (mana-ability dispatch);
+            // otherwise — an effect-body use like Tamiyo −3's green-card rider — ask
+            // the producing player to choose the color (CR 106.1b).
+            let color = env.chosen_color.or_else(|| {
+                if matches!(spec, crate::ir::action::ManaSpec::AnyOneColor) {
+                    let src = env.source.unwrap_or(ObjId::UNSET);
+                    match state.with_strategy(who, |s, st| {
+                        s.resolve_choice(src, &crate::ChoiceRequest::Color, st)
+                    }) {
+                        crate::ChoiceResult::Color(c) => Some(c),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            });
+            let mana_spec = build_mana_spec_string(spec, n, color);
             crate::eff_mana(who, mana_spec).call(state, t, &[]);
             ExecResult::Ok
         }
@@ -1120,10 +1334,13 @@ fn axis_to_cewrites(axis: Axis) -> Option<crate::CeWrites> {
     }
 }
 
-/// Apply a `CEMod` to a spell's (cloned) `CardDef` via the CI modifier hook.
-/// Only the CEMods that are *meaningful on a stack-resident spell* are wired
-/// here — Mistrise Village's `Uncounterable` is the first. Other variants
-/// (PumpPT on a spell, etc.) land when needed by a real card.
+/// Apply a non-P/T `CEMod` to a (cloned) `CardDef` via the CI modifier hook.
+/// Handles the rules-text / cast-permission mods that need no env at apply time:
+/// `Uncounterable` (Mistrise), `CastableFrom` + `AltCost` (Dauthi free-cast).
+/// `PumpPT` is handled separately in the `ApplyCE` arm — its `Expr` deltas are
+/// evaluated against the live env there and baked in, since this hook is env-less.
+/// The remaining ~25 `CEMod` variants are still only honored by bespoke closure
+/// `ContinuousInstance`s on cards, not by this IR path (see DESIGN.org 2026-06-20).
 fn apply_cemod_to_spell_def(def: &mut CardDef, cemod: &CEMod) {
     use crate::catalog::{AlternateCost, ProhibitionDef};
     use crate::ir::ce::CostSpec;
@@ -1153,6 +1370,169 @@ fn apply_cemod_to_spell_def(def: &mut CardDef, cemod: &CEMod) {
             _ => {}
         },
         _ => {}
+    }
+}
+
+/// The CEMod-intrinsic half of a continuous instance: which CR-613 sublayer it
+/// lives in, what characteristic axes it reads/writes (for recompute dependency
+/// ordering), and the modifier that mutates a materialised `CardDef`. The CI's
+/// *extrinsic* half — filter (scope), expiry, timestamp, source, controller — is
+/// supplied by the caller (the Static path, the `ApplyCE` arm, …).
+pub(crate) struct CeBuild {
+    pub layer: ContinuousLayer,
+    pub reads: Vec<crate::CeReads>,
+    pub writes: Vec<crate::CeWrites>,
+    pub modifier: crate::ContinuousModFn,
+}
+
+/// Single source of truth: `CEMod` → `CeBuild`. Both IR continuous-effect entry
+/// points (the `AbilityKind::Static` path via `cemod_to_ci`, and the one-shot
+/// `Action::ApplyCE` arm) route through this, so a CEMod is implemented once and
+/// every path gains it. `env`/`state` let value-carrying mods (e.g. `PumpPT`'s
+/// `Expr` deltas — Toxic Deluge's −X/−X) evaluate against the live binding frame
+/// and bake concrete amounts into the modifier; mods with no dynamic operand
+/// ignore them. Returns `None` for CEMods with no recompute-time modifier yet
+/// (the standing CE breadth gap — see DESIGN.org 2026-06-20).
+pub(crate) fn cemod_to_modifier(
+    cemod: &CEMod,
+    env: &BindEnv,
+    state: &SimState,
+) -> Option<CeBuild> {
+    use crate::ir::ce::BasicLandType;
+    use crate::{CeReads, CeWrites};
+    match cemod {
+        CEMod::SetBasicLandType(kind) => {
+            let kind: BasicLandType = *kind;
+            Some(CeBuild {
+                layer: ContinuousLayer::L4TypeEffects,
+                reads: vec![CeReads::Supertypes],
+                writes: vec![CeWrites::LandTypes, CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_set_basic_land_type(def, kind);
+                }),
+            })
+        }
+        CEMod::AddBasicLandType(kind) => {
+            let kind: BasicLandType = *kind;
+            Some(CeBuild {
+                layer: ContinuousLayer::L4TypeEffects,
+                reads: vec![CeReads::LandTypes],
+                writes: vec![CeWrites::LandTypes],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_add_basic_land_type(def, kind);
+                }),
+            })
+        }
+        CEMod::BecomeCreature { power, toughness, subtypes, keywords } => {
+            // Layer 4 (type) + the P/T it sets. Evaluate P/T now (env-less hook)
+            // and bake them into the animate modifier.
+            let p = expect_num(eval_expr(power, state, env)) as i32;
+            let t = expect_num(eval_expr(toughness, state, env)) as i32;
+            let subtypes = subtypes.clone();
+            let keywords = keywords.clone();
+            Some(CeBuild {
+                layer: ContinuousLayer::L4TypeEffects,
+                reads: vec![],
+                writes: vec![CeWrites::CardTypes, CeWrites::PowerToughness, CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_become_creature(def, p, t, &subtypes, &keywords);
+                }),
+            })
+        }
+        CEMod::PumpPT(p, t) => {
+            // Evaluate the deltas now (env may hold an announced X); bake them in.
+            let pv = expect_num(eval_expr(p, state, env)) as i32;
+            let tv = expect_num(eval_expr(t, state, env)) as i32;
+            Some(CeBuild {
+                layer: ContinuousLayer::L7PowerToughness,
+                reads: vec![],
+                writes: vec![CeWrites::PowerToughness],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.adjust_pt(pv, tv);
+                    }
+                }),
+            })
+        }
+        CEMod::AddColor(color_expr) => {
+            // CR 613.4 layer 5: add a color to every object in scope. The color is
+            // an Expr so it can be runtime-chosen (Painter's Servant reads its own
+            // `ChosenColor`); evaluate it once here against the source's frame and
+            // bake it in. No chosen color (Unit) → no CI, so nothing is added.
+            let Value::Color(color) = eval_expr(color_expr, state, env) else {
+                return None;
+            };
+            Some(CeBuild {
+                layer: ContinuousLayer::L5ColorEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Color],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    if !def.colors.contains(&color) {
+                        def.colors.push(color);
+                    }
+                }),
+            })
+        }
+        CEMod::AddKeyword(kw) => {
+            // CR 613.1f layer 6: grant a keyword ability (trample, haste, …).
+            let kw = *kw;
+            Some(CeBuild {
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.keywords.insert(kw);
+                    }
+                }),
+            })
+        }
+        CEMod::GrantAbility(ability) => {
+            // CR 613.1f layer 6: grant a full IR ability (e.g. Ward) to objects in
+            // scope. It lands on `granted_abilities` of the affected def, which
+            // `fire_triggers` consults — the declarative analog of pushing a
+            // `granted_trigger_def`.
+            let ability = (**ability).clone();
+            Some(CeBuild {
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    def.granted_abilities.push(ability.clone());
+                }),
+            })
+        }
+        // Cost-to-cast surcharge (CR 601.2f / 614.12 "costs {N} more"): a
+        // generic-mana add baked onto the matching def's casting cost. Scope
+        // (which cards) lives in the static-ability filter; the modifier just
+        // applies the delta. Disruptor Flute names a card → +3.
+        CEMod::CastingCostPlus(amount) => {
+            let amt = expect_num(eval_expr(amount, state, env)) as i32;
+            Some(CeBuild {
+                layer: ContinuousLayer::L3TextEffects,
+                reads: vec![],
+                writes: vec![],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    def.casting_cost_modifier += amt;
+                }),
+            })
+        }
+        // Cast-permission / rules-text mods (CR 613.1b layer 3): mutate the def
+        // via the shared env-less hook (Uncounterable, CastableFrom, AltCost).
+        CEMod::Uncounterable | CEMod::CastableFrom(_) | CEMod::AltCost(_) => {
+            let cemod = cemod.clone();
+            Some(CeBuild {
+                layer: ContinuousLayer::L3TextEffects,
+                reads: vec![],
+                writes: vec![],
+                modifier: std::sync::Arc::new(move |def, _state| {
+                    apply_cemod_to_spell_def(def, &cemod);
+                }),
+            })
+        }
+        // Remaining CEMods have no recompute-time modifier yet — the standing CE
+        // breadth gap. Each lands here as a new arm during the CE migration.
+        _ => None,
     }
 }
 
@@ -1235,6 +1615,39 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.attacking))
         }
+        Expr::AttachedTo(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            match state.permanent_bf(o).and_then(|bf| bf.attached_to) {
+                Some(id) => Value::Obj(id),
+                None => Value::Unit,
+            }
+        }
+        Expr::ChosenName(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            match state.permanent_bf(o).and_then(|bf| bf.etb_choice.as_ref()) {
+                Some(crate::ChoiceResult::CardName(n)) => Value::Name(n.clone()),
+                _ => Value::Unit,
+            }
+        }
+        Expr::ChosenColor(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            match state.permanent_bf(o).and_then(|bf| bf.etb_choice.as_ref()) {
+                Some(crate::ChoiceResult::Color(c)) => Value::Color(*c),
+                _ => Value::Unit,
+            }
+        }
+        Expr::ChosenTargets(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            let ids = state.objects.get(&o)
+                .and_then(|obj| obj.spell())
+                .map(|s| s.chosen_targets.clone())
+                .unwrap_or_default();
+            Value::ObjSet(ids)
+        }
+        Expr::IsFrontFace(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.active_face == 0))
+        }
         Expr::Unblocked(e) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.unblocked))
@@ -1315,6 +1728,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         }
 
         // player projections
+        Expr::LoyaltyOf(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Num(state.permanent_bf(o).map_or(0, |bf| bf.loyalty) as i64)
+        }
         Expr::Life(e) => {
             let p = expect_player(eval_expr(e, state, env));
             Value::Num(crate::SimState::life_of(state, p) as i64)
@@ -1322,6 +1739,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         Expr::HandSize(e) => {
             let p = expect_player(eval_expr(e, state, env));
             Value::Num(state.hand_of(p).count() as i64)
+        }
+        Expr::LibrarySize(e) => {
+            let p = expect_player(eval_expr(e, state, env));
+            Value::Num(state.library_size(p) as i64)
         }
         Expr::Opponents(e) => {
             let p = expect_player(eval_expr(e, state, env));
@@ -1379,10 +1800,21 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         Expr::Sub(a, b) => Value::Num(
             expect_num(eval_expr(a, state, env)) - expect_num(eval_expr(b, state, env)),
         ),
+        Expr::Div(a, b) => Value::Num({
+            let denom = expect_num(eval_expr(b, state, env));
+            if denom == 0 { 0 } else { expect_num(eval_expr(a, state, env)) / denom }
+        }),
         Expr::Mul(a, b) => Value::Num(
             expect_num(eval_expr(a, state, env)) * expect_num(eval_expr(b, state, env)),
         ),
         Expr::Players => Value::ObjSet(vec![state.us_id, state.opp_id]),
+        Expr::ActivePlayer => {
+            if state.current_ap == ObjId::UNSET {
+                Value::Unit
+            } else {
+                Value::Player(state.who_pid(state.current_ap))
+            }
+        }
         Expr::Neg(a) => Value::Num(-expect_num(eval_expr(a, state, env))),
         Expr::Min(a, b) => Value::Num(std::cmp::min(
             expect_num(eval_expr(a, state, env)),
@@ -1418,6 +1850,7 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             Value::SubtypeSet(v) => v.len() as i64,
             _ => 0,
         }),
+        Expr::CountWhere { set, bind, body } => Value::Num(count_set(state, env, set, bind, body)),
         Expr::Any { set, bind, body } => Value::Bool(fold_set(
             state,
             env,
@@ -1468,21 +1901,52 @@ fn match_event(
 ) -> bool {
     use crate::ir::expr::EventFilter;
     match filter {
-        EventFilter::SpellCast { caster, spell_filter } => {
-            let crate::GameEvent::SpellCast { caster: c, card_id, .. } = &logged.event else {
+        EventFilter::SpellCast { caster, card, spell_filter, alt_cost } => {
+            let crate::GameEvent::SpellCast { caster: c, card_id, alt_cost: ac, .. } = &logged.event
+            else {
                 return false;
             };
-            let caster_ok = match caster {
-                None => true,
-                Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *c),
-            };
+            if let Some(expr) = caster {
+                if !matches!(eval_expr(expr, state, env), Value::Player(p) if p == *c) {
+                    return false;
+                }
+            }
+            if let Some(expr) = card {
+                if !matches!(eval_expr(expr, state, env), Value::Obj(o) if o == *card_id) {
+                    return false;
+                }
+            }
             // The cast object persists post-resolution (moved to graveyard/exile but
             // still in `state.objects` with its catalog_key), so its types resolve.
-            let spell_ok = match spell_filter {
-                None => true,
-                Some(filter) => matches(filter, *card_id, state, env),
+            if let Some(filter) = spell_filter {
+                if !matches(filter, *card_id, state, env) {
+                    return false;
+                }
+            }
+            if let Some(want) = alt_cost {
+                if *want != *ac {
+                    return false;
+                }
+            }
+            true
+        }
+        EventFilter::Draw { who } => {
+            let crate::GameEvent::Draw { controller: drawer, .. } = &logged.event else {
+                return false;
             };
-            caster_ok && spell_ok
+            match who {
+                None => true,
+                Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *drawer),
+            }
+        }
+        EventFilter::LifeLost { who } => {
+            let crate::GameEvent::LifeLost { who: loser, .. } = &logged.event else {
+                return false;
+            };
+            match who {
+                None => true,
+                Some(expr) => matches!(eval_expr(expr, state, env), Value::Player(p) if p == *loser),
+            }
         }
     }
 }
@@ -1496,6 +1960,72 @@ pub(crate) fn matches(
 ) -> bool {
     let env = env.clone().with_subj(Value::Obj(subj));
     expect_bool(eval_expr(&filter.0, state, &env))
+}
+
+/// Is the player action `kind` on `subject_id` forbidden by an active
+/// `AbilityKind::Restriction` (CR 101.2 "can't")? Walks battlefield sources (a
+/// restriction is active while its source is on the battlefield) and matches each
+/// `Restriction { action: kind, subject }` against `subject_id` (bound as `Ctx::It`,
+/// with the restriction source/controller in scope so "opponent's" works). The legal-
+/// option producers call this as an AND-NOT gate over *permission*, making "can't
+/// beats can" order-independent. The action analogue of the event `Prohibition` walk
+/// in `fire_event` Stage 1.
+///
+/// Use this for casts and **non-mana** activated abilities — the subject is
+/// evaluated with `activating_mana_ability = false`. The mana sub-loop uses
+/// [`mana_ability_restricted`] (binds `true`). Which of the two a caller uses
+/// follows from the ability's CR-605.1a classification (mana abilities live in
+/// `mana_abilities()`, non-mana in `abilities()`) — there is no mana-ness tag to
+/// pass, and a restriction's "unless they're mana abilities" rider is a clause in
+/// its own `subject`.
+pub(crate) fn action_restricted(
+    state: &SimState,
+    kind: crate::ir::ability::ActionKind,
+    subject_id: ObjId,
+) -> bool {
+    restriction_hits(state, kind, subject_id, false)
+}
+
+/// Is activating a **mana ability** (CR 605.1a) of `subject_id` forbidden? Like
+/// [`action_restricted`] for `Activate`, but binds `activating_mana_ability = true`
+/// — so a restriction whose subject excludes mana abilities (Pithing Needle /
+/// Disruptor Flute "… unless they're mana abilities") won't match, while Null Rod /
+/// Karn (subjects with no such clause) still bite here.
+pub(crate) fn mana_ability_restricted(state: &SimState, subject_id: ObjId) -> bool {
+    restriction_hits(state, crate::ir::ability::ActionKind::Activate, subject_id, true)
+}
+
+/// Shared walk for the two restriction queries. `for_mana_ability` is bound into
+/// the subject's eval env as `activating_mana_ability` (CR 605.1a), so a "… unless
+/// they're mana abilities" rider is expressed as a subject clause rather than a
+/// flag on the variant — see `AbilityKind::Restriction`.
+fn restriction_hits(
+    state: &SimState,
+    kind: crate::ir::ability::ActionKind,
+    subject_id: ObjId,
+    for_mana_ability: bool,
+) -> bool {
+    use crate::ir::ability::AbilityKind;
+    state.objects.iter().any(|(id, obj)| {
+        if !matches!(obj.zone(), Some(Zone::Battlefield)) {
+            return false;
+        }
+        state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
+            card_def.abilities.iter().any(|ab| {
+                if let AbilityKind::Restriction { action, subject } = &ab.kind {
+                    *action == kind && {
+                        let env = BindEnv::new()
+                            .with_source(*id)
+                            .with_controller(obj.controller)
+                            .with_var("activating_mana_ability", Value::Bool(for_mana_ability));
+                        matches(subject, subject_id, state, &env)
+                    }
+                } else {
+                    false
+                }
+            })
+        })
+    })
 }
 
 /// Test whether a filter matches a candidate player. `Ctx::It` binds to the
@@ -1536,7 +2066,7 @@ pub(crate) fn match_trigger(
             }
             Some(env)
         }
-        TriggerSpec::AtStep { step, who } => {
+        TriggerSpec::AtStep { step, who, condition } => {
             let crate::GameEvent::EnteredStep {
                 step: s,
                 active_player,
@@ -1553,11 +2083,15 @@ pub(crate) fn match_trigger(
                 StepScope::You => *active_player == controller,
                 StepScope::EachOpponent => *active_player != controller,
             };
-            if fires {
-                Some(env)
-            } else {
-                None
+            if !fires {
+                return None;
             }
+            if let Some(cond) = condition {
+                if !expect_bool(eval_expr(cond, state, &env)) {
+                    return None;
+                }
+            }
+            Some(env)
         }
     }
 }
@@ -1569,6 +2103,10 @@ pub(crate) fn match_event_pattern(
     state: &SimState,
 ) -> Option<BindEnv> {
     use crate::ir::ability::EventPattern;
+    // Carry the matched event so `Ctx::Triggering` can project its fields; every
+    // arm builds its result from this enriched base via `env.clone()`.
+    let enriched = env.clone().with_triggering_event(event.clone());
+    let env = &enriched;
     match pattern {
         EventPattern::Any => Some(env.clone()),
 
@@ -1576,7 +2114,7 @@ pub(crate) fn match_event_pattern(
             obj_filter,
             zone_kind,
         } => {
-            let crate::GameEvent::ZoneChange { id, to, .. } = event else {
+            let crate::GameEvent::ZoneChange { id, to, from, .. } = event else {
                 return None;
             };
             if zone_id_from_kind(zone_kind.clone()) != *to {
@@ -1585,7 +2123,14 @@ pub(crate) fn match_event_pattern(
             if !matches(obj_filter, *id, state, env) {
                 return None;
             }
-            Some(env.clone().with_var("triggered_obj", Value::Obj(*id)))
+            // `triggered_from` lets a condition test the source zone (e.g. Containment
+            // Priest's "wasn't cast" = entered the battlefield from a zone other than
+            // the stack).
+            Some(
+                env.clone()
+                    .with_var("triggered_obj", Value::Obj(*id))
+                    .with_var("triggered_from", Value::Zone(*from)),
+            )
         }
 
         EventPattern::LeavesZone {
@@ -1668,7 +2213,7 @@ pub(crate) fn match_event_pattern(
 
         EventPattern::SpellCast { spell_filter } => {
             let crate::GameEvent::SpellCast {
-                card_id, caster, mana_spent,
+                card_id, caster, mana_spent, ..
             } = event
             else {
                 return None;
@@ -1681,6 +2226,20 @@ pub(crate) fn match_event_pattern(
                     .with_var("triggered_obj", Value::Obj(*card_id))
                     .with_var("triggered_actor", Value::Player(*caster))
                     .with_var("triggered_mana_spent", Value::Bool(*mana_spent)),
+            )
+        }
+
+        EventPattern::SpellBeingCountered { spell_filter } => {
+            let crate::GameEvent::SpellBeingCountered { card_id, caster } = event else {
+                return None;
+            };
+            if !matches(spell_filter, *card_id, state, env) {
+                return None;
+            }
+            Some(
+                env.clone()
+                    .with_var("triggered_obj", Value::Obj(*card_id))
+                    .with_var("triggered_actor", Value::Player(*caster)),
             )
         }
 
@@ -1724,16 +2283,35 @@ pub(crate) fn match_event_pattern(
             Some(e)
         }
 
+        EventPattern::Or(ps) => ps
+            .iter()
+            .find_map(|p| match_event_pattern(p, event, env, state)),
+
+        EventPattern::LandPlayed { who, land_filter } => {
+            let crate::GameEvent::LandPlayed { id, controller: player } = event else {
+                return None;
+            };
+            if !matches_player(who, *player, state, env) {
+                return None;
+            }
+            if !matches(land_filter, *id, state, env) {
+                return None;
+            }
+            Some(
+                env.clone()
+                    .with_var("triggered_obj", Value::Obj(*id))
+                    .with_var("triggered_actor", Value::Player(*player)),
+            )
+        }
+
         // Stage-3+ patterns — not wired yet.
-        EventPattern::DamageDealt { .. }
-        | EventPattern::Blocks { .. }
-        | EventPattern::LandPlayed { .. } => None,
+        EventPattern::DamageDealt { .. } | EventPattern::Blocks { .. } => None,
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn eval_ctx(c: &Ctx, _state: &SimState, env: &BindEnv) -> Value {
+fn eval_ctx(c: &Ctx, state: &SimState, env: &BindEnv) -> Value {
     match c {
         Ctx::Source => env
             .source
@@ -1745,9 +2323,50 @@ fn eval_ctx(c: &Ctx, _state: &SimState, env: &BindEnv) -> Value {
             .unwrap_or(Value::Unit),
         Ctx::It => env.subj.clone().unwrap_or(Value::Unit),
         Ctx::Var(name) => env.get(name).cloned().unwrap_or(Value::Unit),
-        // TODO(stage-2 slice 2): resolve Triggering/ThisCast against the
-        // active event-log frame. Returning Unit keeps the evaluator total.
-        Ctx::Triggering(_) | Ctx::ThisCast(_) => Value::Unit,
+        // The event that fired this ability (carried in the env from match time).
+        Ctx::Triggering(field) => env
+            .triggering_event
+            .as_ref()
+            .map(|e| project_event_field(e, *field))
+            .unwrap_or(Value::Unit),
+        // This spell's own cast: the most recent `SpellCast` in the log whose
+        // card_id is the source object (an object keeps its id stack→battlefield,
+        // so an ETB replacement on the entering permanent finds its own cast).
+        Ctx::ThisCast(field) => {
+            let Some(src) = env.source else { return Value::Unit };
+            state
+                .event_log
+                .entries
+                .iter()
+                .rev()
+                .find_map(|logged| match &logged.event {
+                    crate::GameEvent::SpellCast { card_id, .. } if *card_id == src => {
+                        Some(project_event_field(&logged.event, *field))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(Value::Unit)
+        }
+    }
+}
+
+/// Project a single `EventField` off a logged `GameEvent` (CR-meaningful cast /
+/// event properties). Unmapped (event, field) pairs return `Unit`; new arms are
+/// added demand-driven as cards need them.
+fn project_event_field(event: &crate::GameEvent, field: crate::ir::context::EventField) -> Value {
+    use crate::ir::context::EventField as F;
+    use crate::GameEvent as E;
+    match (event, field) {
+        // Spell-cast properties.
+        (E::SpellCast { mana_spent, .. }, F::ManaSpent) => Value::Bool(*mana_spent),
+        (E::SpellCast { alt_cost, .. }, F::AltCost) => Value::Bool(*alt_cost),
+        (E::SpellCast { x, .. }, F::X) => Value::Num(*x as i64),
+        (E::SpellCast { delved, .. }, F::DelvedExiled) => Value::ObjSet(delved.clone()),
+        // Zone-change properties (useful to `Triggering` in replacement bodies).
+        (E::ZoneChange { id, .. }, F::ObjMoved) => Value::Obj(*id),
+        (E::ZoneChange { from, .. }, F::ZoneFrom) => Value::Zone(*from),
+        (E::ZoneChange { to, .. }, F::ZoneTo) => Value::Zone(*to),
+        _ => Value::Unit,
     }
 }
 
@@ -1871,6 +2490,29 @@ fn fold_set(
     is_all
 }
 
+/// Count elements of `set` for which `body` holds (`bind` names the element).
+/// The counting sibling of `fold_set`.
+fn count_set(
+    state: &SimState,
+    env: &BindEnv,
+    set: &Expr,
+    bind: &'static str,
+    body: &Expr,
+) -> i64 {
+    let elements = match eval_expr(set, state, env) {
+        Value::ObjSet(v) => v.into_iter().map(Value::Obj).collect::<Vec<_>>(),
+        Value::PlayerSet(v) => v.into_iter().map(Value::Player).collect::<Vec<_>>(),
+        _ => return 0,
+    };
+    elements
+        .into_iter()
+        .filter(|elem| {
+            let sub_env = env.clone().with_var(bind, elem.clone()).with_subj(elem.clone());
+            expect_bool(eval_expr(body, state, &sub_env))
+        })
+        .count() as i64
+}
+
 fn enumerate_zone(state: &SimState, env: &BindEnv, zone: &ZoneSel) -> Vec<ObjId> {
     match zone {
         ZoneSel::Id(_) => Vec::new(), // stage-2 slice does not use absolute ZoneIds yet
@@ -1902,7 +2544,7 @@ fn enumerate_kind_all_players(state: &SimState, kind: ZoneKindSel) -> Vec<ObjId>
     out
 }
 
-fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
+pub(crate) fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
     match (kind, o.zone()) {
         (ZoneKindSel::Stack, Some(Zone::Stack)) => true,
         (ZoneKindSel::Hand, Some(Zone::Hand { .. })) => true,
@@ -2111,10 +2753,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::PT);
             walk_reads(e, out);
         }
-        Expr::Attacking(e) | Expr::Unblocked(e) => {
-            // Battlefield-state projection — no CE axis applies (combat
-            // state isn't a continuous-effect surface). Walk the operand
-            // for reads but emit no axis push.
+        Expr::Attacking(e) | Expr::Unblocked(e) | Expr::AttachedTo(e)
+        | Expr::ChosenName(e) | Expr::ChosenColor(e) | Expr::ChosenTargets(e)
+        | Expr::IsFrontFace(e) => {
+            // Battlefield-/stack-state projection — no CE axis applies (combat /
+            // attachment / ETB-choice / targeting state isn't a continuous-effect
+            // characteristic surface). Walk the operand but emit no axis push.
             walk_reads(e, out);
         }
         // Mana cost is a printed characteristic; layer 1 copy is the only
@@ -2146,6 +2790,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::Counters);
             walk_reads(e, out);
         }
+        // Loyalty is a counter (CR 306.5b); active player is global game state.
+        Expr::LoyaltyOf(e) => {
+            out.push(Axis::Counters);
+            walk_reads(e, out);
+        }
+        Expr::ActivePlayer => out.push(Axis::GameCtx),
 
         // ── player projections ────────────────────────────────────────────
         Expr::Life(e) => {
@@ -2154,6 +2804,10 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
         }
         Expr::HandSize(e) => {
             out.push(Axis::HandSize);
+            walk_reads(e, out);
+        }
+        Expr::LibrarySize(e) => {
+            out.push(Axis::Zone);
             walk_reads(e, out);
         }
         Expr::Opponents(e) => walk_reads(e, out),
@@ -2172,7 +2826,7 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
         Expr::And(a, b) | Expr::Or(a, b) | Expr::Eq(a, b) | Expr::Lt(a, b)
         | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b)
         | Expr::Contains(a, b) | Expr::Add(a, b) | Expr::Sub(a, b)
-        | Expr::Mul(a, b) | Expr::Min(a, b) | Expr::Max(a, b) => {
+        | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Min(a, b) | Expr::Max(a, b) => {
             walk_reads(a, out);
             walk_reads(b, out);
         }
@@ -2181,7 +2835,9 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
 
         // ── folds / binding ───────────────────────────────────────────────
         Expr::Count(a) => walk_reads(a, out),
-        Expr::Any { set, bind: _, body } | Expr::All { set, bind: _, body } => {
+        Expr::CountWhere { set, bind: _, body }
+        | Expr::Any { set, bind: _, body }
+        | Expr::All { set, bind: _, body } => {
             walk_reads(set, out);
             walk_reads(body, out);
         }
@@ -2206,13 +2862,16 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
 fn walk_event_filter(filter: &crate::ir::expr::EventFilter, out: &mut Vec<Axis>) {
     use crate::ir::expr::EventFilter;
     match filter {
-        EventFilter::SpellCast { caster, spell_filter } => {
-            if let Some(e) = caster {
-                walk_reads(e, out);
-            }
-            if let Some(f) = spell_filter {
-                walk_reads(&f.0, out);
-            }
+        EventFilter::SpellCast { caster, card, spell_filter, alt_cost: _ } => {
+            if let Some(e) = caster { walk_reads(e, out); }
+            if let Some(e) = card { walk_reads(e, out); }
+            if let Some(f) = spell_filter { walk_reads(&f.0, out); }
+        }
+        EventFilter::Draw { who } => {
+            if let Some(e) = who { walk_reads(e, out); }
+        }
+        EventFilter::LifeLost { who } => {
+            if let Some(e) = who { walk_reads(e, out); }
         }
     }
 }
@@ -2240,6 +2899,9 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
         | CEMod::AddSubtype(_)
         | CEMod::RemoveSubtype(_) => vec![Axis::Type],
 
+        // Animate: sets type, P/T, and the carried ability set.
+        CEMod::BecomeCreature { .. } => vec![Axis::Type, Axis::PT, Axis::Abilities],
+
         // CR 305.7: also strips abilities generated from rules text.
         CEMod::SetBasicLandType(_) => vec![Axis::Type, Axis::Abilities],
 
@@ -2265,6 +2927,7 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
 
         CEMod::AllowLoss(_)
         | CEMod::MaxHandSize(_)
+        | CEMod::NoMaxHandSize
         | CEMod::ExtraLandDrops(_)
         | CEMod::SkipStep(_) => vec![Axis::RuleMod],
 
@@ -2282,7 +2945,7 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
 
 // ── IR static → ContinuousInstance bridge ────────────────────────────────────
 //
-// Translates an `AbilityKind::Static { mods, scope }` block into the legacy
+// Translates an `AbilityKind::Static { mods, scope, condition }` block into the legacy
 // `ContinuousInstance` records that `recompute` already consumes. One CI per
 // CEMod — each CEMod has a single CR-613 layer.
 //
@@ -2292,66 +2955,56 @@ pub(crate) fn writes_of(cemod: &CEMod) -> Vec<Axis> {
 
 use crate::ir::ability::{Ability, AbilityKind};
 use crate::ir::ce::BasicLandType;
-use crate::{CardDef, CeReads, CeWrites, ContinuousInstance, ContinuousLayer, Expiry};
+use crate::{CardDef, ContinuousInstance, ContinuousLayer, Expiry};
 
 pub(crate) fn ir_static_to_cis(
     source_id: ObjId,
     controller: PlayerId,
     ability: &Ability,
+    state: &SimState,
 ) -> Vec<ContinuousInstance> {
-    let AbilityKind::Static { mods, scope } = &ability.kind else {
+    let AbilityKind::Static { mods, scope, condition } = &ability.kind else {
         return Vec::new();
     };
+    // CR 613 "as long as …" gate: when the condition is false this recompute,
+    // the whole block contributes nothing (Decision 4 — block condition, not a
+    // per-object filter). Evaluated against the source's binding frame.
+    if let Some(cond) = condition {
+        let env = BindEnv::new().with_source(source_id).with_controller(controller);
+        if !expect_bool(eval_expr(cond, state, &env)) {
+            return Vec::new();
+        }
+    }
     mods.iter()
-        .filter_map(|m| cemod_to_ci(source_id, controller, m, scope))
+        .filter_map(|m| cemod_to_ci(source_id, controller, m, scope, state))
         .collect()
 }
 
+/// Wrap a `CEMod` into a *static-ability* `ContinuousInstance` (CR 613): the
+/// CEMod-intrinsic half (layer/reads/writes/modifier) comes from the shared
+/// `cemod_to_modifier`; the static half adds the scope filter and the
+/// "while the source is on the battlefield" expiry. `timestamp` is assigned by
+/// the recompute caller.
 fn cemod_to_ci(
     source_id: ObjId,
     controller: PlayerId,
     cemod: &CEMod,
     scope: &Option<Filter>,
+    state: &SimState,
 ) -> Option<ContinuousInstance> {
-    match cemod {
-        CEMod::SetBasicLandType(kind) => {
-            let filter = build_filter(source_id, controller, scope);
-            let kind = *kind;
-            let modifier: crate::ContinuousModFn = std::sync::Arc::new(move |def, _state| {
-                apply_set_basic_land_type(def, kind);
-            });
-            Some(ContinuousInstance {
-                source_id,
-                controller,
-                layer: ContinuousLayer::L4TypeEffects,
-                reads: vec![CeReads::Supertypes],
-                writes: vec![CeWrites::LandTypes, CeWrites::Abilities],
-                timestamp: 0, // assigned by recompute caller
-                filter,
-                modifier,
-                expiry: Expiry::WhileSourceOnBattlefield,
-            })
-        }
-        CEMod::AddBasicLandType(kind) => {
-            let filter = build_filter(source_id, controller, scope);
-            let kind = *kind;
-            let modifier: crate::ContinuousModFn = std::sync::Arc::new(move |def, _state| {
-                apply_add_basic_land_type(def, kind);
-            });
-            Some(ContinuousInstance {
-                source_id,
-                controller,
-                layer: ContinuousLayer::L4TypeEffects,
-                reads: vec![CeReads::LandTypes], // "already has this type?" check
-                writes: vec![CeWrites::LandTypes],
-                timestamp: 0,
-                filter,
-                modifier,
-                expiry: Expiry::WhileSourceOnBattlefield,
-            })
-        }
-        _ => None, // other CEMods not yet wired through the static recompute path
-    }
+    let env = BindEnv::new().with_source(source_id).with_controller(controller);
+    let build = cemod_to_modifier(cemod, &env, state)?;
+    Some(ContinuousInstance {
+        source_id,
+        controller,
+        layer: build.layer,
+        reads: build.reads,
+        writes: build.writes,
+        timestamp: 0, // assigned by recompute caller
+        filter: build_filter(source_id, controller, scope),
+        modifier: build.modifier,
+        expiry: Expiry::WhileSourceOnBattlefield,
+    })
 }
 
 /// Build a `ContinuousFilterFn` from an optional scope `Filter`. `None`
@@ -2421,6 +3074,40 @@ fn apply_add_basic_land_type(def: &mut CardDef, kind: BasicLandType) {
     }
 }
 
+/// Animate `def` as a creature (CR 613.1c layer 4): give it the base P/T, creature
+/// subtypes, and keywords, carrying its existing activated abilities over (so a
+/// planeswalker's loyalty abilities stay usable). Per the CR ruling for Kaito-style
+/// "he's a … creature" wording, an animated planeswalker stops being a planeswalker.
+fn apply_become_creature(
+    def: &mut CardDef,
+    power: i32,
+    toughness: i32,
+    subtypes: &[String],
+    keywords: &[crate::Keyword],
+) {
+    use crate::{CardKind, CardType, CreatureData};
+    let was_legendary = def.legendary();
+    def.types.retain(|ty| *ty != CardType::Planeswalker);
+    if !def.types.contains(&CardType::Creature) {
+        def.types.push(CardType::Creature);
+    }
+    // Carry existing activated abilities over (loyalty abilities stay activatable).
+    let abilities = match &def.kind {
+        CardKind::Planeswalker(pw) => pw.abilities.clone(),
+        CardKind::Creature(c) => c.abilities.clone(),
+        _ => Vec::new(),
+    };
+    let mana_cost = def.mana_cost().to_string();
+    let mut c = CreatureData::new(&mana_cost, power, toughness);
+    c.legendary = was_legendary;
+    c.creature_subtypes = subtypes.to_vec();
+    for kw in keywords {
+        c.keywords.insert(*kw);
+    }
+    c.abilities = abilities;
+    def.kind = CardKind::Creature(c);
+}
+
 fn mana_for_basic_land(kind: BasicLandType) -> crate::ManaAbility {
     let color = kind.mana_color();
     let color_owned = color.to_string();
@@ -2488,6 +3175,7 @@ pub(crate) fn ir_replacement_effect(
     ability: &crate::ir::ability::Ability,
     source_id: ObjId,
     controller: PlayerId,
+    event: &crate::GameEvent,
 ) -> Option<crate::effects::Effect> {
     let AbilityKind::Replacement { body, .. } = &ability.kind else {
         return None;
@@ -2495,6 +3183,9 @@ pub(crate) fn ir_replacement_effect(
     match body {
         ReplacementBody::Replace(action) => {
             let action = action.clone();
+            // A replacement runs *on* the event it replaces, so the body reads
+            // that event's fields via `Ctx::Triggering`.
+            let trig_event = event.clone();
             Some(crate::effects::Effect(std::sync::Arc::new(
                 move |state, _t, targets| {
                     let Some(&id) = targets.first() else {
@@ -2503,6 +3194,7 @@ pub(crate) fn ir_replacement_effect(
                     let mut env = BindEnv::new()
                         .with_source(source_id)
                         .with_controller(controller)
+                        .with_triggering_event(trig_event.clone())
                         .with_var("triggered_obj", Value::Obj(id));
                     execute_mut(&action, state, &mut env);
                 },

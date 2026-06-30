@@ -459,6 +459,7 @@ fn walk(
         | Action::Surveil { .. }
         | Action::Look { .. }
         | Action::Counter { .. }
+        | Action::Ward { .. }
         | Action::OfferCast { .. }
         | Action::CopySpell { .. }
         | Action::ApplyCE { .. }
@@ -473,6 +474,11 @@ fn walk(
         | Action::ForEach { .. }
         | Action::OrderTop { .. }
         | Action::Dig { .. }
+        | Action::RecordEtbChoice { .. }
+        | Action::CreateEmblem { .. }
+        | Action::RegisterContinuous { .. }
+        | Action::SimultaneousPut { .. }
+        | Action::NinjutsuEnter
         | Action::MayDo { .. } => Some(()),
     }
 }

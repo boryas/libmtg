@@ -45,10 +45,38 @@ pub enum Expr {
     /// attacker that wasn't blocked this combat). Used by ninjutsu's
     /// "return an unblocked attacker" cost filter.
     Unblocked(Box<Expr>),        // Bool
+    /// The object `obj` (an Equipment/Aura) is attached to, as `Obj` — or `Unit`
+    /// if it is attached to nothing. Lets an equipment's continuous effect scope
+    /// to its equipped creature as data: `Eq(It, AttachedTo(Source))`.
+    AttachedTo(Box<Expr>),       // Obj | Unit
+    /// The card name `obj` chose as it entered (CR 614.12 "as ~ enters, choose
+    /// a card name"), read from `etb_choice`, as `Name` — or `Unit` if it made
+    /// no name choice. Lets a "name a card" effect scope by data:
+    /// `Eq(Name(It), ChosenName(Source))` (Disruptor Flute, Pithing Needle).
+    ChosenName(Box<Expr>),       // Name | Unit
+    /// The color `obj` chose as it entered ("as ~ enters, choose a color"), read
+    /// from `etb_choice`, as `Color` — or `Unit` if it made no color choice. Lets
+    /// a CE use the runtime-chosen color as a value: Painter's Servant adds
+    /// `AddColor(ChosenColor(Source))`.
+    ChosenColor(Box<Expr>),      // Color | Unit
+    /// The chosen targets of the spell/ability `obj` (CR 601.2c), as an `ObjSet`
+    /// (empty if `obj` isn't a spell or has none). Lets a Ward trigger test "this
+    /// spell targets me": `Contains(Source, ChosenTargets(triggered_obj))`.
+    ChosenTargets(Box<Expr>),    // ObjSet
+    /// True iff the permanent `obj` is showing its front face (`active_face == 0`),
+    /// `false` for a transformed/back face or non-permanent. Gates a DFC's own
+    /// front-face trigger so it doesn't re-fire once flipped (Delver of Secrets).
+    IsFrontFace(Box<Expr>),      // Bool
+
+    /// The loyalty of planeswalker `obj` (CR 306.5b), as `i64` — 0 for non-PWs or
+    /// objects off the battlefield. Read for "as long as ~ has one or more loyalty
+    /// counters on him" (Kaito's animation condition).
+    LoyaltyOf(Box<Expr>),        // i64
 
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64
     HandSize(Box<Expr>),         // i64
+    LibrarySize(Box<Expr>),      // i64
     Opponents(Box<Expr>),        // Vec<PlayerId>
 
     // ── zone projections ─────────────────────────────────────────────────
@@ -69,9 +97,15 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
+    /// Integer (floor) division; division by zero yields 0.
+    Div(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Max(Box<Expr>, Box<Expr>),
+
+    /// The active player (CR 102.1), as `Player`. `Eq(ActivePlayer, Ctx::Controller)`
+    /// is "during your turn".
+    ActivePlayer,
 
     // ── set-builder and folds ────────────────────────────────────────────
     /// The players, as objects (`ObjSet` of the player `GameObject`s). Players are
@@ -86,6 +120,10 @@ pub enum Expr {
     },
     /// |set|
     Count(Box<Expr>),
+    /// |{ x ∈ set : body(x) }| — count elements satisfying a predicate. `bind`
+    /// names the element in `body` (e.g. Murktide: instant/sorcery cards among
+    /// the delved ids).
+    CountWhere { set: Box<Expr>, bind: &'static str, body: Box<Expr> },
     /// ∃ x ∈ set. body(x) — `bind` names the element in `body`.
     Any { set: Box<Expr>, bind: &'static str, body: Box<Expr> },
     /// ∀ x ∈ set. body(x)
@@ -123,14 +161,24 @@ pub enum Expr {
 /// specific field selectors that show up in real cards.
 #[derive(Debug, Clone)]
 pub enum EventFilter {
-    /// A spell was cast. `caster` optionally filters by the player who cast it
-    /// (resolves against the event's `caster` field). `spell_filter` optionally
-    /// filters by the cast object itself (its `card_id`, resolved against the
-    /// catalog) — e.g. "noncreature spells this turn" for The Fantasticar.
+    /// A spell was cast. Each selector is optional (None = don't filter):
+    /// `caster` (the player), `card` (the cast object — for "this card was cast",
+    /// e.g. an evoke/warp ETB checking its own cast), `spell_filter` (a Filter on
+    /// the cast object — e.g. "noncreature spells this turn" for The Fantasticar),
+    /// and `alt_cost` (true ⇒ cast for one of its alternative costs — CR 702.74).
     SpellCast {
         caster: Option<Box<Expr>>,
+        card: Option<Box<Expr>>,
         spell_filter: Option<Box<Filter>>,
+        alt_cost: Option<bool>,
     },
+    /// A player drew a card. `who` optionally filters by the drawing player.
+    /// `EventCount(ThisTurn, Draw{You})` is "cards you've drawn this turn".
+    Draw { who: Option<Box<Expr>> },
+    /// A player lost life (CR 118.2). `who` optionally filters by that player —
+    /// e.g. `EventCount(ThisTurn, LifeLost{who: o}) > 0` is "opponent o lost life
+    /// this turn" (Kaito 0).
+    LifeLost { who: Option<Box<Expr>> },
 }
 
 /// Which zone to scan, possibly controller-scoped.

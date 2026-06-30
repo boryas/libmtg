@@ -86,6 +86,18 @@ pub enum CounterType {
     /// +1/+1 counter. Stored in `BattlefieldState.counters` for legacy
     /// compatibility; read by `fold_game_state_into_def`.
     PlusOnePlusOne,
+    /// Loyalty counter (CR 306.5b/c): a planeswalker's loyalty *is* the number
+    /// of these on it. Zone-scoped like `PlusOnePlusOne`, so it routes to the
+    /// dedicated `BattlefieldState.loyalty` field rather than the cross-zone
+    /// `GameObject.counters` map (auto-resets each battlefield stint).
+    Loyalty,
+    /// Stun counter (CR 122.1d): "if a permanent with a stun counter would
+    /// become untapped, instead remove a stun counter." Zone-scoped, routes to
+    /// `BattlefieldState.stun_counters` (e.g. Kaito −2).
+    Stun,
+    /// Lore counter (CR 714): a Saga's chapter abilities trigger as its lore
+    /// count reaches their chapter number. Stored in the generic `counters` map.
+    Lore,
 }
 
 
@@ -166,7 +178,7 @@ pub struct BattlefieldState {
     counters: i32,              // +1/+1 counters
     power_mod: i32,
     toughness_mod: i32,
-    loyalty: i32,               // planeswalker loyalty (0 for non-PWs)
+    loyalty: i32,               // # of loyalty counters = the PW's loyalty (CR 306.5c); 0 for non-PWs. Routed to by CounterType::Loyalty.
     pub pw_activated_this_turn: bool,
     pub attacking: bool,
     pub unblocked: bool,
@@ -421,6 +433,18 @@ pub enum GameEvent {
         caster: PlayerId,
         card_id: ObjId,
         mana_spent: bool,
+        /// True if cast for one of its alternative costs (evoke, warp, flashback,
+        /// free-cast …) rather than its mana cost. CR 118.9 / 702.74. Distinct
+        /// from `!mana_spent` — a warp/flashback alt cost still spends mana.
+        alt_cost: bool,
+        /// The announced X paid for this cast (CR 601.2b), 0 if no X. Read back
+        /// via `Ctx::ThisCast(EventField::X)` — e.g. Engineered Explosives'
+        /// sunburst counters. The log is the durable home for cast-time choices.
+        x: u32,
+        /// Cards exiled to pay delve (CR 702.66), in payment order. Read via
+        /// `Ctx::ThisCast(EventField::DelvedExiled)` — e.g. Murktide Regent
+        /// counts the instant/sorcery cards among them.
+        delved: Vec<ObjId>,
     },
     /// Fired after a spell finishes resolving — its effect has been applied (or it has
     /// become a permanent), just before priority returns. The general "spell resolved"
@@ -451,7 +475,11 @@ pub enum GameEvent {
     /// "Fantasticar Construct"); objectives observe this to detect token-making
     /// wincons (The Fantasticar's pop).
     TokenCreated { controller: PlayerId, token_key: String, id: ObjId },
-    // Future variants: DamageDealt, AbilityActivated, CounterChanged, LifeChanged.
+    /// A player lost `amount` (>0) life (CR 118.2) — from damage, payment, drain, …
+    /// Logged centrally in `lose_life`. Read via `EventFilter::LifeLost` (e.g.
+    /// Kaito 0 "draw for each opponent who lost life this turn").
+    LifeLost { who: PlayerId, amount: i32 },
+    // Future variants: DamageDealt, AbilityActivated, CounterChanged.
 }
 
 /// Data stored with a triggered ability waiting to be pushed onto the stack.
@@ -506,13 +534,6 @@ pub(crate) fn tp_on_stack() -> TriggerPredicate {
     Arc::new(|src, state| {
         state.objects.get(&src).map_or(false, |o| matches!(o.zone(), Some(Zone::Stack)))
     })
-}
-
-/// Trigger predicate: always active regardless of zone.
-/// Used for intrinsic entry replacements (CR 614.1c/d: "As this permanent enters...")
-/// where the check fn itself guards on (id == source_id && to == Battlefield).
-pub(crate) fn tp_always() -> TriggerPredicate {
-    Arc::new(|_, _| true)
 }
 
 /// Predicate for LatentSpellMod: given (spell ObjId, caster, &SimState), returns
@@ -706,6 +727,21 @@ pub struct ContinuousInstance {
     pub(crate) expiry: Expiry,
 }
 
+/// An emblem (CR 114): a command-zone marker with one or more static abilities,
+/// controlled by the player whose effect created it, with no other characteristics.
+/// Held in a side-list (like `continuous_instances`) rather than `state.objects`,
+/// since it has no card type. Its abilities are gathered each `recompute`; it
+/// never expires (CR 114.5 — an emblem can't leave the command zone).
+pub struct EmblemInstance {
+    /// Identity (for `Ctx::Source` / logging); not present in `state.objects`.
+    pub(crate) id: ObjId,
+    pub(crate) controller: PlayerId,
+    /// The emblem's static abilities (CR 114.5 — the emblem is their source).
+    pub(crate) abilities: Vec<crate::ir::ability::Ability>,
+    /// CR 613.6 timestamp, assigned at creation.
+    pub(crate) timestamp: u32,
+}
+
 
 // ── Recompute ─────────────────────────────────────────────────────────────────
 
@@ -866,8 +902,19 @@ pub(crate) fn recompute(state: &mut SimState) {
         }
         // IR-authored static abilities (dual-pathway alongside static_ability_defs).
         for ability in &card_def.abilities {
-            for mut ci in crate::ir::executor::ir_static_to_cis(id, obj.controller, ability) {
+            for mut ci in crate::ir::executor::ir_static_to_cis(id, obj.controller, ability, state) {
                 ci.timestamp = obj.ci_timestamp;
+                static_cis.push(ci);
+            }
+        }
+    }
+
+    // Emblems (CR 114.5): their static abilities apply continuously from the
+    // command zone, gathered the same way as battlefield static abilities.
+    for emblem in &state.emblems {
+        for ability in &emblem.abilities {
+            for mut ci in crate::ir::executor::ir_static_to_cis(emblem.id, emblem.controller, ability, state) {
+                ci.timestamp = emblem.timestamp;
                 static_cis.push(ci);
             }
         }
@@ -952,6 +999,45 @@ pub(crate) fn recompute(state: &mut SimState) {
             };
             (modifier)(&mut def, state);
             state.objects.get_mut(&id).unwrap().materialized = Some(def);
+        }
+    }
+
+    // Phase 4: make granted abilities (CEMod::GrantAbility, layer 6) usable.
+    // Run the same synthesis build_catalog uses for a card's own IR activated
+    // abilities, now on the materialized `granted_abilities`, so a granted
+    // ability is activatable exactly like a printed one. Mana-ness is *computed*
+    // here (CR 605.1a via `is_mana_ability`), not pre-bucketed: each granted
+    // activated ability lands in `mana_abilities` or `abilities` accordingly —
+    // so both Urza's Saga chapter I (a mana ability) and chapter II (a non-mana
+    // activated ability) fall out of the one `GrantAbility` primitive.
+    for &id in &ids {
+        let granted: Vec<crate::ir::ability::Ability> =
+            match state.objects.get(&id).and_then(|o| o.materialized.as_ref()) {
+                Some(def) if !def.granted_abilities.is_empty() => def.granted_abilities.clone(),
+                _ => continue,
+            };
+        let synth_act: Vec<AbilityDef> = granted
+            .iter()
+            .filter_map(crate::ir::executor::ir_activated_as_legacy)
+            .collect();
+        let synth_mana: Vec<ManaAbility> = granted
+            .iter()
+            .filter_map(crate::ir::executor::ir_activated_as_mana_ability_legacy)
+            .collect();
+        if synth_act.is_empty() && synth_mana.is_empty() {
+            continue;
+        }
+        if let Some(def) = state.objects.get_mut(&id).and_then(|o| o.materialized.as_mut()) {
+            if !synth_act.is_empty() {
+                if let Some(list) = def.abilities_vec_mut() {
+                    list.extend(synth_act);
+                }
+            }
+            if !synth_mana.is_empty() {
+                if let Some(list) = def.mana_abilities_vec_mut() {
+                    list.extend(synth_mana);
+                }
+            }
         }
     }
 }
@@ -1173,6 +1259,9 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     let mut options = Vec::new();
     // Battlefield permanents.
     for card in state.permanents_of(who) {
+        // Null Rod / Karn: artifact mana abilities can't be activated. Source-keyed
+        // action-Restriction (mana abilities are activated abilities — CR 605.1a).
+        if crate::ir::executor::mana_ability_restricted(state, card.id) { continue; }
         let mas = state.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
         let bf = match card.bf() { Some(bf) => bf, None => continue };
         for (idx, ma) in mas.iter().enumerate() {
@@ -1191,6 +1280,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     }
     // Hand-zone mana abilities (e.g. Simian Spirit Guide).
     for card in state.hand_of(who) {
+        if crate::ir::executor::mana_ability_restricted(state, card.id) { continue; }
         let mas = state.catalog.get(&card.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
         for (idx, ma) in mas.iter().enumerate() {
             if !ma.activatable { continue; }
@@ -1233,6 +1323,8 @@ pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<Ma
         state.objects.iter().find_map(|(id, c)| {
             if used.contains(id) { return None; }
             if c.controller != who || !c.in_zone(Zone::Battlefield) { return None; }
+            // Null Rod / Karn: don't plan to tap an artifact whose abilities are restricted.
+            if crate::ir::executor::mana_ability_restricted(state, *id) { return None; }
             let bf = c.bf()?;
             let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
@@ -1250,6 +1342,7 @@ pub fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<Ma
     let find_hand = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize)> {
         state.hand_of(who).find_map(|c| {
             if used.contains(&c.id) { return None; }
+            if crate::ir::executor::mana_ability_restricted(state, c.id) { return None; }
             let mas = state.catalog.get(&c.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, _) = mas.iter().enumerate().find(|(_, ma)| {
                 ma.activatable
@@ -1517,10 +1610,6 @@ pub struct PlayerState {
     pub pool: ManaPool,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
     draws_this_turn: u8,
-    /// Total life lost this turn; reset each Untap. Used for Kaito 0 ability.
-    life_lost_this_turn: i32,
-    /// Tamiyo −7 emblem: "You have no maximum hand size." (CR 114)
-    no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     pub library_order: std::collections::VecDeque<ObjId>,
     /// How many top cards the controller legitimately KNOWS (front-down), since the
@@ -1544,8 +1633,6 @@ impl PlayerState {
             lands_played_this_turn: 0,
             pool: ManaPool::default(),
             draws_this_turn: 0,
-            life_lost_this_turn: 0,
-            no_max_hand_size: false,
             library_order: std::collections::VecDeque::new(),
             known_top_len: 0,
             strategy: None,
@@ -1623,6 +1710,10 @@ pub struct SimState {
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(crate) continuous_instances: Vec<ContinuousInstance>,
+    /// Emblems (CR 114): command-zone markers with static abilities. Their abilities
+    /// are gathered fresh each `recompute` (like battlefield static abilities) and they
+    /// never leave — emblems are not pruned. Created by `Action::CreateEmblem`.
+    pub(crate) emblems: Vec<EmblemInstance>,
     /// Append-only record of every `GameEvent` that fired (post-prohibition, post-replacement).
     /// Layer B state surface for IR queries (`Expr::EventCount`, etc.) and the eventual
     /// replacement for scattered `this_turn` counters. See `ir/event_log.rs`.
@@ -1688,6 +1779,7 @@ impl SimState {
             graveyard_order: Vec::new(),
             trigger_instances: Vec::new(),
             replacement_instances: Vec::new(),
+            emblems: Vec::new(),
             repl_applied: HashSet::new(),
             repl_depth: 0,
             continuous_instances: Vec::new(),
@@ -1801,6 +1893,20 @@ impl SimState {
 
     pub fn library_size(&self, who: PlayerId) -> usize {
         self.player(who).library_order.len()
+    }
+
+    /// True if `who` controls a source granting "no maximum hand size" (CR 402.2 /
+    /// the Tamiyo −7 emblem). Derived on demand from emblems carrying a
+    /// `CEMod::NoMaxHandSize` static, rather than a sticky player flag.
+    pub(crate) fn has_no_max_hand_size(&self, who: PlayerId) -> bool {
+        self.emblems.iter().any(|e| {
+            e.controller == who
+                && e.abilities.iter().any(|a| {
+                    matches!(&a.kind,
+                        crate::ir::ability::AbilityKind::Static { mods, .. }
+                            if mods.iter().any(|m| matches!(m, crate::ir::ce::CEMod::NoMaxHandSize)))
+                })
+        })
     }
 
     /// Mutate zone field only — no triggers, no logging. Use `change_zone` for that.
@@ -1986,7 +2092,12 @@ impl SimState {
 
     fn lose_life(&mut self, who: PlayerId, n: i32) {
         self.player_mut(who).life -= n;
-        self.player_mut(who).life_lost_this_turn += n;
+        // Log actual life loss (CR 118.2) so event-log queries can derive
+        // "lost life this turn" without a bespoke per-player counter.
+        if n > 0 {
+            let turn = self.current_turn as u32;
+            self.event_log.push(turn, GameEvent::LifeLost { who, amount: n });
+        }
     }
 
     fn gain_life(&mut self, who: PlayerId, n: i32) {
@@ -2402,7 +2513,7 @@ fn sim_play_land(
 
 /// Discard down to 7 at end of turn.
 fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
-    if state.player(who).no_max_hand_size { return; }
+    if state.has_no_max_hand_size(who) { return; }
     let hand = state.hand_size(who);
     if hand > 7 {
         let n = hand - 7;
@@ -2468,8 +2579,29 @@ pub(crate) fn fire_event(
     // from catalog, filtered by active_when predicate.
     let prohibited = state.objects.iter().any(|(id, obj)| {
         state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
+            // Closure prohibitions (legacy path, being retired).
             card_def.prohibition_defs.iter().any(|pdef| {
                 (pdef.active_when)(*id, state) && (pdef.check)(&event, *id, obj.controller, state)
+            })
+            // IR prohibitions: `AbilityKind::Prohibition { matches, active_zone }` —
+            // the event pipeline's single "can't" mechanism (CR 101.2). The pattern
+            // matches the proposed event; a match suppresses it. `active_zone`, when
+            // `Some`, gates the source by zone (Battlefield for static permanents like
+            // Grafdigger's), so the prohibition stops functioning once its source
+            // leaves that zone; `None` leaves a self-scoping pattern (`It == Source`)
+            // to narrow relevance on its own.
+            || card_def.abilities.iter().any(|ab| {
+                if let crate::ir::ability::AbilityKind::Prohibition { matches, active_zone } = &ab.kind {
+                    if let Some(z) = active_zone {
+                        if !crate::ir::executor::obj_in_kind(obj, z.clone()) { return false; }
+                    }
+                    let env = crate::ir::executor::BindEnv::new()
+                        .with_source(*id)
+                        .with_controller(obj.controller);
+                    crate::ir::executor::match_event_pattern(matches, &event, &env, state).is_some()
+                } else {
+                    false
+                }
             })
         })
     });
@@ -2513,8 +2645,16 @@ pub(crate) fn fire_event(
                     None => continue,
                 };
                 for (ab_idx, ability) in card_def.abilities.iter().enumerate() {
-                    if !matches!(ability.kind, crate::ir::ability::AbilityKind::Replacement { .. }) {
+                    let crate::ir::ability::AbilityKind::Replacement { active_zone, .. } = &ability.kind
+                    else {
                         continue;
+                    };
+                    // Zone gate (mirrors the Prohibition walk): a static-permanent
+                    // replacement (Leyline, Containment Priest) only functions while
+                    // its source is on the battlefield; `None` (self-entry) is always
+                    // consulted.
+                    if let Some(z) = active_zone {
+                        if !crate::ir::executor::obj_in_kind(obj, z.clone()) { continue; }
                     }
                     let key = (*id, IR_REPL_KEY_BASE + ab_idx);
                     if state.repl_applied.contains(&key) { continue; }
@@ -2522,7 +2662,7 @@ pub(crate) fn fire_event(
                         ability, &event, *id, obj.controller, state,
                     ) else { continue };
                     let Some(effect) = crate::ir::executor::ir_replacement_effect(
-                        ability, *id, obj.controller,
+                        ability, *id, obj.controller, &event,
                     ) else { continue };
                     found = Some((key, targets, effect));
                     break;
@@ -2575,6 +2715,14 @@ pub(crate) fn fire_event(
     // Stage 5: Trigger dispatch.
     let (triggers, one_shot_fired) = fire_triggers(&event, state);
     state.pending_triggers.extend(triggers);
+    // CR 714.2: as a Saga enters, its controller puts a lore counter on it,
+    // firing chapter I. (Turn-based action, not a triggered ability — handled
+    // here so the chapter joins the same pending-trigger batch as ETB triggers.)
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = &event {
+        if obj_is_saga(state, *id) {
+            add_lore_counter(state, *id, t);
+        }
+    }
     // Remove OneShot trigger instances that just fired (reverse order to keep indices valid).
     for &i in one_shot_fired.iter().rev() {
         state.trigger_instances.remove(i);
@@ -2890,7 +3038,7 @@ fn cast_spell(
         }
         consume_latent_spell_mod(state, who, card_id);
         let back_mana_spent = mana_value(adv.mana_cost()) > 0;
-        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent }, state, t, who);
+        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent, alt_cost: false, x: 0, delved: Vec::new() }, state, t, who);
         return Some(card_id);
     }
 
@@ -3070,7 +3218,10 @@ fn cast_spell(
         None     => mana_value(def.mana_cost()) > 0,
         Some(ac) => ac.costs.includes_mana(),
     };
-    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent }, state, t, who);
+    // Cast-time choices recorded on the event so `Ctx::ThisCast` can read them
+    // back at resolution (sunburst X, delve count) without transient ctx state.
+    let delved: Vec<ObjId> = to_exile_ids.iter().map(|(id, _)| *id).collect();
+    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent, alt_cost: alt_cost.is_some(), x: chosen_x, delved }, state, t, who);
 
 
     Some(card_id)
@@ -3254,6 +3405,48 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
 #[inline(always)]
 fn assert_engine_invariants(_state: &SimState, _label: &str) {}
 
+/// True iff this object is a Saga (CR 714) — carries one or more chapter abilities.
+fn obj_is_saga(state: &SimState, id: ObjId) -> bool {
+    state.objects.get(&id)
+        .and_then(|o| state.catalog.get(&o.catalog_key))
+        .map_or(false, |d| !d.chapters.is_empty())
+}
+
+/// CR 714: put a lore counter on a Saga, then fire the chapter ability whose
+/// number equals the new lore count (as a triggered ability, onto the stack via
+/// `pending_triggers`). Called when a Saga enters and as its controller's
+/// precombat main phase begins. Once the count exceeds the final chapter there's
+/// no chapter to fire; the SBA in `check_state_based_actions` then sacrifices it.
+fn add_lore_counter(state: &mut SimState, saga_id: ObjId, t: u8) {
+    let (controller, catalog_key, new_count) = {
+        let Some(obj) = state.objects.get_mut(&saga_id) else { return };
+        let c = obj.counters.entry(CounterType::Lore).or_insert(0);
+        *c += 1;
+        (obj.controller, obj.catalog_key.clone(), *c as usize)
+    };
+    let chapter = match state.catalog.get(&catalog_key).and_then(|d| d.chapters.get(new_count - 1)) {
+        Some(ch) => ch.clone(),
+        None => return,
+    };
+    // The chapter ability resolves with the Saga as its source (CR 714.3).
+    let effect = crate::effects::Effect(std::sync::Arc::new(
+        move |state: &mut SimState, _t: u8, _targets: &[ObjId]| {
+            let env = crate::ir::executor::BindEnv::new()
+                .with_source(saga_id)
+                .with_controller(controller);
+            let _ = crate::ir::executor::execute(&chapter, state, &env);
+        },
+    ));
+    let source_name = state.permanent_name(saga_id).unwrap_or(catalog_key);
+    state.log(t, controller, format!("{}: lore {} → chapter {}", source_name, new_count, new_count));
+    state.pending_triggers.push(TriggerContext {
+        source_name,
+        controller,
+        target_spec: TargetSpec::None,
+        effect,
+    });
+}
+
 /// Check and apply all State-Based Actions (rule 704). Called before every priority grant.
 /// Runs in a loop until no SBA fires in a pass — the rules require repeated checking until stable.
 fn check_state_based_actions(
@@ -3330,6 +3523,26 @@ fn check_state_based_actions(
                 })
                 .collect();
             for id in dying {
+                change_zone(id, ZoneId::Graveyard, state, t, who);
+                any = true;
+            }
+        }
+
+        // SBA: a Saga with lore counters ≥ its final chapter number is sacrificed
+        // (CR 714.4). The final chapter ability was pushed onto the stack when the
+        // lore count reached it and resolves independently of its source, so we
+        // don't gate on "chapter still on the stack" — correct as long as no
+        // chapter references the Saga after this point (true for current sagas).
+        for who in [PlayerId::Us, PlayerId::Opp] {
+            let done_sagas: Vec<ObjId> = state.permanents_of(who)
+                .filter_map(|card| {
+                    let chapters = state.def_of(card.id).map(|d| d.chapters.len()).unwrap_or(0);
+                    if chapters == 0 { return None; }
+                    let lore = card.counters.get(&CounterType::Lore).copied().unwrap_or(0) as usize;
+                    if lore >= chapters { Some(card.id) } else { None }
+                })
+                .collect();
+            for id in done_sagas {
                 change_zone(id, ZoneId::Graveyard, state, t, who);
                 any = true;
             }
@@ -3989,7 +4202,6 @@ fn do_step(
             }
             state.player_mut(ap).lands_played_this_turn = 0;
             state.player_mut(ap).draws_this_turn = 0;
-            state.player_mut(ap).life_lost_this_turn = 0;
             // Expire "until your next turn" trigger and continuous instances for the active player.
             state.trigger_instances.retain(|ti| {
                 !(ti.expiry == Some(Expiry::StartOfControllerNextTurn) && ti.controller == ap)
@@ -4174,6 +4386,17 @@ fn do_phase(
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
         fire_event(phase_ev, state, t, ap);
+        // CR 714.2b: as a player's precombat main phase begins, they put a lore
+        // counter on each Saga they control (firing the next chapter).
+        if phase.kind == PhaseKind::PreCombatMain {
+            let sagas: Vec<ObjId> = state.permanents_of(ap)
+                .filter(|c| obj_is_saga(state, c.id))
+                .map(|c| c.id)
+                .collect();
+            for saga_id in sagas {
+                add_lore_counter(state, saga_id, t);
+            }
+        }
         handle_priority_round(state, t, ap);
         assert_engine_invariants(state, "phase-end");
         // Mana pool drains at the end of the main phase.

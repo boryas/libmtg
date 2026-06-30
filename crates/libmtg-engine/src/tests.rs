@@ -599,10 +599,9 @@
         let _b = add_hand_card(&mut state, PlayerId::Opp, "Dark Ritual");
         let _c = add_hand_card(&mut state, PlayerId::Opp, "Island");
 
-        // Thoughtseize's effect: reveal hand, discard nonland, lose 2 life.
-        let effect = eff_reveal_hand(PlayerId::Us, Who::Opp)
-            .then(eff_discard(PlayerId::Us, Who::Opp, 1, ir_not(ir_type(CardType::Land))))
-            .then(eff_life_loss(PlayerId::Us, 2));
+        // Thoughtseize's effect (IR body): reveal hand, discard nonland, lose 2 life.
+        let ts_def = catalog_card("Thoughtseize");
+        let effect = build_spell_effect(&ts_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[]);
 
         assert_eq!(state.hand_size(PlayerId::Opp), 2);
@@ -803,14 +802,13 @@
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, None, &[], 0, 0).unwrap();
-        let spell = state.objects[&card_id].spell().expect("spell state populated").clone();
-        let effect = &spell.effect;
-        let chosen_targets = spell.chosen_targets.clone();
-
-        // Simulate what resolve_top_of_stack does: stash costs_paid_ctx before calling the effect.
-        state.resolving_costs_ctx = spell.costs_paid_ctx.clone();
-        effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets);
-        state.resolving_costs_ctx = CostsPaidCtx::default();
+        // Resolve the permanent spell the way the engine does (CR 608.3b / lib.rs
+        // resolve_top_of_stack): it leaves the stack and enters the battlefield as
+        // the SAME object, so the ETB replacement reads this object's own logged
+        // cast via `ThisCast(DelvedExiled)` — counting the delved instant/sorcery
+        // cards. No transient `resolving_costs_ctx` needed.
+        state.stack.retain(|&x| x != card_id);
+        change_zone(card_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
         let murktide_bf = state.permanents_of(PlayerId::Us).find(|p| p.catalog_key == "Murktide Regent")
             .and_then(|p| p.bf()).expect("Murktide on battlefield");
@@ -2032,22 +2030,23 @@
     #[test]
     fn test_tamiyo_flip_on_third_draw() {
         let mut state = make_state();
-        add_default_perm(&mut state, PlayerId::Us, "Tamiyo, Inquisitive Student");
-
-        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false };
-        let (result, _) = fire_triggers(&ev, &state);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
-
-        let mut state2 = state;
+        let tamiyo_id = add_default_perm(&mut state, PlayerId::Us, "Tamiyo, Inquisitive Student");
         // Tap Tamiyo first: "exile, then return transformed" must yield a FRESH object,
         // so the tapped status (and any other bf state) is reset on the way back.
-        let tamiyo_id = state2.permanents_of(PlayerId::Us)
-            .find(|p| p.catalog_key == "Tamiyo, Inquisitive Student").map(|p| p.id)
-            .expect("Tamiyo on battlefield before flip");
-        state2.objects.get_mut(&tamiyo_id).unwrap().bf_mut().unwrap().tapped = true;
+        state.objects.get_mut(&tamiyo_id).unwrap().bf_mut().unwrap().tapped = true;
 
-        result[0].effect.call(&mut state2, 1, &[]);
+        // Three draws this turn logged; the third draw event fires Tamiyo's flip.
+        // ("Third card this turn" = EventCount over the log, not the draw_index field.)
+        for i in 1..=3u8 {
+            state.event_log.push(1, GameEvent::Draw { controller: PlayerId::Us, draw_index: i, is_natural: false });
+        }
+        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false };
+        let (result, _) = fire_triggers(&ev, &state);
+        let ctx = result.iter().find(|c| c.source_name == "Tamiyo, Inquisitive Student").cloned()
+            .expect("third draw fires Tamiyo's flip trigger");
+
+        let mut state2 = state;
+        ctx.effect.call(&mut state2, 1, &[]);
         // A NEW object: back on the battlefield (same catalog_key — the front-face name
         // is unchanged) with active_face == 1, fresh starting loyalty, and untapped
         // (the exile-return reset it) — distinguishing it from Delver's in-place flip.
@@ -2060,17 +2059,23 @@
         assert!(!tamiyo_bf.tapped, "returned as a fresh untapped object (exile-return, not in-place)");
     }
 
+    /// Activate Tamiyo, Seasoned Scholar's +2 for `PlayerId::Us` — registers the
+    /// floating "opposing attackers get −1/−0 until your next turn" CE.
+    fn tamiyo_plus_two_us(state: &mut SimState) {
+        let tamiyo_def = catalog_card("Tamiyo, Inquisitive Student");
+        let back = tamiyo_def.back.as_deref().expect("Tamiyo has a back face");
+        let CardKind::Planeswalker(pw) = &back.kind else { panic!("back is a planeswalker") };
+        let plus_two = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(2))
+            .expect("Tamiyo has a +2 ability");
+        build_ability_effect(plus_two, PlayerId::Us, ObjId::UNSET).call(state, 1, &[]);
+    }
+
     #[test]
     fn test_tamiyo_plus_two_applies_power_mod_to_attackers() {
         let mut state = make_state();
-        // Register the +2 floating trigger watcher for PlayerId::Us (as if us activated it last turn).
-        state.trigger_instances.push(TriggerInstance {
-            source_id: ObjId::UNSET,
-            controller: PlayerId::Us,
-            check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(Expiry::StartOfControllerNextTurn),
+        // Activate +2 first; the dynamic-filter CE catches attackers declared later.
+        tamiyo_plus_two_us(&mut state);
 
-        });
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
         let dragon_atk_id = add_perm(&mut state, PlayerId::Opp, "Dragon", BattlefieldState { entered_this_turn: false, ..BattlefieldState::new() });
@@ -2083,31 +2088,47 @@
             true);
 
         let dragon_id = state.permanents_of(PlayerId::Opp).find(|p| p.catalog_key == "Dragon").map(|p| p.id).unwrap();
-        // The -1 comes from a ContinuousInstance (L7), not bf.power_mod.
-        // recompute reflects the CE modifier in the materialized view.
+        // The -1 comes from the floating ContinuousInstance (L7), gated on "attacking".
         recompute(&mut state);
         let eff = state.def_of(dragon_id).expect("Dragon materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
-        assert_eq!(c.power(), 2, "Dragon's effective power is 3 + (-1) = 2");
+        assert_eq!(c.power(), 2, "attacking opposing Dragon's power is 3 + (-1) = 2");
     }
 
     #[test]
     fn test_tamiyo_plus_two_expires_at_controller_untap() {
         let mut state = make_state();
-        state.trigger_instances.push(TriggerInstance {
-            source_id: ObjId::UNSET,
-            controller: PlayerId::Us,
-            check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(Expiry::StartOfControllerNextTurn),
+        tamiyo_plus_two_us(&mut state);
+        assert_eq!(state.continuous_instances.len(), 1, "+2 registers one floating CE");
 
-        });
-        assert_eq!(state.trigger_instances.len(), 1);
-
-        // Untap step for PlayerId::Us should expire the floating trigger watcher.
+        // Untap step for PlayerId::Us should expire the "until your next turn" CE.
         let step = Step { kind: StepKind::Untap, prio: false };
         do_step(&mut state, 2, PlayerId::Us, &step, true);
 
-        assert!(state.trigger_instances.is_empty(), "Floating trigger expires at controller's next Untap");
+        assert!(state.continuous_instances.is_empty(),
+            "the +2 continuous effect expires at the controller's next Untap");
+    }
+
+    #[test]
+    fn test_ninjutsu_enters_tapped_and_attacking_inheriting_target() {
+        // CR 702.49 resolution (now Action::NinjutsuEnter): the ninja goes from
+        // hand to the battlefield tapped + attacking, inheriting the returned
+        // attacker's combat target (captured in CostsPaidCtx at cost time).
+        let mut state = make_state();
+        let target = state.opp_id; // the returned attacker was attacking the opponent
+        state.catalog.insert("Ninja".into(), creature("Ninja", 2, 2));
+        let ninja_id = add_hand_card(&mut state, PlayerId::Us, "Ninja");
+        state.resolving_costs_ctx.returned_attack_targets = vec![Some(target)];
+
+        let ability = ninjutsu_ability("1U");
+        build_ability_effect(&ability, PlayerId::Us, ninja_id).call(&mut state, 1, &[]);
+
+        let bf = state.permanent_bf(ninja_id).expect("ninja on battlefield");
+        assert!(bf.tapped, "ninja enters tapped");
+        assert!(bf.attacking, "ninja enters attacking");
+        assert!(bf.unblocked, "ninja enters unblocked");
+        assert_eq!(bf.attack_target, Some(target), "inherits the returned attacker's target");
+        assert!(state.combat_attackers.contains(&ninja_id), "ninja joins the attackers");
     }
 
     #[test]
@@ -2496,6 +2517,154 @@
     }
 
     #[test]
+    fn test_planeswalker_enters_with_starting_loyalty_via_ir_replacement() {
+        // CR 306.5b/c: a planeswalker enters with loyalty counters equal to its
+        // printed loyalty. Modeled as a self-entry IR Replacement that places
+        // Loyalty counters (routed to bf.loyalty). Drive the real ETB path
+        // (change_zone → EntersZone) so the replacement actually fires — Karn's
+        // loyalty must come out at his printed 5, not the BattlefieldState default 0.
+        let mut state = make_state();
+        state.catalog.insert("Karn, the Great Creator".into(),
+            catalog_card("Karn, the Great Creator"));
+        let karn_id = add_hand_card(&mut state, PlayerId::Us, "Karn, the Great Creator");
+        change_zone(karn_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        assert_eq!(
+            state.permanent_bf(karn_id).map(|bf| bf.loyalty),
+            Some(5),
+            "Karn enters with 5 loyalty counters via the ETB replacement (CR 306.5b)"
+        );
+    }
+
+    #[test]
+    fn test_kaito_minus_two_taps_and_stuns_target() {
+        // Kaito −2: tap target creature, put two stun counters on it. Now an IR
+        // body — Tap + PutCounters(Stun, 2) — instead of a factory closure.
+        let mut state = make_state();
+        let kaito_def = catalog_card("Kaito, Bane of Nightmares");
+        let CardKind::Planeswalker(pw) = &kaito_def.kind else { panic!("Kaito is a planeswalker") };
+        let minus_two = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(-2))
+            .expect("Kaito has a −2 ability");
+        state.catalog.insert("Goblin".into(), creature("Goblin", 2, 2));
+        let target = add_default_perm(&mut state, PlayerId::Opp, "Goblin");
+        let eff = build_ability_effect(minus_two, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[target]);
+        let bf = state.permanent_bf(target).expect("target on battlefield");
+        assert!(bf.tapped, "Kaito −2 taps the target");
+        assert_eq!(bf.stun_counters, 2, "Kaito −2 places two stun counters");
+    }
+
+    #[test]
+    fn test_tamiyo_minus_three_returns_card_and_ramps_on_green() {
+        // Tamiyo −3: return target instant/sorcery from your GY to hand; if it's
+        // green, add one mana of any color. IR body: Move + IfThen(green, AddMana).
+        let mut state = make_state();
+        let tamiyo_def = catalog_card("Tamiyo, Inquisitive Student");
+        let back = tamiyo_def.back.as_deref().expect("Tamiyo has a back face");
+        let CardKind::Planeswalker(pw) = &back.kind else { panic!("back is a planeswalker") };
+        let minus_three = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(-3))
+            .expect("Tamiyo has a −3 ability");
+        let green_sorc = CardDef::new(
+            "Green Sorcery",
+            CardKind::Sorcery(SpellData { mana_cost: "G".to_string(), ..Default::default() }),
+            vec![Color::Green], None, vec![], CardLayout::Normal, None,
+            vec![], vec![], vec![], vec![],
+        );
+        state.catalog.insert("Green Sorcery".into(), green_sorc);
+        let card = add_graveyard_card(&mut state, PlayerId::Us, "Green Sorcery");
+        let pool_before = state.player(PlayerId::Us).pool.total;
+        let eff = build_ability_effect(minus_three, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[card]);
+        assert!(matches!(state.objects[&card].zone(), Some(Zone::Hand { .. })),
+            "card returned to hand");
+        assert_eq!(state.player(PlayerId::Us).pool.total, pool_before + 1,
+            "green card → one mana added (any color)");
+    }
+
+    #[test]
+    fn test_kaito_plus_one_emblem_pumps_only_your_ninjas() {
+        // Kaito +1: "you get an emblem with 'Ninjas you control get +1/+1.'"
+        // Now a real emblem (CR 114) carrying an IR Static, gathered each recompute.
+        let mut state = make_state();
+        let mut ninja = creature("Ninja", 2, 2);
+        if let CardKind::Creature(c) = &mut ninja.kind {
+            c.creature_subtypes = vec!["Ninja".to_string()];
+        }
+        state.catalog.insert("Ninja".into(), ninja);
+        let mine = add_default_perm(&mut state, PlayerId::Us, "Ninja");
+        let theirs = add_default_perm(&mut state, PlayerId::Opp, "Ninja");
+
+        let kaito_def = catalog_card("Kaito, Bane of Nightmares");
+        let CardKind::Planeswalker(pw) = &kaito_def.kind else { panic!("Kaito is a planeswalker") };
+        let plus_one = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(1))
+            .expect("Kaito has a +1 ability");
+        build_ability_effect(plus_one, PlayerId::Us, ObjId::UNSET).call(&mut state, 1, &[]);
+        recompute(&mut state);
+
+        let pt = |st: &SimState, id| st.def_of(id).and_then(|d| match &d.kind {
+            CardKind::Creature(c) => Some((c.power(), c.toughness())),
+            _ => None,
+        });
+        assert_eq!(pt(&state, mine), Some((3, 3)), "your Ninja gets +1/+1 from the emblem");
+        assert_eq!(pt(&state, theirs), Some((2, 2)), "opponent's Ninja is unaffected");
+        assert_eq!(state.emblems.len(), 1, "one emblem created");
+    }
+
+    #[test]
+    fn test_tamiyo_minus_seven_draws_half_library_and_grants_no_max_hand() {
+        // Tamiyo −7: draw ⌈library/2⌉; emblem "You have no maximum hand size."
+        let mut state = make_state();
+        for i in 0..7 {
+            add_library_card(&mut state, PlayerId::Us, &format!("Lib{i}"));
+        }
+        let hand_before = state.hand_size(PlayerId::Us);
+        assert!(!state.has_no_max_hand_size(PlayerId::Us), "no emblem yet");
+
+        let tamiyo_def = catalog_card("Tamiyo, Inquisitive Student");
+        let back = tamiyo_def.back.as_deref().expect("Tamiyo has a back face");
+        let CardKind::Planeswalker(pw) = &back.kind else { panic!("back is a planeswalker") };
+        let minus_seven = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(-7))
+            .expect("Tamiyo has a −7 ability");
+        build_ability_effect(minus_seven, PlayerId::Us, ObjId::UNSET).call(&mut state, 1, &[]);
+
+        // ⌈7/2⌉ = 4 drawn.
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before + 4, "draw half library, rounded up");
+        assert_eq!(state.library_size(PlayerId::Us), 3, "7 − 4 = 3 left");
+        assert!(state.has_no_max_hand_size(PlayerId::Us),
+            "emblem grants no maximum hand size");
+    }
+
+    /// Kaito 0: surveil 2, then draw a card for each opponent who lost life this
+    /// turn — counted off the `LifeLost` event log, not a bespoke counter.
+    fn kaito_zero(state: &mut SimState) -> Effect {
+        let kaito_def = catalog_card("Kaito, Bane of Nightmares");
+        let CardKind::Planeswalker(pw) = &kaito_def.kind else { panic!("Kaito is a planeswalker") };
+        let zero = pw.abilities.iter().find(|a| a.loyalty_delta() == Some(0))
+            .expect("Kaito has a 0 ability");
+        build_ability_effect(zero, PlayerId::Us, ObjId::UNSET)
+    }
+
+    #[test]
+    fn test_kaito_zero_draws_when_opponent_lost_life() {
+        let mut state = make_state();
+        for i in 0..3 { add_library_card(&mut state, PlayerId::Us, &format!("Lib{i}")); }
+        state.lose_life(PlayerId::Opp, 3); // logs a LifeLost event this turn
+        let hand_before = state.hand_size(PlayerId::Us);
+        kaito_zero(&mut state).call(&mut state, 1, &[]);
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before + 1,
+            "draw 1 — the opponent lost life this turn");
+    }
+
+    #[test]
+    fn test_kaito_zero_no_draw_when_opponent_kept_life() {
+        let mut state = make_state();
+        for i in 0..3 { add_library_card(&mut state, PlayerId::Us, &format!("Lib{i}")); }
+        let hand_before = state.hand_size(PlayerId::Us);
+        kaito_zero(&mut state).call(&mut state, 1, &[]);
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before,
+            "no draw — no opponent lost life this turn");
+    }
+
+    #[test]
     fn test_sba_legend_rule_second_copy_dies() {
         let mut state = make_state();
         let _first = add_default_perm(&mut state, PlayerId::Us, "Bowmasters");
@@ -2831,6 +3000,120 @@
         eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.library_of(PlayerId::Us).count(), 1, "MV 2 artifact must not be fetched");
+    }
+
+    #[test]
+    fn test_saga_lore_counters_fire_chapters_then_sacrifice() {
+        // Synthetic 2-chapter Saga validating the CR-714 machinery: chapter I
+        // gains 1 life, chapter II gains 10. Lore is added on entry (chapter I)
+        // and each precombat main (chapter II); at lore ≥ 2 the SBA sacrifices it.
+        use crate::ir::action::{Action, Who as IrWho};
+        use crate::ir::expr::Expr;
+        let mut saga = CardDef::new(
+            "Test Saga", CardKind::Enchantment(EnchantmentData::default()),
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![],
+        );
+        saga.chapters = vec![
+            Action::GainLife { who: IrWho::You, amount: Expr::Num(1) },
+            Action::GainLife { who: IrWho::You, amount: Expr::Num(10) },
+        ];
+        let mut state = make_state();
+        state.catalog.insert("Test Saga".into(), saga);
+        let life0 = state.player(PlayerId::Us).life;
+        let saga_id = add_hand_card(&mut state, PlayerId::Us, "Test Saga");
+
+        // Enters the battlefield → lore 1 → chapter I triggers.
+        change_zone(saga_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert_eq!(state.objects[&saga_id].counters.get(&CounterType::Lore).copied(), Some(1));
+        assert_eq!(state.player(PlayerId::Us).life, life0 + 1, "chapter I gained 1 life");
+
+        // Precombat main → lore 2 → chapter II triggers.
+        add_lore_counter(&mut state, saga_id, 1);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert_eq!(state.player(PlayerId::Us).life, life0 + 11, "chapter II gained 10 more life");
+
+        // Lore (2) ≥ final chapter (2) → sacrificed as an SBA.
+        recompute(&mut state);
+        check_state_based_actions(&mut state, 1);
+        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == saga_id),
+            "Saga is sacrificed once its last chapter has resolved (CR 714.4)");
+    }
+
+    #[test]
+    fn test_urza_saga_chapter_iii_fetches_then_sacrifices() {
+        // The real Urza's Saga on the machinery: lore 1/2 (chapters I/II no-ops),
+        // lore 3 (chapter III) fetches a {0}/{1}-MV artifact, then the SBA sacs it.
+        let mut state = make_state();
+        state.catalog.insert("Urza's Saga".into(), catalog_card("Urza's Saga"));
+        state.catalog.insert("Lotus Petal".into(), catalog_card("Lotus Petal"));
+        let lotus_id = add_library_card(&mut state, PlayerId::Us, "Lotus Petal");
+        let saga_id = add_hand_card(&mut state, PlayerId::Us, "Urza's Saga");
+
+        change_zone(saga_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us); // lore 1
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        // Chapter I granted Urza's Saga a usable {T}: Add {C} mana ability.
+        recompute(&mut state);
+        assert_eq!(state.def_of(saga_id).map(|d| d.mana_abilities().len()), Some(1),
+            "chapter I grants {{T}}: Add {{C}} (a usable, computed mana ability)");
+        add_lore_counter(&mut state, saga_id, 1); // lore 2
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        add_lore_counter(&mut state, saga_id, 1); // lore 3 → chapter III
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&lotus_id].zone(), Some(Zone::Battlefield),
+            "chapter III fetches Lotus Petal onto the battlefield");
+        recompute(&mut state);
+        check_state_based_actions(&mut state, 1);
+        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == saga_id),
+            "Urza's Saga is sacrificed after its final chapter");
+    }
+
+    #[test]
+    fn test_grant_ability_makes_mana_and_activated_abilities_usable() {
+        // CEMod::GrantAbility must make BOTH a mana ability and a non-mana
+        // activated ability usable, with mana-ness computed (CR 605.1a) — they
+        // land in mana_abilities() vs abilities() by classification, not bucket.
+        use crate::ir::ability::{Ability, AbilityKind, CostBody};
+        use crate::ir::action::{Action, ManaSpec, Who as IrWho};
+        use crate::ir::ce::CEMod;
+        use crate::ir::context::Ctx;
+        use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+        let activated = |body: Action| Ability {
+            kind: AbilityKind::Activated {
+                cost: CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) }),
+                target_spec: TargetSpec::None,
+                choice_spec: None,
+                body,
+                timing: ActivationTiming::Default,
+                activation_condition: None,
+                active_zone: ZoneKindSel::Battlefield,
+            },
+            text: None,
+        };
+        let mana = activated(Action::AddMana { who: IrWho::You, count: Expr::Num(1), spec: ManaSpec::Fixed(vec![]) });
+        let draw = activated(Action::Draw { who: IrWho::You, n: Expr::Num(1) });
+
+        // A creature whose static ability grants itself both abilities.
+        let mut granter = creature("Granter", 1, 1);
+        granter.abilities = vec![Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::GrantAbility(Box::new(mana)), CEMod::GrantAbility(Box::new(draw))],
+                scope: Some(Filter(Expr::Eq(Box::new(Expr::Ctx(Ctx::It)), Box::new(Expr::Ctx(Ctx::Source))))),
+                condition: None,
+            },
+            text: None,
+        }];
+        let mut state = make_state();
+        state.catalog.insert("Granter".into(), granter);
+        let id = add_default_perm(&mut state, PlayerId::Us, "Granter");
+        recompute(&mut state);
+
+        let def = state.def_of(id).expect("materialized");
+        assert_eq!(def.mana_abilities().len(), 1,
+            "granted {{T}}: Add {{C}} is classified (computed) as a usable mana ability");
+        assert_eq!(def.abilities().iter().filter(|a| a.ir_body.is_some()).count(), 1,
+            "granted {{T}}: draw is a usable (non-mana) activated ability");
     }
 
     /// Green Sun's Zenith finds a green creature and puts it on the battlefield.
@@ -3402,11 +3685,11 @@
 
         let equip_id = add_hand_card(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        // Fire the {1}{W}, {T} ability directly via its factory.
+        // Fire the {1}{W}, {T} ability's effect (the put-equipment ability).
         let def = state.catalog["Stoneforge Mystic"].clone();
-        let factory = def.as_creature().unwrap().abilities[0]
-            .ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, sfm_id).call(&mut state, 1, &[equip_id]);
+        let ability = &def.as_creature().unwrap().abilities[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, sfm_id);
+        eff.call(&mut state, 1, &[equip_id]);
 
         assert_eq!(state.objects[&equip_id].zone(), Some(Zone::Battlefield),
             "Equipment should be on the battlefield");
@@ -3465,8 +3748,8 @@
             CardKind::Artifact(a) => &a.abilities[0],
             _ => panic!("Batterskull is an artifact"),
         };
-        let factory = ability.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, bs_id).call(&mut state, 1, &[]);
+        let eff = build_ability_effect(ability, PlayerId::Us, bs_id);
+        eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.objects[&bs_id].zone(), Some(Zone::Hand { known: false }),
             "Batterskull should be in its owner's hand");
@@ -3493,8 +3776,9 @@
         assert!(!condition(PlayerId::Us, &state), "pitch cost unavailable on our own turn");
     }
 
-    /// eff_counter_and_exile sends the countered spell to Exile, not Graveyard.
-    /// Models Force of Negation's "exile it instead of putting it into its owner's graveyard".
+    /// Force of Negation's IR body (`Sequence([Counter, Exile])`) sends the countered
+    /// spell to Exile, not Graveyard — modeling "exile it instead of putting it into its
+    /// owner's graveyard."
     #[test]
     fn test_fon_counter_and_exile() {
         let mut state = make_state();
@@ -3525,7 +3809,7 @@
 
         // Fire FoN's counter-and-exile effect.
         let fon_id = state.alloc_id();
-        let effect = eff_counter_and_exile(PlayerId::Us, fon_id);
+        let effect = build_spell_effect(&catalog_card("Force of Negation"), PlayerId::Us, fon_id, 0, 0).1;
         effect.call(&mut state, 1, &[spell_id]);
 
         // Spell should be in Exile, not Graveyard; stack should be empty.
@@ -3570,7 +3854,7 @@
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState {
-                effect: Some(eff_counter_and_exile(PlayerId::Us, fon_id)),
+                effect: Some(build_spell_effect(&catalog_card("Force of Negation"), PlayerId::Us, fon_id, 0, 0).1),
                 chosen_targets: vec![y_id],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -3624,7 +3908,7 @@
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState {
-                effect: Some(eff_counter_and_exile(PlayerId::Us, fon_id)),
+                effect: Some(build_spell_effect(&catalog_card("Force of Negation"), PlayerId::Us, fon_id, 0, 0).1),
                 chosen_targets: vec![y_id],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -3703,8 +3987,8 @@
             CardKind::Artifact(a) => &a.abilities[0],
             _ => panic!("Meteor Sword is an artifact"),
         };
-        let factory = ability.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, sword_id).call(&mut state, 1, &[ours]);
+        let eff = build_ability_effect(ability, PlayerId::Us, sword_id);
+        eff.call(&mut state, 1, &[ours]);
         assert_eq!(state.permanent_bf(sword_id).and_then(|bf| bf.attached_to), Some(ours),
             "Meteor Sword attached to our creature");
 
@@ -3735,6 +4019,43 @@
             "Fury ETB should deal 4 damage to its target");
     }
 
+    /// Evoke (CR 702.74): cast for its evoke cost (logged as an `alt_cost` SpellCast),
+    /// Fury sacrifices itself on ETB.
+    #[test]
+    fn test_fury_evoke_sacrifices_itself() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Fury".into(), catalog_card("Fury"));
+
+        let fury_id = add_hand_card(&mut state, PlayerId::Us, "Fury");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: fury_id, mana_spent: false, alt_cost: true, x: 0, delved: Vec::new(),
+        });
+        change_zone(fury_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&fury_id].zone(), Some(Zone::Graveyard),
+            "Fury sacrifices itself when cast for its evoke cost");
+    }
+
+    /// A hardcast Fury (no `alt_cost`) stays on the battlefield.
+    #[test]
+    fn test_fury_hardcast_not_sacrificed() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Fury".into(), catalog_card("Fury"));
+
+        let fury_id = add_hand_card(&mut state, PlayerId::Us, "Fury");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: fury_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new(),
+        });
+        change_zone(fury_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&fury_id].zone(), Some(Zone::Battlefield),
+            "hardcast Fury stays on the battlefield");
+    }
+
     /// Engineered Explosives destroys each nonland permanent whose mana value
     /// equals its charge counters, read via `CountersOn(Source)` after sacrifice
     /// (IR `ForEach` + `Destroy`).
@@ -3757,8 +4078,8 @@
 
         let def = catalog_card("Engineered Explosives");
         let ability = match &def.kind { CardKind::Artifact(a) => &a.abilities[0], _ => panic!("EE is an artifact") };
-        let factory = ability.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, ee_id).call(&mut state, 1, &[]);
+        let eff = build_ability_effect(ability, PlayerId::Us, ee_id);
+        eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.objects[&mv2].zone(), Some(Zone::Graveyard), "MV 2 artifact destroyed (matches 2 charges)");
         assert_eq!(state.objects[&mv0].zone(), Some(Zone::Battlefield), "MV 0 artifact survives");
@@ -3795,43 +4116,52 @@
             "no delayed end-step trigger registered on a normal cast");
     }
 
-    /// When the spell is cast for its Warp alternative cost (alt_cost_index set),
-    /// ETB registers a delayed end-step trigger that exiles Quantum Riddler.
+    /// When cast for its Warp alternative cost, Quantum Riddler's ETB schedules a
+    /// delayed end-step exile. "Cast for warp" is read from the event log — its own
+    /// SpellCast this turn carried `alt_cost` (warp's {1}{U} spends mana, so it's the
+    /// `alt_cost` flag, not `!mana_spent`, that distinguishes warp from a hardcast).
     #[test]
     fn test_quantum_riddler_warp_registers_end_step_exile() {
         let mut state = make_state();
+        state.catalog = test_catalog();
         state.catalog.insert("Quantum Riddler".into(), catalog_card("Quantum Riddler"));
 
-        // Simulate "cast for warp cost": mark alt_cost_index before ETB fires.
-        state.resolving_costs_ctx.alt_cost_index = Some(0);
-        eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
-        let qr_id = state.objects.values()
-            .find(|o| o.catalog_key == "Quantum Riddler" && o.in_zone(Zone::Battlefield))
-            .map(|o| o.id).expect("Quantum Riddler on battlefield");
+        // Log a warp cast for Quantum Riddler, then move it to the battlefield (ETB).
+        let qr_id = add_hand_card(&mut state, PlayerId::Us, "Quantum Riddler");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: qr_id, mana_spent: true, alt_cost: true, x: 0, delved: Vec::new(),
+        });
+        change_zone(qr_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
-        // Resolve the warp trigger — it registers a delayed end-step exile.
-        let warp_ctx = state.pending_triggers.iter()
-            .find(|ctx| ctx.source_name == "Quantum Riddler (warp)").cloned()
-            .expect("warp trigger queued when alt_cost_index is set");
-        warp_ctx.effect.call(&mut state, 1, &[]);
-        assert_eq!(state.trigger_instances.len(), 1,
-            "delayed end-step exile trigger should be registered");
+        // Resolve the ETB triggers — the warp one schedules a delayed end-step exile.
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert_eq!(state.trigger_instances.len(), 1, "warp schedules a delayed end-step exile");
         assert_eq!(state.trigger_instances[0].expiry, Some(Expiry::OneShot));
 
-        // Clear ambient pending triggers from the ETB before firing end step.
-        state.pending_triggers.clear();
-
-        // Fire end step: the delayed trigger should produce an exile trigger context.
+        // Fire end step → the delayed trigger exiles Quantum Riddler.
         fire_event(
             GameEvent::EnteredStep { step: StepKind::End, active_player: PlayerId::Us },
             &mut state, 2, PlayerId::Us,
         );
-        let exile_ctx = state.pending_triggers.iter()
-            .find(|ctx| ctx.source_name == "Quantum Riddler (warp exile)").cloned()
-            .expect("end step produces warp exile trigger");
-        exile_ctx.effect.call(&mut state, 2, &[]);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 2, &[]); }
         assert_eq!(state.objects[&qr_id].zone(), Some(Zone::Exile { on_adventure: false }),
-            "Quantum Riddler should be exiled at end step when cast for warp cost");
+            "Quantum Riddler should be exiled at end step when cast for warp");
+    }
+
+    /// And a hardcast Quantum Riddler (no `alt_cost` in the log) is NOT exiled.
+    #[test]
+    fn test_quantum_riddler_hardcast_not_exiled() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Quantum Riddler".into(), catalog_card("Quantum Riddler"));
+
+        let qr_id = add_hand_card(&mut state, PlayerId::Us, "Quantum Riddler");
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: qr_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new(),
+        });
+        change_zone(qr_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        assert!(state.trigger_instances.is_empty(), "hardcast: no delayed warp exile scheduled");
     }
 
     // ── Section 61: Pre-War Formalwear (ETB reanimate + static buff) ──────────
@@ -3916,8 +4246,8 @@
             CardKind::Artifact(a) => &a.abilities[0],
             _ => panic!("Cryptic Coat is an artifact"),
         };
-        let factory = bounce.ability_factory.as_ref().unwrap().clone();
-        factory(PlayerId::Us, coat_id).call(&mut state, 1, &[]);
+        let eff = build_ability_effect(bounce, PlayerId::Us, coat_id);
+        eff.call(&mut state, 1, &[]);
         assert!(state.objects[&coat_id].in_zone(Zone::Hand { known: false }),
             "Cryptic Coat returned to owner's hand");
     }
@@ -4153,13 +4483,9 @@
             role: ObjectRole::Hand { known: false },
         });
 
-        // Build and call the Surgical Extraction effect targeting gy_id.
+        // Build and call the Surgical Extraction effect (IR body) targeting gy_id.
         let se_def = catalog_card("Surgical Extraction");
-        let factory = match &se_def.kind {
-            CardKind::Instant(s) => s.modes.as_ref().unwrap().get(0).unwrap().factory.clone(),
-            _ => panic!("not an instant"),
-        };
-        let eff = factory(PlayerId::Us, ObjId::UNSET, 0);
+        let eff = build_spell_effect(&se_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         eff.call(&mut state, 1, &[gy_id]);
 
         // All 3 Dark Ritual copies should be in exile.
@@ -4190,14 +4516,10 @@
         let victim_id = add_perm_with_def(&mut state, PlayerId::Opp, &victim_def, BattlefieldState::new());
         let survivor_id = add_perm_with_def(&mut state, PlayerId::Opp, &survivor_def, BattlefieldState::new());
 
-        // Invoke the factory directly with x=3 (strategy-chosen).
+        // Invoke the IR body directly with x=3 (strategy-chosen).
         let td_def = catalog_card("Toxic Deluge");
-        let factory = match &td_def.kind {
-            CardKind::Sorcery(s) => s.modes.as_ref().unwrap().get(0).unwrap().factory.clone(),
-            _ => panic!("not a sorcery"),
-        };
         let source_id = state.alloc_id();
-        let eff = factory(PlayerId::Us, source_id, 3);
+        let eff = build_spell_effect(&td_def, PlayerId::Us, source_id, 3, 0).1;
         eff.call(&mut state, 1, &[]);
 
         // One ContinuousInstance should be registered.
@@ -4495,8 +4817,11 @@
 
     #[test]
     fn test_disruptor_flute_suppresses_wasteland_ability() {
-        // Flute names "Wasteland"; Wasteland's non-mana abilities should have activatable=false.
-        // Underground Sea's mana abilities must still be available.
+        // Flute names "Wasteland". Its non-mana ability is restricted, but — per
+        // "unless they're mana abilities" — its mana ability is *not*. An unnamed
+        // card (Underground Sea) is unaffected. Modeled as an action-Restriction
+        // whose subject excludes mana abilities (a `Not(activating_mana_ability)`
+        // clause), not the materialized activatable flag.
         let mut state = make_state();
         state.catalog = test_catalog();
         etb_flute(&mut state, PlayerId::Us, "Wasteland");
@@ -4505,13 +4830,23 @@
         let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
         recompute(&mut state);
 
+        use crate::ir::ability::ActionKind::Activate;
+        use crate::ir::executor::{action_restricted, mana_ability_restricted};
+        // Wasteland: non-mana activation forbidden …
         assert!(
-            state.def_of(wl_id).map_or(false, |d| d.abilities().iter().all(|a| !a.activatable)),
-            "Wasteland non-mana abilities should be suppressed"
+            action_restricted(&state, Activate, wl_id),
+            "Wasteland's non-mana ability should be restricted by Flute"
         );
+        // … but its mana ability is exempt.
         assert!(
-            state.def_of(sea_id).map_or(false, |d| d.mana_abilities().iter().all(|a| a.activatable)),
-            "Underground Sea mana abilities should not be suppressed"
+            !mana_ability_restricted(&state, wl_id),
+            "Wasteland's mana ability must remain activatable (mana exemption)"
+        );
+        // Underground Sea is not the named card — restricted in neither sense.
+        assert!(
+            !action_restricted(&state, Activate, sea_id)
+                && !mana_ability_restricted(&state, sea_id),
+            "Underground Sea is unnamed and must not be restricted"
         );
     }
 
@@ -4536,9 +4871,13 @@
         });
         recompute(&mut state);
 
-        let d = state.def_of(bs_id).expect("Brainstorm should have materialized view");
-        assert_eq!(d.casting_cost_modifier, 0);
-        assert!(d.abilities().iter().all(|a| a.activatable), "Brainstorm abilities should not be suppressed");
+        let modifier = state.def_of(bs_id).expect("Brainstorm should have materialized view").casting_cost_modifier;
+        assert_eq!(modifier, 0, "Unnamed Brainstorm should not be taxed");
+        assert!(
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Activate, bs_id),
+            "Unnamed Brainstorm should not be restricted by Flute"
+        );
     }
 
     // ── 38. Surveil lands ──────────────────────────────────────────────────────
@@ -4792,25 +5131,61 @@
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        // Enter Grafdigger's Cage via change_zone (fires ETB → static CE installed).
-        let cage_id = state.alloc_id();
-        let cage_def = catalog_card("Grafdigger's Cage");
-        state.objects.insert(cage_id, GameObject {
-            id: cage_id,
-            catalog_key: "Grafdigger's Cage".to_string(),
-            owner: PlayerId::Opp,
-            controller: PlayerId::Opp,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::Hand { known: false },
-        });
+        // Grafdigger's Cage on the battlefield (controlled by Opp).
+        enter_cage(&mut state, PlayerId::Opp);
 
-        state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
-        change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
+        // Helper: drop a Dark Ritual into `role` and return its id.
+        let put = |state: &mut SimState, role: ObjectRole| -> ObjId {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Dark Ritual".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                is_token: false,
+                materialized: None,
+                counters: HashMap::new(),
+                ci_timestamp: 0,
+                role,
+            });
+            id
+        };
+        let gy_id = put(&mut state, ObjectRole::Graveyard);
+        let lib_id = put(&mut state, ObjectRole::Library);
+        let exile_id = put(&mut state, ObjectRole::Exile { on_adventure: false });
+        recompute(&mut state);
 
-        // Place a card in graveyard.
+        // "Players can't cast spells from graveyards or libraries." — an action-
+        // Restriction (CR 101.2 "can't beats can"), consulted at legal-cast
+        // enumeration, *not* the castable flag (GY/library cards already default to
+        // castable=false by zone, so that flag can't distinguish Cage's effect).
+        assert!(
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
+            "Cage should restrict casting from the graveyard"
+        );
+        assert!(
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, lib_id),
+            "Cage should restrict casting from the library"
+        );
+        // Exile ≠ GY/library: the zone-scoped subject simply doesn't match, so a
+        // Dauthi-style exile cast is *not* forbidden by Cage.
+        assert!(
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, exile_id),
+            "Cage must not restrict casting from exile"
+        );
+    }
+
+    #[test]
+    fn test_grafdiggers_cage_restriction_removed_on_ltb() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let cage_id = enter_cage(&mut state, PlayerId::Us);
+
+        // A card in the graveyard.
         let gy_id = state.alloc_id();
         state.objects.insert(gy_id, GameObject {
             id: gy_id,
@@ -4823,71 +5198,24 @@
             ci_timestamp: 0,
             role: ObjectRole::Graveyard,
         });
-
         recompute(&mut state);
 
-        // Cage's static CE should set castable=false on graveyard cards.
+        // While Cage is on the battlefield, the cast-Restriction is active.
         assert!(
-            !state.def_of(gy_id).map_or(true, |d| d.castable),
-            "Cage should prevent casting from graveyard (castable=false)"
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
+            "GY card should be cast-restricted while Cage is on the battlefield"
         );
 
-        // A card in exile should NOT be blocked by Cage (Cage only blocks GY/library).
-        let exile_id = state.alloc_id();
-        state.objects.insert(exile_id, GameObject {
-            id: exile_id,
-            catalog_key: "Dark Ritual".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::Exile { on_adventure: false },
-        });
-        recompute(&mut state);
-
-        // Exile cards default to castable=false (zone default), but Cage should NOT
-        // be the reason — if a Dauthi CE set castable=true, Cage wouldn't override it.
-        // Here we just verify Cage doesn't affect exile zone beyond the zone default.
-        assert!(
-            !state.def_of(exile_id).map_or(true, |d| d.castable),
-            "Exile card defaults to not castable (zone default, not Cage)"
-        );
-    }
-
-    #[test]
-    fn test_grafdiggers_cage_ci_removed_on_ltb() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-
-        // Enter Cage then remove it.
-        let cage_id = state.alloc_id();
-        let cage_def = catalog_card("Grafdigger's Cage");
-        state.objects.insert(cage_id, GameObject {
-            id: cage_id,
-            catalog_key: "Grafdigger's Cage".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::Hand { known: false },
-        });
-
-        state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
-        change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
-        recompute(&mut state);
-
-        // Destroy Cage.
+        // Cage leaves the battlefield → `action_restricted` walks BF sources only,
+        // so the restriction lifts (no lingering continuous effect to clean up).
         change_zone(cage_id, ZoneId::Graveyard, &mut state, 2, PlayerId::Us);
-
-        // No CI with source == cage_id should remain.
-        let ci_count = state.continuous_instances.iter()
-            .filter(|ci| ci.source_id == cage_id)
-            .count();
-        assert_eq!(ci_count, 0, "Cage CI should be removed when Cage leaves the battlefield");
+        recompute(&mut state);
+        assert!(
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, gy_id),
+            "Cast-Restriction should lift once Cage leaves the battlefield"
+        );
     }
 
     /// Helper: put Cage on the battlefield for `who` and return its id.
@@ -5055,8 +5383,6 @@
     fn test_ee_etb_places_charge_counters() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // Simulate casting EE with chosen_x = 2 by setting resolving_costs_ctx before ETB.
-        state.resolving_costs_ctx.chosen_x = 2;
         assert!(state.catalog.contains_key("Engineered Explosives"), "EE must be in catalog");
         let ee_id = state.alloc_id();
         state.objects.insert(ee_id, GameObject {
@@ -5070,12 +5396,18 @@
             ci_timestamp: 0,
             role: ObjectRole::Hand { known: false },
         });
+        // EE was cast with X=2 (sunburst). The announced X lives on the logged
+        // cast; the ETB replacement reads it via `ThisCast(X)`.
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: ee_id, mana_spent: true, alt_cost: false,
+            x: 2, delved: Vec::new(),
+        });
 
         change_zone(ee_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         assert_eq!(
             state.objects[&ee_id].counters.get(&CounterType::Charge).copied().unwrap_or(0),
             2,
-            "EE should enter with 2 charge counters when chosen_x = 2"
+            "EE should enter with 2 charge counters when cast with X = 2"
         );
     }
 
@@ -5103,11 +5435,10 @@
         };
         let mv3_id = add_perm_with_def(&mut state, PlayerId::Opp, &mv3_def, BattlefieldState::new());
         // Manually fire the ability effect (skip cost payment for the test).
-        let ability_factory = ee_def.abilities().iter()
+        let ability = ee_def.abilities().iter()
             .find(|ab| matches!(ab.source_zone, SourceZone::Battlefield))
-            .and_then(|ab| ab.ability_factory.clone())
             .expect("EE must have a battlefield ability");
-        let eff = ability_factory(PlayerId::Us, ee_id);
+        let eff = build_ability_effect(ability, PlayerId::Us, ee_id);
         eff.call(&mut state, 1, &[]);
         assert_eq!(state.objects[&mv2_id].zone(), Some(Zone::Graveyard),
             "MV 2 permanent should be destroyed by EE[2]");
@@ -5145,19 +5476,22 @@
         state.catalog.insert("TestSorcery2".to_string(), sorcery_def);
         let spell_id = add_hand_card(&mut state, PlayerId::Opp, "TestSorcery2");
 
-        // With 1 land, MV 2 > 1 → Lavinia CE sets castable=false.
+        // With 1 land, MV 2 > 1 → Lavinia's action-Restriction forbids the cast
+        // (CR 101.2; consulted at legal-cast enumeration, not via the castable flag).
         recompute(&mut state);
         assert!(
-            !state.def_of(spell_id).map_or(true, |d| d.castable),
-            "Lavinia should set castable=false for MV-2 noncreature spell when opponent has only 1 land"
+            crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, spell_id),
+            "Lavinia should restrict casting an MV-2 noncreature spell when opponent has only 1 land"
         );
 
         // Add a second land so opponent now has 2 lands — MV 2 is no longer > 2.
         make_land(&mut state, PlayerId::Opp, "Swamp", false);
         recompute(&mut state);
         assert!(
-            state.def_of(spell_id).map_or(false, |d| d.castable),
-            "Lavinia should allow MV-2 noncreature spell when opponent has 2 lands"
+            !crate::ir::executor::action_restricted(
+                &state, crate::ir::ability::ActionKind::Cast, spell_id),
+            "Lavinia should allow an MV-2 noncreature spell when opponent has 2 lands"
         );
     }
 
@@ -5276,46 +5610,26 @@
         assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Graveyard));
     }
 
-    /// "Other creatures you control have Ward—Pay 2 life."
-    /// When an opponent's spell targets another creature Us controls, the granted Ward trigger fires.
+    /// "Other creatures you control have Ward—Pay 2 life." A vanilla creature (no
+    /// self-ward) receives the granted Ward, which fires when an opponent targets it.
+    /// (`opp_spell_targeting` / `ward_cost_pay2` live in §46b below.)
     #[test]
     fn test_hexing_squelcher_grants_ward_to_other_creature() {
         let mut state = make_state();
         state.catalog = test_catalog();
 
         enter_hexing_squelcher(&mut state, PlayerId::Us);
-        // A second creature for Us (the one that should receive the granted Ward).
-        let other_creature_id = enter_hexing_squelcher(&mut state, PlayerId::Us);
-
+        let other_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
         recompute(&mut state);
 
-        // Opponent's spell targeting our other creature.
-        let spell_id = state.alloc_id();
-        state.objects.insert(spell_id, GameObject {
-            id: spell_id,
-            catalog_key: "Brainstorm".to_string(),
-            owner: PlayerId::Opp,
-            controller: PlayerId::Opp,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState {
-                effect: None,
-                chosen_targets: vec![other_creature_id],
-                is_back_face: false,
-                costs_paid_ctx: CostsPaidCtx::default(),
-            }),
-        });
-
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, other_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Opp,
         );
-
         assert!(
-            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Hexing Squelcher (Ward grant)"),
-            "Ward trigger should fire for other creature targeted by opponent spell"
+            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Grizzly Bears"),
+            "granted Ward should fire for the other creature targeted by an opponent's spell"
         );
     }
 
@@ -5326,91 +5640,223 @@
         state.catalog = test_catalog();
 
         enter_hexing_squelcher(&mut state, PlayerId::Us);
-        let other_creature_id = enter_hexing_squelcher(&mut state, PlayerId::Us);
-
+        let other_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
         recompute(&mut state);
 
-        // Us's own spell targeting our creature — Ward should NOT fire.
-        let spell_id = state.alloc_id();
-        state.objects.insert(spell_id, GameObject {
-            id: spell_id,
-            catalog_key: "Brainstorm".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState {
-                effect: None,
-                chosen_targets: vec![other_creature_id],
-                is_back_face: false,
-                costs_paid_ctx: CostsPaidCtx::default(),
-            }),
-        });
-
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Us, other_id); // Us's own spell
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
-
         assert!(
-            !state.pending_triggers.iter().any(|ctx| ctx.source_name == "Hexing Squelcher (Ward grant)"),
-            "Granted Ward should not fire for controller's own spells"
+            !state.pending_triggers.iter().any(|ctx| ctx.source_name == "Grizzly Bears"),
+            "granted Ward should not fire for the controller's own spell"
         );
     }
 
-    /// Granted Ward applies to creatures that enter the battlefield AFTER Hexing Squelcher.
-    /// recompute() runs after every fire_event ZoneChange, so new arrivals pick up the CE.
+    /// Granted Ward applies to creatures that enter AFTER Hexing Squelcher: recompute
+    /// (which fire_event runs each tick) lands the IR ability on `granted_abilities`.
     #[test]
     fn test_hexing_squelcher_ward_grant_applies_to_creature_that_enters_later() {
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        // Squelcher enters first.
         enter_hexing_squelcher(&mut state, PlayerId::Us);
         recompute(&mut state);
 
-        // A new creature arrives later (simulates a real ETB via fire_event; here we add
-        // directly then call recompute, which is what fire_event does at each top-level tick).
-        let late_creature_id = enter_hexing_squelcher(&mut state, PlayerId::Us);
+        // A new creature arrives later.
+        let late_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
         recompute(&mut state);
 
-        // Verify the late creature's materialized def has the granted trigger.
-        let mat = state.def_of(late_creature_id).expect("materialized def present");
+        let mat = state.def_of(late_id).expect("materialized def present");
         assert!(
-            !mat.granted_trigger_defs.is_empty(),
-            "late-arriving creature should have Ward trigger in granted_trigger_defs after recompute"
+            !mat.granted_abilities.is_empty(),
+            "late-arriving creature should carry the granted Ward in granted_abilities"
         );
 
-        // Opponent's spell targeting the late creature: Ward should fire.
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, late_id);
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
+            &mut state, 1, PlayerId::Opp,
+        );
+        assert!(
+            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Grizzly Bears"),
+            "granted Ward should fire for the late-arriving creature targeted by an opponent"
+        );
+    }
+
+    // ── §46b: IR Ward + CEMod::GrantAbility primitives ─────────────────────────
+
+    /// Build a `PayLife(2)` action — the canonical ward cost.
+    fn ward_cost_pay2() -> crate::ir::action::Action {
+        crate::ir::action::Action::PayLife {
+            who: crate::ir::action::Who::You,
+            amount: crate::ir::expr::Expr::Num(2),
+        }
+    }
+
+    /// Insert an opponent-controlled spell on the stack targeting `target`.
+    fn opp_spell_targeting(state: &mut SimState, caster: PlayerId, target: ObjId) -> ObjId {
         let spell_id = state.alloc_id();
         state.objects.insert(spell_id, GameObject {
             id: spell_id,
             catalog_key: "Brainstorm".to_string(),
-            owner: PlayerId::Opp,
-            controller: PlayerId::Opp,
+            owner: caster,
+            controller: caster,
             is_token: false,
             materialized: None,
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState {
                 effect: None,
-                chosen_targets: vec![late_creature_id],
+                chosen_targets: vec![target],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
         });
+        state.stack.push(spell_id);
+        spell_id
+    }
+
+    /// IR Ward (printed directly): an opponent's spell targeting the holder triggers
+    /// it; resolving the trigger runs `Action::Ward`, and the default strategy pays,
+    /// so the caster loses 2 life and the spell survives.
+    #[test]
+    fn test_ir_ward_triggers_and_taxes_opponent() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mut bear = creature("Warded Bear", 2, 2);
+        bear.abilities = vec![crate::card_defs::ir_ward(ward_cost_pay2())];
+        let bear_id = add_perm_with_def(&mut state, PlayerId::Us, &bear, BattlefieldState::new());
+        recompute(&mut state);
+
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, bear_id);
+        let opp_life = state.player(PlayerId::Opp).life;
 
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Opp,
         );
+        let ctx = state.pending_triggers.iter().position(|c| c.source_name == "Warded Bear")
+            .map(|i| state.pending_triggers.remove(i))
+            .expect("IR Ward should fire for an opponent's spell targeting the holder");
 
-        assert!(
-            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Hexing Squelcher (Ward grant)"),
-            "Ward trigger should fire for late-arriving creature targeted by opponent spell"
+        // Resolve the ward trigger — default strategy pays the cost.
+        ctx.effect.call(&mut state, 1, &[]);
+        assert_eq!(state.player(PlayerId::Opp).life, opp_life - 2,
+            "ward: targeting player pays 2 life");
+        assert!(state.stack.contains(&spell_id), "ward: spell survives when the cost is paid");
+    }
+
+    /// IR Ward does not trigger on the holder's controller's own spells (CR 702.21
+    /// — "a spell or ability an opponent controls").
+    #[test]
+    fn test_ir_ward_ignores_own_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mut bear = creature("Warded Bear", 2, 2);
+        bear.abilities = vec![crate::card_defs::ir_ward(ward_cost_pay2())];
+        let bear_id = add_perm_with_def(&mut state, PlayerId::Us, &bear, BattlefieldState::new());
+        recompute(&mut state);
+
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Us, bear_id); // Us casts it
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
+            &mut state, 1, PlayerId::Us,
         );
+        assert!(!state.pending_triggers.iter().any(|c| c.source_name == "Warded Bear"),
+            "ward must not fire for the controller's own spell");
+    }
+
+    /// `CEMod::GrantAbility`: a static "other creatures you control have Ward" grants
+    /// the IR ward to a vanilla creature, which then triggers on opponent targeting.
+    #[test]
+    fn test_ir_grant_ability_grants_ward_to_other_creature() {
+        use crate::ir::ability::{Ability, AbilityKind};
+        use crate::ir::ce::CEMod;
+        use crate::ir::context::Ctx;
+        use crate::ir::expr::{Expr, Filter};
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Granter: "Other creatures you control have Ward—Pay 2 life."
+        let mut granter = creature("Ward Granter", 1, 1);
+        granter.abilities = vec![Ability {
+            kind: AbilityKind::Static {
+                mods: vec![CEMod::GrantAbility(Box::new(crate::card_defs::ir_ward(ward_cost_pay2())))],
+                scope: Some(Filter(Expr::And(
+                    Box::new(Expr::Eq(
+                        Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                        Box::new(Expr::Ctx(Ctx::Controller)),
+                    )),
+                    Box::new(Expr::Not(Box::new(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::It)),
+                        Box::new(Expr::Ctx(Ctx::Source)),
+                    )))),
+                ))),
+                condition: None,
+            },
+            text: Some("Other creatures you control have Ward—Pay 2 life."),
+        }];
+        add_perm_with_def(&mut state, PlayerId::Us, &granter, BattlefieldState::new());
+        let vanilla_id = add_default_perm(&mut state, PlayerId::Us, "Grizzly Bears");
+        recompute(&mut state);
+
+        // The grant landed on the vanilla creature's materialized def.
+        let mat = state.def_of(vanilla_id).expect("materialized def");
+        assert!(!mat.granted_abilities.is_empty(),
+            "vanilla creature should carry the granted Ward ability");
+
+        // Opponent spell targeting the vanilla creature → granted ward fires.
+        let spell_id = opp_spell_targeting(&mut state, PlayerId::Opp, vanilla_id);
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Opp, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
+            &mut state, 1, PlayerId::Opp,
+        );
+        assert!(state.pending_triggers.iter().any(|c| c.source_name == "Grizzly Bears"),
+            "granted Ward should fire for the vanilla creature targeted by an opponent");
+    }
+
+    // ── §46c: Kaito animation (BecomeCreature + ActivePlayer/LoyaltyOf) ─────────
+
+    /// "During your turn, as long as Kaito has one or more loyalty counters, he's a
+    /// 3/4 Ninja creature with hexproof." Animates only when both conditions hold.
+    #[test]
+    fn test_kaito_animates_only_on_your_turn_with_loyalty() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let kaito = catalog_card("Kaito, Bane of Nightmares");
+
+        let mut bf = BattlefieldState::new();
+        bf.loyalty = 4;
+        let kaito_id = add_perm_with_def(&mut state, PlayerId::Us, &kaito, bf);
+
+        // Your turn + loyalty > 0 → 3/4 Ninja creature with hexproof, no longer a PW.
+        state.current_ap = state.player_id(PlayerId::Us);
+        recompute(&mut state);
+        let def = state.def_of(kaito_id).expect("materialized def");
+        assert!(def.is_creature(), "Kaito should be a creature on your turn with loyalty");
+        let c = def.as_creature().expect("animated Kaito is a creature");
+        assert_eq!((c.power(), c.toughness()), (3, 4), "animated Kaito is 3/4");
+        assert!(def.has_subtype("Ninja"), "animated Kaito is a Ninja");
+        assert!(def.has_keyword(Keyword::Hexproof), "animated Kaito has hexproof");
+        assert!(!def.types.contains(&CardType::Planeswalker),
+            "per the ruling, animated Kaito stops being a planeswalker");
+
+        // Opponent's turn → not animated.
+        state.current_ap = state.player_id(PlayerId::Opp);
+        recompute(&mut state);
+        assert!(!state.def_of(kaito_id).unwrap().is_creature(),
+            "Kaito is not a creature on the opponent's turn");
+
+        // Your turn but loyalty 0 → not animated.
+        state.current_ap = state.player_id(PlayerId::Us);
+        if let Some(bf) = state.permanent_bf_mut(kaito_id) { bf.loyalty = 0; }
+        recompute(&mut state);
+        assert!(!state.def_of(kaito_id).unwrap().is_creature(),
+            "Kaito with 0 loyalty is not a creature even on your turn");
     }
 
     /// Long Goodbye's "This spell can't be countered" still works after the ProhibitionDef refactor.
@@ -5439,6 +5885,20 @@
 
     // ── §48: Show and Tell ────────────────────────────────────────────────────
 
+    /// Resolve the real Show and Tell `OnResolve` body (the IR `SimultaneousPut`)
+    /// as `caster`.
+    fn run_show_and_tell(state: &mut SimState, caster: PlayerId) {
+        let snt = catalog_card("Show and Tell");
+        let body = match &snt.abilities[0].kind {
+            crate::ir::ability::AbilityKind::OnResolve { modes } => modes[0].body.clone(),
+            _ => panic!("Show and Tell should carry an OnResolve body"),
+        };
+        crate::ir::executor::execute(
+            &body, state,
+            &crate::ir::executor::BindEnv::new().with_controller(caster),
+        );
+    }
+
     #[test]
     fn test_show_and_tell_caster_puts_creature_on_battlefield() {
         let mut state = make_state();
@@ -5447,31 +5907,18 @@
         // Caster puts its only candidate (the creature); opp has none → declines.
         state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).put_first_candidate()));
 
-        eff_each_may_put(
-            PlayerId::Us,
-            ir_or(
-                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
-                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
-            ),
-        ).call(&mut state, 1, &[]);
+        run_show_and_tell(&mut state, PlayerId::Us);
 
         assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Battlefield),
-            "Show and Tell should put chosen creature onto the battlefield");
+            "Show and Tell should put the chosen creature onto the battlefield");
     }
 
     #[test]
     fn test_show_and_tell_no_candidates_no_crash() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // No cards in hand — should not panic.
-        eff_each_may_put(
-            PlayerId::Us,
-            ir_or(
-                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
-                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
-            ),
-        ).call(&mut state, 1, &[]);
-        // No assertions needed — just verifying no panic.
+        // No cards in either hand — should not panic.
+        run_show_and_tell(&mut state, PlayerId::Us);
     }
 
     // ── §49: Spell Pierce / tax counters ──────────────────────────────────────
@@ -5665,12 +6112,12 @@
         // Flusterstorm cast. Storm body evaluates as EventCount(ThisTurn,
         // SpellCast caster=Us) - 1, so 3 logged → 2 copies.
         state.event_log.push(1, GameEvent::SpellCast {
-            caster: PlayerId::Us, card_id: spell_a, mana_spent: true,
+            caster: PlayerId::Us, card_id: spell_a, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new(),
         });
         state.event_log.push(1, GameEvent::SpellCast {
-            caster: PlayerId::Us, card_id: spell_b, mana_spent: true,
+            caster: PlayerId::Us, card_id: spell_b, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new(),
         });
-        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() };
         state.event_log.push(1, event.clone());
 
         // Fire the SpellCast event — storm trigger should fire.
@@ -5719,7 +6166,7 @@
         state.stack.push(fluster_id);
 
         // Only the Flusterstorm cast itself is in the log — no prior spells.
-        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() };
         state.event_log.push(1, event.clone());
 
         let (triggers, _) = fire_triggers(&event, &state);
@@ -5830,7 +6277,7 @@
         // Spell counts come from the event log (the spells_cast_this_turn counter
         // was removed). Log Us casts; the condition reads "opponent of Opp" = Us.
         let log_us_cast = |state: &mut SimState| state.event_log.push(
-            1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
+            1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() });
 
         // Opponent has cast 2 spells — condition false for Opp caster.
         log_us_cast(&mut state);
@@ -6716,7 +7163,7 @@
         state.stack.push(spell_id);
         consume_latent_spell_mod(&mut state, PlayerId::Us, spell_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
 
@@ -6751,7 +7198,7 @@
         state.stack.push(spell1_id);
         consume_latent_spell_mod(&mut state, PlayerId::Us, spell1_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell1_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell1_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
         assert!(state.latent_spell_mods.is_empty(), "LatentSpellMod consumed by first spell");
@@ -6762,7 +7209,7 @@
         state.stack.push(spell2_id);
         consume_latent_spell_mod(&mut state, PlayerId::Us, spell2_id);
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell2_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell2_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
 
@@ -7109,18 +7556,17 @@
 
         recompute(&mut state);
 
-        // Opponent's artifact: mana abilities should be suppressed.
-        let opp_def = state.def_of(opp_petal_id).expect("opponent petal should have materialized def");
+        // Opponent's artifact: activation restricted by Karn (consulted at the
+        // activation-legality gate, not via the materialized activatable flag).
         assert!(
-            opp_def.mana_abilities().iter().all(|ma| !ma.activatable),
-            "Karn should suppress mana abilities on opponent's artifacts"
+            crate::ir::executor::mana_ability_restricted(&state, opp_petal_id),
+            "Karn should restrict activating opponent's artifact abilities"
         );
 
-        // Our own artifact: mana abilities should be unaffected.
-        let our_def = state.def_of(our_petal_id).expect("our petal should have materialized def");
+        // Our own artifact: not restricted (Karn is asymmetric).
         assert!(
-            our_def.mana_abilities().iter().all(|ma| ma.activatable),
-            "Karn should NOT suppress mana abilities on our own artifacts"
+            !crate::ir::executor::mana_ability_restricted(&state, our_petal_id),
+            "Karn should NOT restrict our own artifacts"
         );
     }
 
@@ -7197,7 +7643,7 @@
 
         // Fire SpellCast event.
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
@@ -7252,7 +7698,7 @@
         };
 
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
 
@@ -7320,12 +7766,12 @@
         state.catalog = test_catalog();
 
         let def = catalog_card("Mishra's Bauble");
-        let _bauble_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        let bauble_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
         recompute(&mut state);
 
-        // Activate the ability (tap + sac → create delayed trigger).
+        // Activate the ability (tap + sac → schedule delayed trigger).
         let ability = &def.abilities()[0];
-        let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
+        let eff = build_ability_effect(ability, PlayerId::Us, bauble_id);
         eff.call(&mut state, 1, &[]);
 
         assert_eq!(state.trigger_instances.len(), 1,
@@ -7340,7 +7786,7 @@
         );
         assert_eq!(state.pending_triggers.len(), 1,
             "upkeep should produce one draw trigger");
-        assert_eq!(state.pending_triggers[0].source_name, "Mishra's Bauble (delayed draw)");
+        assert_eq!(state.pending_triggers[0].source_name, "Mishra's Bauble (delayed)");
         assert!(state.trigger_instances.is_empty(),
             "OneShot trigger should be removed after firing");
 
@@ -7538,10 +7984,15 @@
         let petal_id = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");
         recompute(&mut state);
 
+        // Null Rod restricts activating any artifact's abilities (symmetric), consulted
+        // at the activation-legality gate — incl. mana abilities (CR 605.1a). The ability
+        // still *exists* on the def; it just can't be activated.
         let def = state.def_of(petal_id).expect("Lotus Petal should have materialized def");
-        let ma = def.mana_abilities();
-        assert!(!ma.is_empty(), "Lotus Petal should still have mana abilities listed");
-        assert!(!ma[0].activatable, "Lotus Petal mana ability should not be activatable under Null Rod");
+        assert!(!def.mana_abilities().is_empty(), "Lotus Petal should still have mana abilities listed");
+        assert!(
+            crate::ir::executor::mana_ability_restricted(&state, petal_id),
+            "Lotus Petal's abilities should be restricted under Null Rod"
+        );
     }
 
     // ── Meltdown ──────────────────────────────────────────────────────────────
@@ -7788,120 +8239,64 @@
         }
     }
 
-    #[test]
-    fn test_cori_flurry_second_spell() {
-        let mut state = make_state();
-        state.catalog = test_catalog();
-
-        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-
-        // Log one prior spell this turn; the SpellCast fired below is the 2nd.
-        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
-
-        let spell_id = {
-            let id = state.alloc_id();
-            state.objects.insert(id, GameObject {
+    /// Cast a spell for `who`: put it on the stack and fire SpellCast (which logs
+    /// it to the event log), then resolve any triggers. Cori's flurry counts the
+    /// controller's logged SpellCast events this turn, so real casts drive it.
+    fn cori_cast_spell(state: &mut SimState, who: PlayerId) {
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
             id,
             catalog_key: "Ponder".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
+            owner: who,
+            controller: who,
             is_token: false,
             materialized: None,
             counters: HashMap::new(),
             ci_timestamp: 0,
             role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
         });
-            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-            id
-        };
+        state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+        fire_event(GameEvent::SpellCast { caster: who, card_id: id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() }, state, 1, who);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(state, 1, &[]); }
+    }
 
-        fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
-            &mut state, 1, PlayerId::Us,
-        );
-        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+    fn cori_monk_count(state: &SimState) -> usize {
+        state.permanents_of(PlayerId::Us).filter(|c| c.catalog_key == "Monk Token").count()
+    }
 
-        // A Monk Token should now exist on the battlefield.
-        let monk_count = state.permanents_of(PlayerId::Us)
-            .filter(|c| c.catalog_key == "Monk Token")
-            .count();
-        assert_eq!(monk_count, 1, "flurry should create exactly one Monk Token");
+    #[test]
+    fn test_cori_flurry_second_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+
+        cori_cast_spell(&mut state, PlayerId::Us); // 1st — no flurry
+        assert_eq!(cori_monk_count(&state), 0, "no flurry on the first spell");
+        cori_cast_spell(&mut state, PlayerId::Us); // 2nd — flurry fires
+        assert_eq!(cori_monk_count(&state), 1, "flurry creates exactly one Monk on the second spell");
     }
 
     #[test]
     fn test_cori_flurry_not_first_spell() {
         let mut state = make_state();
         state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        // No prior spells this turn; the SpellCast fired below is the 1st.
-
-        let spell_id = {
-            let id = state.alloc_id();
-            state.objects.insert(id, GameObject {
-            id,
-            catalog_key: "Ponder".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-        });
-            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-            id
-        };
-
-        fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
-            &mut state, 1, PlayerId::Us,
-        );
-        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
-
-        let monk_count = state.permanents_of(PlayerId::Us)
-            .filter(|c| c.catalog_key == "Monk Token")
-            .count();
-        assert_eq!(monk_count, 0, "flurry should NOT trigger on first spell");
+        cori_cast_spell(&mut state, PlayerId::Us);
+        assert_eq!(cori_monk_count(&state), 0, "flurry should NOT trigger on the first spell");
     }
 
     #[test]
     fn test_cori_flurry_not_third_spell() {
         let mut state = make_state();
         state.catalog = test_catalog();
+        add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
-        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        // Log two prior spells this turn; the SpellCast fired below is the 3rd.
-        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
-        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: ObjId::UNSET, mana_spent: true });
-
-        let spell_id = {
-            let id = state.alloc_id();
-            state.objects.insert(id, GameObject {
-            id,
-            catalog_key: "Ponder".to_string(),
-            owner: PlayerId::Us,
-            controller: PlayerId::Us,
-            is_token: false,
-            materialized: None,
-            counters: HashMap::new(),
-            ci_timestamp: 0,
-            role: ObjectRole::StackSpell(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-        });
-            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
-            id
-        };
-
-        fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
-            &mut state, 1, PlayerId::Us,
-        );
-        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
-
-        let monk_count = state.permanents_of(PlayerId::Us)
-            .filter(|c| c.catalog_key == "Monk Token")
-            .count();
-        assert_eq!(monk_count, 0, "flurry should NOT trigger on third spell");
+        cori_cast_spell(&mut state, PlayerId::Us); // 1st
+        cori_cast_spell(&mut state, PlayerId::Us); // 2nd → flurry
+        cori_cast_spell(&mut state, PlayerId::Us); // 3rd → no flurry
+        // Exactly one Monk: the flurry fired only on the second spell.
+        assert_eq!(cori_monk_count(&state), 1, "flurry fires only on the second spell, not the third");
     }
 
     // ── The Fantasticar: pop on the EXACTLY fourth noncreature spell ────────────
@@ -7927,13 +8322,13 @@
     /// Log a prior noncreature SpellCast by Us this turn (counts toward the 4th).
     fn fanta_log_prior(state: &mut SimState, name: &str) {
         let id = fanta_mk_spell(state, name);
-        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: id, mana_spent: true });
+        state.event_log.push(1, GameEvent::SpellCast { caster: PlayerId::Us, card_id: id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() });
     }
 
     /// Cast (fire) a SpellCast for `name` and resolve any triggers it produces.
     fn fanta_cast(state: &mut SimState, name: &str) {
         let id = fanta_mk_spell(state, name);
-        fire_event(GameEvent::SpellCast { caster: PlayerId::Us, card_id: id, mana_spent: true }, state, 1, PlayerId::Us);
+        fire_event(GameEvent::SpellCast { caster: PlayerId::Us, card_id: id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() }, state, 1, PlayerId::Us);
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(state, 1, &[]); }
     }
 
@@ -8053,7 +8448,7 @@
         };
 
         fire_event(
-            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true, alt_cost: false, x: 0, delved: Vec::new() },
             &mut state, 1, PlayerId::Us,
         );
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }

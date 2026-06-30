@@ -19,6 +19,12 @@ fn it() -> Expr { Expr::Ctx(Ctx::It) }
 /// Matches everything.
 pub(crate) fn ir_any() -> Filter { Filter(Expr::Bool(true)) }
 
+/// `It == Source` — the candidate is the ability's own source. The idiom for a
+/// self-scoped trigger ("when this enters / this attacks") or self-scoped CE.
+pub(crate) fn ir_self() -> Filter {
+    Filter(Expr::Eq(Box::new(it()), Box::new(Expr::Ctx(Ctx::Source))))
+}
+
 /// `type ∈ Types(It)`.
 pub(crate) fn ir_type(t: CardType) -> Filter {
     Filter(Expr::Contains(Box::new(Expr::TypeLit(t)), Box::new(Expr::Types(Box::new(it())))))
@@ -37,11 +43,6 @@ pub(crate) fn ir_subtype(s: &str) -> Filter {
 
 /// A token.
 pub(crate) fn ir_token() -> Filter { Filter(Expr::IsToken(Box::new(it()))) }
-
-/// Exactly the object with id `id` (`It == ObjLit(id)`).
-pub(crate) fn ir_obj(id: ObjId) -> Filter {
-    Filter(Expr::Eq(Box::new(it()), Box::new(Expr::ObjLit(id))))
-}
 
 /// Evaluate a `Filter` against object `id` with `It`/`Source` = `id` and the
 /// controller bound to `id`'s controller. The standard way to check a filter

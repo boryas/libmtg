@@ -60,6 +60,16 @@ pub struct ChoiceOption {
     pub action: Box<Action>,
 }
 
+/// The closed vocabulary of "as ~ enters, choose ..." ETB choices (CR 614.12).
+/// Maps to a `ChoiceRequest` when the action runs; the result is stored in the
+/// permanent's `etb_choice` and read back via `Expr::ChosenColor`/`ChosenName`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EtbChoiceKind {
+    Color,
+    CreatureType,
+    CardName,
+}
+
 /// One-shot mutations.
 #[derive(Clone)]
 pub enum Action {
@@ -113,6 +123,14 @@ pub enum Action {
     // ── stack / casting ──────────────────────────────────────────────────
     Counter {
         target: Expr,
+    },
+    /// Ward (CR 702.21): the body of a ward trigger. The triggering spell
+    /// (`Ctx::Var("triggered_obj")`) is countered unless its controller
+    /// (`triggered_actor`) pays `cost`. `cost` is an `Action` (a payment, e.g.
+    /// `PayLife(2)` or `PayMana`), the same shape `ward_pay_or_counter` consumes.
+    /// Bridges to that helper, which runs the opponent's pay-or-decline decision.
+    Ward {
+        cost: Box<Action>,
     },
     /// "Offer to cast X" — subsumes cast-without-paying, flashback, cascade,
     /// madness, Snapcaster, etc. All are `OfferCast` with different
@@ -274,6 +292,42 @@ pub enum Action {
         /// effect-resolution case — the chooser is asked via `resolve_choice`.
         bind_as: Option<&'static str>,
     },
+    /// "As ~ enters, choose a color/creature type/card name" (CR 614.12). Asks
+    /// the source's controller for the choice and records it in the source
+    /// permanent's `etb_choice`. Used inside a self-entry `Replacement` body
+    /// (after the `Move`), so the permanent is on the battlefield to store on.
+    RecordEtbChoice { kind: EtbChoiceKind },
+    /// CR 702.49: the resolution half of ninjutsu. Puts the source card (in hand)
+    /// onto the battlefield tapped and attacking, inheriting the attack target of
+    /// the unblocked attacker returned to pay the cost (captured in `CostsPaidCtx`
+    /// at cost time, since the returned creature has left combat by now).
+    NinjutsuEnter,
+    /// "You get an emblem with '…'" (CR 114.2). Creates an emblem controlled by
+    /// the resolving player, carrying the given static `abilities`; the emblem
+    /// persists and its abilities apply continuously (e.g. Kaito +1, Tamiyo −7).
+    CreateEmblem { abilities: Vec<crate::ir::ability::Ability> },
+    /// Each selected player chooses a card matching `filter` in their `from` zone
+    /// and puts it onto the battlefield. *All* choices are made (APNAP order)
+    /// before *any* placement, so the placements are simultaneous (CR 101.4 — no
+    /// triggers/SBAs fire between them; the engine's deferred `pending_triggers`
+    /// then fire together). `optional` = "may" (Show and Tell) vs mandatory
+    /// (Exhume). Each player puts at most one.
+    SimultaneousPut {
+        who: Who,
+        from: crate::ir::expr::ZoneKindSel,
+        filter: crate::ir::expr::Filter,
+        optional: bool,
+    },
+    /// Register a floating continuous effect with a *dynamic* `scope` (re-evaluated
+    /// each recompute, so it catches objects matching later) and an `expiry`. The
+    /// dynamic-filter sibling of `ApplyCE`, which instead locks its target set at
+    /// resolution (CR 611.2c). Used for "until your next turn, … get …" effects
+    /// keyed on changing state — e.g. Tamiyo +2 (opposing attackers get −1/−0).
+    RegisterContinuous {
+        scope: Filter,
+        mods: Vec<CEMod>,
+        expiry: Expiry,
+    },
 
     // ── scheduling ───────────────────────────────────────────────────────
     /// Register a delayed trigger that fires at some future event.
@@ -335,6 +389,10 @@ pub enum Action {
         who: Who,
         spec: TokenSpec,
         n: Expr,
+        /// Bind the (last) created token's id to this name, so a following action
+        /// can reference it — e.g. living weapon: `CreateToken{bind_as:"tok"}` then
+        /// `Attach{ what: Source, to: Var("tok") }`.
+        bind_as: Option<&'static str>,
     },
 
     // ── mana production ──────────────────────────────────────────────────

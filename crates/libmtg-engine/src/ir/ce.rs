@@ -34,6 +34,18 @@ pub enum CEMod {
     AddType(CardType),
     AddSubtype(String),
     RemoveSubtype(String),
+    /// "~ is a [P]/[T] [subtypes] creature [with keywords]" (CR 613.1c layer 4 +
+    /// the P/T it sets). The animate-as-creature primitive: makes the object a
+    /// creature with the given base P/T, creature subtypes, and keywords, carrying
+    /// its existing activated abilities over (loyalty abilities stay usable). Used
+    /// for a planeswalker that becomes a creature (Kaito) — per the CR ruling it
+    /// stops being a planeswalker while animated.
+    BecomeCreature {
+        power: Expr,
+        toughness: Expr,
+        subtypes: Vec<String>,
+        keywords: Vec<Keyword>,
+    },
     /// CR 305.6: set the land's subtype to a basic land type. Replaces all
     /// existing land subtypes, swaps the intrinsic mana ability, and — per
     /// CR 305.7 — strips all abilities generated from rules text. Applies to
@@ -47,7 +59,10 @@ pub enum CEMod {
 
     // ── layer 5 (color) ──────────────────────────────────────────────────
     SetColors(Vec<Color>),
-    AddColor(Color),
+    /// Add the color the `Expr` evaluates to (CR 105 / 613.4). An `Expr` rather
+    /// than a literal `Color` so a runtime-chosen color works: Painter's Servant
+    /// adds `ChosenColor(Source)`; a fixed grant uses `ColorLit(c)`.
+    AddColor(Expr),
 
     // ── layer 6 (abilities) ──────────────────────────────────────────────
     AddKeyword(Keyword),
@@ -74,6 +89,10 @@ pub enum CEMod {
     // ── rule modifiers (game-level) ──────────────────────────────────────
     AllowLoss(Expr),        // Platinum Angel: "you can't lose" when true
     MaxHandSize(Expr),
+    /// "You have no maximum hand size" (e.g. Tamiyo −7 emblem). A player-level
+    /// rule override carried as an emblem's static ability and consulted by the
+    /// cleanup discard check; produces no object-CE.
+    NoMaxHandSize,
     ExtraLandDrops(Expr),
     SkipStep(crate::StepKind),
 

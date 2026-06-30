@@ -412,8 +412,20 @@ fn ability_available(
     source_id: ObjId,
     source_untapped: bool,
 ) -> bool {
-    // Per-ability suppression (Disruptor Flute, Karn, etc.): check activatable flag.
+    // Legacy per-ability suppression flag (CE-set). Retained as a fallback;
+    // the declarative path is the action-Restriction below.
     if !ability.activatable {
+        return false;
+    }
+    // Action-Restriction on the source permanent (Null Rod / Karn: "artifact
+    // abilities can't be activated"; Disruptor Flute: "abilities of the named
+    // card can't be activated unless they're mana abilities"). Keyed on the
+    // source, so it covers every ability the source has, incl. granted ones —
+    // CR 101.2 "can't beats can". `ability` here is a non-mana `AbilityDef` (mana
+    // abilities live in `mana_abilities()` and route through the mana sub-loop's
+    // `mana_ability_restricted`), so the mana exemption is structurally N/A.
+    if crate::ir::executor::action_restricted(
+        state, crate::ir::ability::ActionKind::Activate, source_id) {
         return false;
     }
     // Sorcery-speed abilities (loyalty, etc.) require empty stack.
@@ -492,6 +504,12 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
         let Some(def) = state.def_of(*card_id) else { continue };
         if def.is_land() { continue; }
         if !def.castable { continue; }
+        // CR 101.2 "can't beats can": an action-Restriction (Lavinia) gates the
+        // *permitted* cast. AND-NOT over `castable`, so a granted cast (Dauthi /
+        // Flashback) under a restriction is still illegal, order-independent.
+        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Cast, *card_id) {
+            continue;
+        }
         if !card_has_implementation(def) { continue; }
         if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
         if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, *card_id) { continue; }
@@ -562,6 +580,10 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
     for card in state.on_adventure_of(who) {
         let card_id = card.id;
         if let Some(def) = state.def_of(card_id) {
+            // Same cast-Restriction gate as the hand loop — a zone-agnostic
+            // restriction (Lavinia) must catch casts from any zone; a zone-scoped
+            // one (Grafdigger's: GY/library) simply won't match this exile cast.
+            if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Cast, card_id) { continue; }
             let cost = parse_mana_cost(def.mana_cost());
             if state.potential_mana(who).can_pay(&cost) {
                 if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, card_id) { continue; }
@@ -576,6 +598,11 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
         let Some(def) = state.def_of(card_id) else { continue };
         if def.is_land() { continue; }
         if !def.castable { continue; }
+        // Cast-Restriction gate. A Dauthi-granted exile cast under Grafdigger's
+        // ("can't cast from GY/library") is *not* restricted — exile ≠ GY/library —
+        // so it falls out of the zone-scoped subject with no special-casing; under
+        // Lavinia (zone-agnostic) it is correctly restricted (CR 101.2 "can't beats can").
+        if crate::ir::executor::action_restricted(state, crate::ir::ability::ActionKind::Cast, card_id) { continue; }
         if !card_has_implementation(def) { continue; }
         if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, card_id) { continue; }
         if !spell_is_affordable(card_id, def, state, who) { continue; }
