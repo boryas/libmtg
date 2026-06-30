@@ -1166,6 +1166,78 @@ mod tests {
         for line in &state.decision_log { println!("{line}"); }
     }
 
+    /// MEASUREMENT (`cargo test --release compare_vroomsday_vs_tempo_t3 -- --ignored --nocapture`):
+    /// P(send by T3) on the play, Realistic mull — the new two-wincon vroomsday list (DD
+    /// or car) vs the old UB-tempo Doomsday list (DD only), plus vroomsday's own DD-only
+    /// line for context.
+    #[test]
+    #[ignore]
+    fn compare_vroomsday_vs_tempo_t3() {
+        let n = 30_000;
+        let (cut, mode, play) = (3u32, MullMode::Realistic, Some(true));
+        let tempo = run_goldfish_send(&sample_doomsday_deck(), n, &[], cut, mode, play, false);
+        let vroom_dd = run_goldfish_send(&vroomsday_deck(), n, &[], cut, mode, play, false);
+        let vroom_car = run_goldfish_send(&vroomsday_deck(), n, &[], cut, mode, play, true);
+        let p = |s: &GoldfishStats| 100.0 * s.cast_by(3);
+        println!("\n=== P(send by T3), on the play, Realistic mull, {n} games ===");
+        println!("  old UB-tempo DD list (DD only)        = {:.2}%", p(&tempo));
+        println!("  vroomsday, DD only                    = {:.2}%", p(&vroom_dd));
+        println!("  vroomsday, DD + Fantasticar (send)     = {:.2}%", p(&vroom_car));
+        println!("  vroomsday two-wincon vs old tempo      = {:+.2} pts", p(&vroom_car) - p(&tempo));
+    }
+
+    /// VALIDATION (`cargo test --release validate_almost_car_keep_hands -- --ignored --nocapture`):
+    /// the empirical-truth check for the "almost sends car" keep. For each candidate hand,
+    /// print the solver's `car_pop_shortfall` (0 = deterministic, 1 = one piece away) AND the
+    /// realized P(send by T3) over 1k car-enabled sims — so we can SEE whether "1 piece short +
+    /// a Ponder" actually converts, rather than thresholding a probability we can't compute.
+    #[test]
+    #[ignore]
+    fn validate_almost_car_keep_hands() {
+        let deck = vroomsday_deck();
+        let catalog = build_catalog();
+        let n = 1000u32;
+        // Filler: Thassa's Oracle + Street Wraith are creatures/air — not car fuel, not mana —
+        // so they pad to 7 without changing the shortfall analysis.
+        let f = ["Thassa's Oracle", "Street Wraith"];
+        let hands: &[(&str, &[&str])] = &[
+            ("deterministic self-Daze", &["Underground Sea", "Dark Ritual", "The Fantasticar", "Lotus Petal", "Daze"]),
+            ("almost: ponder+daze",     &["Underground Sea", "Dark Ritual", "The Fantasticar", "Ponder", "Daze"]),
+            ("almost: ponder+bauble",   &["Underground Sea", "Dark Ritual", "The Fantasticar", "Ponder", "Mishra's Bauble"]),
+            ("almost: ponder bare",     &["Underground Sea", "Dark Ritual", "The Fantasticar", "Ponder"]),
+        ];
+        println!("\n=== almost-car keep validation ({n} sims/hand, T3, on play) ===");
+        for (label, core) in hands {
+            let hand: Vec<String> = core.iter().chain(f.iter()).map(|s| s.to_string()).collect();
+            // Solver shortfall on the exact opening.
+            let mut s0 = SimState::new(
+                libmtg_engine::PlayerState::new("us"), libmtg_engine::PlayerState::new("opp"));
+            s0.catalog = catalog.clone();
+            for h in &hand { s0.place_card(PlayerId::Us, h, Zone::Hand { known: false }); }
+            for (nm, q, _) in &deck { for _ in 0..*q { s0.place_card(PlayerId::Us, nm, Zone::Library); } }
+            let shortfall = recipe::car_pop_shortfall(&s0, PlayerId::Us, 3);
+            // Realized send rate over n sims (the hand is forced; Keep7 so it isn't mulliganed).
+            let mut rng = rand::rngs::SmallRng::seed_from_u64(0xA1_CA_5Eu64 ^ label.len() as u64);
+            let mut sends = 0u32;
+            for _ in 0..n {
+                let scenario = Scenario {
+                    us_label: "us".into(), opp_label: "opp".into(),
+                    catalog: catalog.clone(), us_deck: deck.clone(),
+                    opp_deck: vec![("Island".to_string(), 60, "main".to_string())],
+                    us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(3, MullMode::Keep7).with_car(true)),
+                    opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+                    evaluate_card: dd_goldfish_evaluator(),
+                    objective: Box::new(GoldfishObjective { count_car: true }),
+                    max_turns: 3, on_play: Some(true), fixed_us_hand: Some(hand.clone()),
+                };
+                let state = run_game(scenario, &mut rng);
+                if state.terminal && state.current_turn <= 3 { sends += 1; }
+            }
+            println!("  {label:<26} shortfall={shortfall}  P(send by T3) = {:.1}%  ({sends}/{n})",
+                100.0 * sends as f64 / n as f64);
+        }
+    }
+
     /// Strategy-level acceptance for the self-Daze line: the SOLVER already finds it
     /// (`recipe::car_line_via_self_daze`); this asserts the STRATEGY plays it out —
     /// ritual, car, petal (held on the stack), then Daze our own petal (paying the

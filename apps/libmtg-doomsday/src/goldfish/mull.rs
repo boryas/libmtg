@@ -121,8 +121,13 @@ pub struct HandSignals {
     /// and threat bodies (Tamiyo/Murktide/Bowmasters). The "support" that carries a
     /// thin-dig hand over the top.
     pub supporters: u32,
-    /// The solver finds a guaranteed Doomsday line by the cutoff.
+    /// The solver finds a guaranteed send (Doomsday OR car) by the cutoff.
     pub det_line: bool,
+    /// The car is exactly ONE Lotus-Petal-equivalent short of a deterministic pop by the
+    /// cutoff (`recipe::car_pop_shortfall == 1`) — "almost sends": one mana or one cast
+    /// away, which a single cantrip very likely digs into. (`false` for car-less decks, so
+    /// the tempo list is untouched.) The deterministic case (shortfall 0) is `det_line`.
+    pub car_almost: bool,
     /// The hand can deterministically flip Tamiyo by turn 2 (the fast-Tamiyo plan).
     pub tami_fast_flip: bool,
 }
@@ -189,6 +194,8 @@ pub fn hand_signals(state: &SimState, who: PlayerId, cutoff: u32) -> HandSignals
         // detects both, so a deterministic car hand is kept, not thrown back for lacking a
         // Doomsday line. (No bespoke car rule beyond this — the solver does the work.)
         det_line: recipe::deterministic_send_turn(state, who, cutoff).is_some(),
+        // One Petal-equivalent short of a guaranteed car pop — the "almost sends" keep.
+        car_almost: recipe::car_pop_shortfall(state, who, cutoff) == 1,
         // Fast Tamiyo plan: a deterministic flip by turn 2 (see `recipe::tamiyo_flip_turn`).
         tami_fast_flip: recipe::tamiyo_flip_turn(state, who, 2).is_some(),
         ..Default::default()
@@ -269,6 +276,12 @@ pub fn realistic_keep(s: &HandSignals, mulligans_taken: u32) -> bool {
         return true;
     }
     if s.tami_fast_flip { return true; }
+    // Almost-car: one Petal-equivalent short of a guaranteed pop, WITH a real cantrip to dig
+    // for that piece — the user's "sea, rit, car, ponder, daze → ponder into one more mana".
+    // The solver says you're a single mana/cast away; a deep look very likely closes it by
+    // the cutoff. (`car_almost` is false without a car in hand, so this only fires for the
+    // two-wincon list.)
+    if s.car_almost && s.deep_looks >= 1 { return true; }
     // Dig: a deep look + a SECOND PIECE, scaled by hand size. At the opening 7 the second
     // piece must be STRONG — a 2nd deep look, or a real supporter (interaction / threat).
     // After a mulligan the bar relaxes (you bottom the air, so the kept hand is leaner):
@@ -431,6 +444,28 @@ mod tests {
                         "Force of Will", "Daze", "Thoughtseize", "Murktide Regent"];
         assert!(!realistic_keeps_at(no_deep, 0), "no deep look ⇒ no dig at 7");
         assert!(!realistic_keeps_at(no_deep, 2), "no deep look ⇒ no dig at 5");
+    }
+
+    /// The "almost sends car" keep (vroomsday only). A hand one Petal-equivalent short of a
+    /// guaranteed pop, with a real cantrip to dig for it, is a keep the Doomsday-centric
+    /// branches (fast-DD, dig's second-piece) all miss. Tested on synthetic signals so it's
+    /// isolated from card classification.
+    #[test]
+    fn realistic_keeps_almost_car_with_a_dig() {
+        // A Sea (mana base + black source) + a castable Ponder (deep look). No Doomsday, no
+        // Tamiyo, no dig "second piece" (no 2nd deep look, no supporter, no accelerant).
+        let base = HandSignals {
+            colored_lands: 1, black_lands: 1, blue_lands: 1, deep_looks: 1,
+            ..Default::default()
+        };
+        // Without the almost-car signal this skeleton has no plan → mull.
+        assert!(!realistic_keep(&base, 0), "no payoff, no dig second-piece → mull");
+        // One piece short of a car pop → the almost-car branch keeps it.
+        assert!(realistic_keep(&HandSignals { car_almost: true, ..base }, 0),
+            "almost-car + a dig → keep");
+        // The dig must be REAL — almost-car with no cantrip to find the piece is not a keep.
+        assert!(!realistic_keep(&HandSignals { car_almost: true, deep_looks: 0, ..base }, 0),
+            "almost-car but no cantrip to dig → mull");
     }
 
     #[test]

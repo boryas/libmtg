@@ -781,7 +781,22 @@ impl CarFuel {
 }
 
 pub fn car_pop_turn(state: &SimState, who: PlayerId, max_turn: u32) -> Option<u32> {
-    car_pop_turn_full(state, who, &[], &[], false, max_turn)
+    car_pop_turn_full(state, who, &[], &[], false, max_turn, 0)
+}
+
+/// How far the hand is from a DETERMINISTIC car pop by `max_turn`, measured in extra
+/// Lotus-Petal-equivalents (each worth +1 noncreature cast AND +1 mana — the canonical
+/// "one more piece" a cantrip digs into). 0 = deterministic (`car_pop_turn` is `Some`);
+/// 1 = one piece short ("cast the car but only 3 spells", or "one more mana"); capped at
+/// 3 ("far"). Drives the mulligan's "almost sends car" keep — a 1-away hand with a dig is
+/// very likely to find the piece and pop.
+pub fn car_pop_shortfall(state: &SimState, who: PlayerId, max_turn: u32) -> u32 {
+    for k in 0..3 {
+        if car_pop_turn_full(state, who, &[], &[], false, max_turn, k).is_some() {
+            return k;
+        }
+    }
+    3
 }
 
 /// [`car_pop_turn`] with `extra_hand` cards gained THIS turn (a Brainstorm burst you
@@ -797,6 +812,9 @@ fn car_pop_turn_full(
     known_top: &[&str],
     immediate: bool,
     max_turn: u32,
+    // Phantom Lotus-Petal-equivalents added to the fuel — `car_pop_shortfall` probes
+    // 0/1/2 to find how many "one more piece"s the hand is short. 0 = exact line.
+    extra_petals: u32,
 ) -> Option<u32> {
     let car_in_play = state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR);
 
@@ -852,7 +870,7 @@ fn car_pop_turn_full(
         if car {
             fuel.paid.sort_unstable();
             // We must CAST the car ({3}) unless it is already in play.
-            if car_pop_feasible(&caps, t, !car_in_play, &fuel) {
+            if car_pop_feasible(&caps, t, !car_in_play, &fuel, extra_petals) {
                 return Some(t);
             }
         }
@@ -867,10 +885,15 @@ fn car_pop_turn_full(
 /// This is the deterministic-solver caller; `can_pop_this_turn` is the live-execution caller
 /// — same rule, same `solve_pop`. SPIKE: paid pips and ritual seeding approximated as generic
 /// (not strictly black), exact enough for this mostly-black manabase.
-fn car_pop_feasible(c: &Caps, t: u32, car_in_hand: bool, fuel: &CarFuel) -> bool {
+fn car_pop_feasible(c: &Caps, t: u32, car_in_hand: bool, fuel: &CarFuel, extra_petals: u32) -> bool {
     let lands_m = renew_black_by_turn(c, t) + other_online_by_turn(c, t);
+    // base_mana subtracts only the REAL hand petals (already in `c.pool`); the phantom
+    // shortfall petals are added to the fuel below, so `solve_pop` credits their mana AND
+    // cast-slot without the pool double-count.
     let base_mana = (lands_m + c.pool).saturating_sub(fuel.free_petal);
-    solve_pop(base_mana, 0, fuel, !car_in_hand)
+    let mut f = fuel.clone();
+    f.free_petal += extra_petals;
+    solve_pop(base_mana, 0, &f, !car_in_hand)
 }
 
 /// Can `who` COMPLETE a car pop THIS turn from the current MID-turn state? Unlike
@@ -1026,7 +1049,7 @@ fn deterministic_send_turn_full(
 ) -> Option<u32> {
     [
         deterministic_cast_turn_full(state, who, extra_hand, known_top, immediate, max_turn),
-        car_pop_turn_full(state, who, extra_hand, known_top, immediate, max_turn),
+        car_pop_turn_full(state, who, extra_hand, known_top, immediate, max_turn, 0),
     ]
     .into_iter()
     .flatten()
@@ -2523,7 +2546,7 @@ mod tests {
                              "Force of Will", "Daze"]);
         assert_eq!(car_pop_turn(&s, PlayerId::Us, 3), None, "no car yet → nothing");
         let kept = ["Lotus Petal", "The Fantasticar", "Lotus Petal"];
-        assert_eq!(car_pop_turn_full(&s, PlayerId::Us, &kept, &[], false, 3), Some(1));
+        assert_eq!(car_pop_turn_full(&s, PlayerId::Us, &kept, &[], false, 3, 0), Some(1));
         assert_eq!(deterministic_send_turn_full(&s, PlayerId::Us, &kept, &[], false, 3), Some(1));
     }
 
@@ -2538,6 +2561,27 @@ mod tests {
                              "Lotus Petal", "Daze"]);
         assert_eq!(car_pop_turn(&s, PlayerId::Us, 3), Some(1),
             "Daze on our own petal, paid by bouncing the Sea (an Island), is the 4th cast");
+    }
+
+    /// The "almost sends car" signal: `car_pop_shortfall` = how many extra Lotus-Petal-
+    /// equivalents (each +1 cast AND +1 mana) the hand needs to make a deterministic pop by
+    /// the cutoff. 0 = deterministic; 1 = one piece away (a cantrip very likely digs it); 2+ = far.
+    #[test]
+    fn car_pop_shortfall_one_away_for_ponder_hand() {
+        // Deterministic self-Daze hand → shortfall 0 (agrees with `car_pop_turn`).
+        let det = hand_state(&["Underground Sea", "Dark Ritual", "The Fantasticar",
+                               "Lotus Petal", "Daze"]);
+        assert_eq!(car_pop_shortfall(&det, PlayerId::Us, 3), 0);
+        // Swap the Petal for a Ponder: ritual+car gets the car out, but post-car there's only
+        // the Daze (the Ponder is uncastable with the mana spent) — ONE cast/mana short. A
+        // single Petal/Bauble/land (which Ponder digs) closes it → shortfall 1.
+        let almost = hand_state(&["Underground Sea", "Dark Ritual", "The Fantasticar",
+                                  "Ponder", "Daze"]);
+        assert_eq!(car_pop_turn(&almost, PlayerId::Us, 3), None, "not deterministic");
+        assert_eq!(car_pop_shortfall(&almost, PlayerId::Us, 3), 1, "exactly one piece short");
+        // A bare car with no fuel/mana is far from a pop.
+        let far = hand_state(&["The Fantasticar"]);
+        assert!(car_pop_shortfall(&far, PlayerId::Us, 3) >= 2);
     }
 
     /// Boundary: a Daze is the deciding 4th cast ONLY if there's an Island to bounce for its
