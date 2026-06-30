@@ -1062,6 +1062,12 @@ impl CardDef {
 
     pub fn is_blue(&self) -> bool { self.colors.contains(&Color::Blue) }
 
+    /// True if this card has the Island land subtype — i.e. it is legal to return for
+    /// Daze's free alternative cost (Underground Sea is "Land — Island Swamp", so it counts).
+    pub fn is_island(&self) -> bool {
+        matches!(&self.kind, CardKind::Land(l) if l.land_types.contains(BasicLandType::Island))
+    }
+
     #[allow(dead_code)]
     pub(crate) fn is_black(&self) -> bool { self.colors.contains(&Color::Black) }
 

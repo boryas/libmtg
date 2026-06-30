@@ -29,6 +29,8 @@ use libmtg_engine::{
 
 const DOOMSDAY: &str = "Doomsday";
 const FANTASTICAR: &str = "The Fantasticar";
+const DAZE: &str = "Daze";
+const FORCE_OF_WILL: &str = "Force of Will";
 
 // ── Capability projection (read from IR via the existing accessors) ──────────
 
@@ -716,20 +718,23 @@ fn deterministic_cast_turn_ex(
 
 /// Earliest turn (1-based, ≤ `max_turn`) `who` can pop The Fantasticar using only
 /// the current hand+board (no blind draws), or `None`.
-/// A noncreature spell we can cast *proactively* this turn for the count — i.e. it
-/// doesn't need an opponent OBJECT we don't have. Counterspells / removal (Force,
-/// Daze, Fatal Push: `ObjectInZone { Opp, … }`) are excluded; Thoughtseize (targets a
-/// player) and cantrips (no target) qualify, as do rituals and the {0} artifacts.
+/// A noncreature spell we can cast *proactively* this turn for the count — i.e. it doesn't
+/// need a target we can't freely supply: an opponent OBJECT (removal: Fatal Push), or a
+/// spell on the STACK (counters: Force/Daze — even now they're `Who::Any`, they still need a
+/// stack spell, and are handled separately as self-counters in `self_counter_free_casts`).
+/// Thoughtseize (targets a player) and cantrips (no target) qualify, as do rituals and {0}s.
 fn is_proactive_noncreature(def: &CardDef) -> bool {
-    use libmtg_engine::{TargetSpec, Who};
-    fn needs_opp_object(ts: &TargetSpec) -> bool {
+    use libmtg_engine::{TargetSpec, Who, ZoneId};
+    fn needs_unavailable_target(ts: &TargetSpec) -> bool {
         match ts {
-            TargetSpec::ObjectInZone { controller, .. } => matches!(controller, Who::Opp),
-            TargetSpec::Union(v) => v.iter().any(needs_opp_object),
+            TargetSpec::ObjectInZone { controller, zone, .. } => {
+                matches!(controller, Who::Opp) || matches!(zone, ZoneId::Stack)
+            }
+            TargetSpec::Union(v) => v.iter().any(needs_unavailable_target),
             _ => false,
         }
     }
-    !def.is_land() && !def.is_creature() && !needs_opp_object(def.target_spec())
+    !def.is_land() && !def.is_creature() && !needs_unavailable_target(def.target_spec())
 }
 
 /// Mana value of a parsed cost.
@@ -820,6 +825,13 @@ fn car_pop_turn_full(
             base_fuel.add(def, k, &mut base_seen);
         }
     }
+    // Self-targetable counters (Daze/Force) we can cast on our own spell for the count.
+    let hand_extra: Vec<&str> = state
+        .hand_of(who)
+        .map(|c| c.catalog_key.as_str())
+        .chain(extra_hand.iter().copied())
+        .collect();
+    base_fuel.free_other += self_counter_free_casts(state, who, hand_extra.iter().copied());
 
     for t in 1..=max_turn {
         let seen = if immediate { t as usize } else { t.saturating_sub(1) as usize };
@@ -869,6 +881,41 @@ fn car_pop_feasible(c: &Caps, t: u32, car_in_hand: bool, fuel: &CarFuel) -> bool
 /// turn (so the FOURTH cast triggers with the car already IN PLAY) with ≥1 castable spell
 /// after it. The strategy spends the car / ramp / pop-fuel only when this holds — otherwise
 /// it conserves and pops next turn, never firing the car as the doomed 4th-or-later spell.
+/// Extra FREE cast-slots from self-targetable counters (Daze / Force of Will) over `keys`
+/// (the relevant in-hand cards), castable on YOUR OWN spell via their free ALTERNATIVE cost:
+/// a Daze returns an Island land you control (Underground Sea is "Island Swamp", and a
+/// tapped land still bounces — you tap it for mana, then bounce it); a Force exiles a spare
+/// blue card. Each consumes one such resource. (Targeting your own stack spell is the engine's
+/// `Who::Any` path. Hard-casting {1}{U} / {3}{U}{U} is conservatively omitted — the combo
+/// uses the free cost.) These are pure cast-slots: they advance the per-turn noncreature count.
+fn self_counter_free_casts<'a>(
+    state: &SimState,
+    who: PlayerId,
+    keys: impl Iterator<Item = &'a str>,
+) -> u32 {
+    let (mut dazes, mut forces, mut hand_islands, mut blue_fodder) = (0u32, 0u32, 0u32, 0u32);
+    for key in keys {
+        if key == DAZE {
+            dazes += 1;
+        } else if key == FORCE_OF_WILL {
+            forces += 1;
+        } else if let Some(d) = state.catalog.get(key) {
+            if d.is_island() {
+                hand_islands += 1;
+            } else if d.is_blue() && !d.is_land() && !is_proactive_noncreature(d) {
+                // A spare blue card to pitch to Force (e.g. a blue creature). A blue CANTRIP
+                // is excluded — pitching a castable spell is net-zero cast-slots.
+                blue_fodder += 1;
+            }
+        }
+    }
+    let board_islands = state
+        .permanents_of(who)
+        .filter(|p| state.catalog.get(&p.catalog_key).is_some_and(|d| d.is_island()))
+        .count() as u32;
+    dazes.min(hand_islands + board_islands) + forces.min(blue_fodder)
+}
+
 /// PURE resource solver — the one place the per-turn pop rule lives. Both callers
 /// (`can_pop_this_turn` for live execution, and ultimately the deterministic per-turn
 /// check) fill these resources; they differ only in how:
@@ -937,6 +984,8 @@ pub fn can_pop_this_turn(state: &SimState, who: PlayerId) -> bool {
             fuel.add(def, &card.catalog_key, &mut seen);
         }
     }
+    let hand_keys: Vec<&str> = state.hand_of(who).map(|c| c.catalog_key.as_str()).collect();
+    fuel.free_other += self_counter_free_casts(state, who, hand_keys.iter().copied());
     fuel.paid.sort_unstable();
     let base = state.potential_mana(who).total.max(0) as u32;
     solve_pop(base, state.noncreature_casts_this_turn(who), &fuel, car_in_play)
@@ -2478,27 +2527,45 @@ mod tests {
         assert_eq!(deterministic_send_turn_full(&s, PlayerId::Us, &kept, &[], false, 3), Some(1));
     }
 
+    /// The SOLVER now finds the self-Daze car line (engine `Who::Any` + the self-counter fuel
+    /// model). T1: Sea→B, ritual(1)→BBB, car(2), petal(3, hold priority), Daze(4) on the petal
+    /// — paid by bouncing the Underground Sea. KEY: Underground Sea is "Land — Island Swamp",
+    /// so it IS an Island, legal to bounce for Daze's free alt-cost (bounce works on the tapped
+    /// Sea; we no longer need the land). (Strategy EXECUTION of this line is Part 3, separate.)
     #[test]
-    #[ignore] // JOTTED (per user): NOT yet supported — and it is blocked deeper than the solver.
-              // Findings while testing the line:
-              //  (1) ENGINE/CARD: Daze AND Force target `TargetSpec::ObjectInZone{controller:
-              //      Who::Opp, ...}`, and the `Who` enum is only {Actor, Opp} — there is no way
-              //      to target your OWN spell. Real Daze/Force counter "target spell" (any). Needs
-              //      a `Who::Any` (ripples through the targeting core) + Daze/Force defs widened.
-              //  (2) SOLVER: count Daze/Force as a noncreature-cast (temporal resource) gated on a
-              //      spell-on-the-stack to target AND their alt-costs (Daze: bounce an Island;
-              //      Force: pitch a blue card). `is_proactive_noncreature` excludes them today.
-              //  (3) STRATEGY: hold priority on our own spell, then cast the counter on it.
     fn car_line_via_self_daze() {
-        // Canonical line, T1: Sea→B, ritual(1)→BBB, car(2), petal(3, hold priority), Daze(4)
-        // on the petal — paid by bouncing the Underground Sea. KEY: Underground Sea is a
-        // "Land — Island Swamp", so it IS an Island and is legal to bounce for Daze's free
-        // alt-cost (bounce works on the tapped Sea; we no longer need the land). Four
-        // noncreature casts with the car in play → pop.
         let s = hand_state(&["Underground Sea", "Dark Ritual", "The Fantasticar",
                              "Lotus Petal", "Daze"]);
         assert_eq!(car_pop_turn(&s, PlayerId::Us, 3), Some(1),
             "Daze on our own petal, paid by bouncing the Sea (an Island), is the 4th cast");
+    }
+
+    /// Boundary: a Daze is the deciding 4th cast ONLY if there's an Island to bounce for its
+    /// free cost. Island in play → pop; a lone Swamp (not an Island, no {1}{U}) → one short.
+    #[test]
+    fn daze_self_counter_needs_an_island() {
+        let with_island = setup(&["The Fantasticar", "Island"],
+            &["Mishra's Bauble", "Mishra's Bauble", "Mishra's Bauble", "Daze"], &[]);
+        assert!(can_pop_this_turn(&with_island, PlayerId::Us),
+            "Daze bounces the Island → four casts");
+        let only_swamp = setup(&["The Fantasticar", "Swamp"],
+            &["Mishra's Bauble", "Mishra's Bauble", "Mishra's Bauble", "Daze"], &[]);
+        assert!(!can_pop_this_turn(&only_swamp, PlayerId::Us),
+            "no Island to bounce → Daze uncastable, one cast short");
+    }
+
+    /// Boundary: a Force of Will is the deciding 4th cast ONLY if there's a spare blue card to
+    /// pitch (a blue creature is pitch fodder but not itself a noncreature cast).
+    #[test]
+    fn force_self_counter_needs_blue_to_pitch() {
+        let with_pitch = setup(&["The Fantasticar"], &["Mishra's Bauble", "Mishra's Bauble",
+            "Mishra's Bauble", "Force of Will", "Tamiyo, Inquisitive Student"], &[]);
+        assert!(can_pop_this_turn(&with_pitch, PlayerId::Us),
+            "Force pitches the blue card → four casts");
+        let no_pitch = setup(&["The Fantasticar"],
+            &["Mishra's Bauble", "Mishra's Bauble", "Mishra's Bauble", "Force of Will"], &[]);
+        assert!(!can_pop_this_turn(&no_pitch, PlayerId::Us),
+            "no blue card to pitch → Force uncastable, one cast short");
     }
 
     /// BASELINE ORACLE for the pop-discipline rule (`solve_pop`): explicit resource tuples →

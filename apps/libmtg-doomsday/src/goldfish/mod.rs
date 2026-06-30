@@ -1131,9 +1131,9 @@ mod tests {
             ("Force of Will", 4), ("Daze", 4), ("Thoughtseize", 3),
         ].iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect();
         let catalog = build_catalog();
-        // The user's example: dig for the car WITHOUT spending the petal/bauble/ritual.
-        let hand: Vec<String> = ["Underground Sea", "Underground Sea", "Dark Ritual",
-            "Lotus Petal", "Mishra's Bauble", "Ponder", "Ponder"]
+        // Self-Daze line: ritual, car, petal, Daze-our-own-petal (bounce the Sea) → pop T1.
+        let hand: Vec<String> = ["Underground Sea", "Dark Ritual", "The Fantasticar",
+            "Lotus Petal", "Daze"]
             .iter().map(|s| s.to_string()).collect();
         // Engine verdict on this exact opening (before any play): does the solver SEE a
         // deterministic car line? If yes but the game below fails to pop, execution is broken.
