@@ -3732,7 +3732,11 @@ fn handle_priority_round(
                     let result = run_cast_submachine(state, t, who, card_id, face);
                     if let Some(cid) = result {
                         state.stack.push(cid);
-                        priority_holder = if who == ap { nap } else { ap };
+                        // CR 117.3c: the player who cast a spell receives priority again
+                        // (they may add more to the stack — e.g. hold priority to counter
+                        // their own spell). The both-pass-in-succession loop still releases
+                        // the stack once this player passes and the opponent passes too.
+                        priority_holder = who;
                         last_passer = None;
                     } else {
                         let pool = &state.player(who).pool;
@@ -3749,7 +3753,9 @@ fn handle_priority_round(
                     .and_then(|d| d.abilities().get(ability_index).cloned())
                     .unwrap_or_default();
                 run_activate_submachine(state, t, who, source_id, &ab);
-                priority_holder = if who == ap { nap } else { ap };
+                // CR 117.3c: the activating player receives priority again (consistent
+                // with the cast path and land drops above).
+                priority_holder = who;
                 last_passer = None;
             }
             LegalAction::ActivateManaAbility { source_id, ability_index } => {
