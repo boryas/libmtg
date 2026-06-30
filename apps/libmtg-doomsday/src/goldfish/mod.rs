@@ -1166,6 +1166,51 @@ mod tests {
         for line in &state.decision_log { println!("{line}"); }
     }
 
+    /// Strategy-level acceptance for the self-Daze line: the SOLVER already finds it
+    /// (`recipe::car_line_via_self_daze`); this asserts the STRATEGY plays it out —
+    /// ritual, car, petal (held on the stack), then Daze our own petal (paying the
+    /// free bounce alt-cost) as the FOURTH noncreature spell → pop on turn 1. The
+    /// strategy must (a) act on a non-empty stack to respond to its own spell, and
+    /// (b) choose the alt-cost when casting Daze with no {1}{U} available.
+    #[test]
+    fn self_daze_line_pops_on_turn_one() {
+        let deck: Vec<(String, i32, String)> = [
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Island", 2), ("Swamp", 1),
+            ("Lotus Petal", 6), ("Mishra's Bauble", 7), ("Dark Ritual", 4),
+            ("The Fantasticar", 4), ("Brainstorm", 4), ("Ponder", 4),
+            ("Force of Will", 4), ("Daze", 4), ("Thoughtseize", 5),
+        ].iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect();
+        let catalog = build_catalog();
+        let hand: Vec<String> = ["Underground Sea", "Dark Ritual", "The Fantasticar",
+            "Lotus Petal", "Daze"]
+            .iter().map(|s| s.to_string()).collect();
+        // The solver must see the deterministic line on this opener (precondition).
+        {
+            let mut s0 = SimState::new(
+                libmtg_engine::PlayerState::new("us"), libmtg_engine::PlayerState::new("opp"));
+            s0.catalog = catalog.clone();
+            for h in &hand { s0.place_card(PlayerId::Us, h, Zone::Hand { known: false }); }
+            for (n, q, _) in &deck { for _ in 0..*q { s0.place_card(PlayerId::Us, n, Zone::Library); } }
+            assert_eq!(recipe::car_pop_turn(&s0, PlayerId::Us, 3), Some(1),
+                "solver precondition: self-Daze line should pop on T1");
+        }
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(0x5eed_da2e);
+        let scenario = Scenario {
+            us_label: "us".into(), opp_label: "opp".into(),
+            catalog: catalog.clone(), us_deck: deck.clone(),
+            opp_deck: vec![("Island".to_string(), 60, "main".to_string())],
+            us_strategy: Box::new(DDGoldfishStrategy::with_mull_mode(3, MullMode::Keep7).with_car(true)),
+            opp_strategy: Box::new(AlwaysPass::new(PlayerId::Opp)),
+            evaluate_card: dd_goldfish_evaluator(),
+            objective: Box::new(GoldfishObjective { count_car: true }),
+            max_turns: 3, on_play: Some(true), fixed_us_hand: Some(hand.clone()),
+        };
+        let state = run_game(scenario, &mut rng);
+        assert!(state.terminal && state.current_turn == 1,
+            "expected car pop on T1; terminal={} turn={}\nplay log:\n  {}",
+            state.terminal, state.current_turn, state.log.join("\n  "));
+    }
+
     /// DEBUG (`cargo test debug_twohead_hand -- --ignored --nocapture`): the user's
     /// fuel-rich two-headed hand on the FULL deck (both wincons). It has the mana + fuel +
     /// two Ponders to dig into EITHER payoff, so it should send ~every game, ~50/50

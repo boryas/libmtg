@@ -26,6 +26,10 @@ use super::recipe::{self, CardRole};
 
 const DOOMSDAY: &str = "Doomsday";
 const FANTASTICAR: &str = "The Fantasticar";
+/// Self-targetable counters we cast on our OWN spell (via their free alternative cost)
+/// purely for the cast-slot — the 4th noncreature spell that triggers the car pop.
+const DAZE: &str = "Daze";
+const FORCE_OF_WILL: &str = "Force of Will";
 
 /// The cutoff turn past which a Doomsday is assumed too slow (Wastelanded / raced).
 /// The strategy plays to maximise `P(cast Doomsday by cutoff)`.
@@ -415,6 +419,20 @@ fn cast_cheapest_fuel(state: &SimState, legal: &[LegalAction]) -> Option<LegalAc
         .cloned()
 }
 
+/// A legal self-counter cast (Daze / Force of Will) targeting our OWN spell on the
+/// stack — the held-priority 4th noncreature spell that pops the car. The engine only
+/// offers it when it has a legal on-stack target (via `Who::Any`) and the free
+/// alternative cost is payable; `announce` picks that alt-cost (bounce an Island / pitch
+/// a blue card) so we never need {1}{U} / {3}{U}{U}.
+fn cast_self_counter(state: &SimState, legal: &[LegalAction]) -> Option<LegalAction> {
+    legal.iter()
+        .find(|a| matches!(a, LegalAction::CastSpell { card_id, .. }
+            if state.objects.get(card_id)
+                .map(|o| o.catalog_key.as_str())
+                .is_some_and(|k| k == DAZE || k == FORCE_OF_WILL)))
+        .cloned()
+}
+
 /// A legal mana-positive noncreature cast to ramp toward the car's {3}. RITUAL FIRST:
 /// a ritual nets more mana per cast, so the car becomes affordable in FEWER noncreature
 /// casts — which leaves the free {0} artifacts (Petals/Baubles) to be cast AFTER the car
@@ -520,6 +538,24 @@ impl Strategy for DDGoldfishStrategy {
 
     fn drain_decisions(&mut self) -> Vec<String> { std::mem::take(&mut self.decisions) }
 
+    /// Choose the FREE alternative cost (Daze bounces an Island; Force pitches a blue
+    /// card) whenever the printed mana cost can't be paid from current mana — the
+    /// self-counter pop path. For every normal cast the mana cost IS payable (the engine
+    /// only offers castable spells), so this leaves Doomsday / rituals / petals untouched.
+    fn announce(&mut self, state: &SimState, card_id: ObjId, options: &AnnounceOptions) -> AnnounceChoice {
+        let who = self.player_id;
+        let alt_cost_index = if options.available_alt_costs.is_empty() {
+            None
+        } else {
+            let mana_payable = state.def_of(card_id).map_or(false, |d| {
+                !d.mana_cost().is_empty()
+                    && state.potential_mana(who).can_pay(&parse_mana_cost(d.mana_cost()))
+            });
+            if mana_payable { None } else { Some(0) }
+        };
+        AnnounceChoice { chosen_mode: 0, alt_cost_index, chosen_x: 3 }
+    }
+
     fn declare_attackers(&mut self, _state: &SimState) -> Vec<(ObjId, Option<ObjId>)> { Vec::new() }
     fn declare_blockers(&mut self, _state: &SimState) -> Vec<(ObjId, ObjId)> { Vec::new() }
 
@@ -533,7 +569,24 @@ impl Strategy for DDGoldfishStrategy {
         let in_main = matches!(state.current_phase,
             Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
-        if !in_main || !state.stack.is_empty() { return LegalAction::Pass; }
+        if !in_main { return LegalAction::Pass; }
+        // On a NON-EMPTY stack we hold priority for exactly one reason: to cast the
+        // self-counter that lands the FOURTH noncreature spell on our own held spell
+        // (car already in play, three casts made). That is the only line that responds
+        // to its own stack; every other window passes and lets the stack resolve.
+        if !state.stack.is_empty() {
+            if self.car_enabled
+                && state.permanents_of(who).any(|p| p.catalog_key == FANTASTICAR)
+                && state.noncreature_casts_this_turn(who) == 3
+                && recipe::can_pop_this_turn(state, who)
+            {
+                if let Some(a) = cast_self_counter(state, legal) {
+                    self.dlog(format!("T{}: self-counter → 4th spell pops the car", state.current_turn));
+                    return a;
+                }
+            }
+            return LegalAction::Pass;
+        }
 
         // 1) Cast Doomsday the instant it is castable.
         if let Some(a) = cast_named(state, legal, DOOMSDAY) {
