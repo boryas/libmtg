@@ -277,6 +277,7 @@ fn all_cards() -> Vec<CardDef> {
         sneak_attack(),
         // Creatures
         thassas_oracle(),
+        jace_wielder_of_mysteries(),
         street_wraith(),
         barrowgoyf(),
         ingenious_infiltrator(),
@@ -3038,6 +3039,28 @@ fn sneak_attack() -> CardDef {
 fn thassas_oracle() -> CardDef {
     let data = CreatureData::new("UU", 1, 3);
     simple("Thassa's Oracle", CardKind::Creature(data), parse_colors("UU", false, false), Some(1))
+}
+
+/// Doomsday's backup wincon. A minimal blue Legendary Planeswalker stub (enters
+/// with its starting loyalty): the "if you'd draw from an empty library, you win
+/// instead" wincon and the loyalty abilities aren't needed by the goldfish sim
+/// (which wins on Thassa's Oracle) — only its presence in the catalog and its
+/// blue color (Force of Will pitch, blue-count) matter.
+fn jace_wielder_of_mysteries() -> CardDef {
+    let mut def = CardDef::new(
+        "Jace, Wielder of Mysteries",
+        CardKind::Planeswalker(PlaneswalkerData {
+            mana_cost: "3UU".to_string(),
+            loyalty: 5,
+            abilities: vec![],
+        }),
+        parse_colors("3UU", true, false), // blue
+        Some(1),
+        vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![], vec![], vec![], vec![],
+    );
+    def.abilities = vec![ir_planeswalker_etb_loyalty(5)];
+    def
 }
 
 /// Cycling (hand ability): discard this + pay 2 life → draw 1. CR 702.28.
