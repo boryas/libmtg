@@ -715,14 +715,19 @@ impl Strategy for DDGoldfishStrategy {
             .filter_map(|id| state.objects.get(id).map(|c| c.catalog_key.clone()))
             .collect();
         // Ponder offers a shuffle (a `MayDo` follows this `OrderTop`).
-        let (choice, _p) = recipe::best_top_choice(state, who, &revealed, true, self.cutoff);
+        let (choice, p) = recipe::best_top_choice(state, who, &revealed, true, self.cutoff);
+        let seen = revealed.join(", ");
         match choice {
             recipe::TopChoice::Shuffle => {
                 self.pending_shuffle = true;
+                self.dlog(format!("DIG T{} · Ponder saw {} → shuffled (kept top scored below a fresh draw; P {:.0}%)",
+                    state.current_turn, seen, p * 100.0));
                 cards.to_vec() // order is irrelevant — we'll shuffle it away
             }
             recipe::TopChoice::Keep(order_keys) => {
                 self.pending_shuffle = false;
+                self.dlog(format!("DIG T{} · Ponder saw {} → kept {} on top (draw next; P {:.0}%)",
+                    state.current_turn, seen, order_keys.join(", "), p * 100.0));
                 // Map the chosen key ordering back onto the actual card ids.
                 let mut remaining: Vec<ObjId> = cards.to_vec();
                 let mut out: Vec<ObjId> = Vec::new();
@@ -769,6 +774,7 @@ impl Strategy for DDGoldfishStrategy {
         let src_def = state.def_of(effect_id)
             .or_else(|| state.objects.get(&effect_id).and_then(|o| state.catalog.get(&o.catalog_key)));
         let is_fetch = src_def.map_or(false, |d| d.abilities().iter().any(|a| a.is_fetch_ability()));
+        let to_top = src_def.map_or(false, |d| d.library_top_tutor().is_some());
         let principled = if is_fetch {
             // A fetched land enters now (like a dig to hand): pick the candidate that
             // most advances the objective, NOT merely "a black source". This prefers a
@@ -792,7 +798,6 @@ impl Strategy for DDGoldfishStrategy {
             // is the objective P(cast by cutoff); the min-ttd tie-break then separates the
             // by-cutoff lines that probability saturates equal — staging Doomsday (payoff
             // next turn) beats staging a tutor for it (payoff a turn later), for free.
-            let to_top = src_def.map_or(false, |d| d.library_top_tutor().is_some());
             choices.iter().copied().max_by(|&a, &b| {
                 self.candidate_p(state, a, to_top)
                     .partial_cmp(&self.candidate_p(state, b, to_top))
@@ -805,6 +810,10 @@ impl Strategy for DDGoldfishStrategy {
                     .then_with(|| keep_rank(state, who, a).cmp(&keep_rank(state, who, b)))
             })
         };
+        if let Some(pick) = principled {
+            let verb = if is_fetch { "fetched" } else if to_top { "tutored (staged on top)" } else { "dug to hand" };
+            self.dlog(format!("DIG T{} · {} {}", state.current_turn, verb, DDGoldfishStrategy::nm(state, pick)));
+        }
         if self.compare {
             let heur = heur_pick(state, who, choices);
             if heur != principled {
@@ -830,6 +839,13 @@ impl Strategy for DDGoldfishStrategy {
         let keep_p = recipe::p_send_by_with_known_top(state, who, &[key.as_str()], true, self.cutoff);
         let base_p = recipe::p_send_by(state, who, self.cutoff);
         let principled_bin = keep_p < base_p; // a known keep worse than an unknown draw → bin
+        self.dlog(if principled_bin {
+            format!("DIG T{} · Consider binned {} (keep P {:.0}% < a fresh draw {:.0}%)",
+                state.current_turn, key, keep_p * 100.0, base_p * 100.0)
+        } else {
+            format!("DIG T{} · Consider kept {} on top (P {:.0}% ≥ a fresh draw {:.0}%)",
+                state.current_turn, key, keep_p * 100.0, base_p * 100.0)
+        });
         if self.compare {
             let heur_bin = heur_surveil_bin(state, who, id);
             if heur_bin != principled_bin {
@@ -860,6 +876,10 @@ impl Strategy for DDGoldfishStrategy {
             }
         }
         let bottom: Vec<ObjId> = top.iter().copied().filter(|id| !best_keep.contains(id)).collect();
+        let kept = if best_keep.is_empty() { "nothing".to_string() } else { names(state, &best_keep) };
+        self.dlog(format!("DIG T{} · scry {} → kept {} on top, bottomed {} (P {:.0}%)",
+            state.current_turn, names(state, top), kept,
+            if bottom.is_empty() { "nothing".to_string() } else { names(state, &bottom) }, best_p * 100.0));
         if self.compare {
             let heur_keep = heur_scry_keep(state, who, top);
             if heur_keep != best_keep {
@@ -896,6 +916,9 @@ impl Strategy for DDGoldfishStrategy {
             }
         }
         buried.truncate(count);
+        let putback = buried.iter().map(|&id| DDGoldfishStrategy::nm(state, id)).collect::<Vec<_>>().join(", ");
+        self.dlog(format!("DIG T{} · Brainstorm put back {} (kept the pieces the line needs)",
+            state.current_turn, putback));
         if self.compare {
             let heur = heur_bury(state, self.player_id, count, candidates);
             let pa: std::collections::HashSet<ObjId> = buried.iter().copied().collect();

@@ -138,6 +138,9 @@ pub struct SampleGame {
     /// The condensed play sequence for OUR side — land drops, casts, and the payoff
     /// (Doomsday resolving / the car pop) — so the send is legible step by step.
     pub line: Vec<String>,
+    /// The solver's cantrip/selection reasoning, turn-stamped ("T{n} · ..."): what each
+    /// Ponder/Brainstorm/Consider/scry/fetch saw and decided, and the P(send) it optimized.
+    pub cantrips: Vec<String>,
 }
 
 impl GoldfishStats {
@@ -295,7 +298,12 @@ where
             let mulls = mulligans.len() as u8;
             let cast_turn = state.terminal.then_some(state.current_turn as u32);
             let line = send_sequence(&state.log);
-            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn, found_payoff, line });
+            // The solver's cantrip reasoning: the strategy logs "DIG T{n} · ..." decisions;
+            // keep them turn-stamped (drop the "DIG " tag) for the sample display.
+            let cantrips: Vec<String> = state.decision_log.iter()
+                .filter_map(|l| l.strip_prefix("DIG ").map(|s| s.to_string()))
+                .collect();
+            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn, found_payoff, line, cantrips });
         }
         // Air content of the FIRST opening 7, by its fate. If no mulligan was taken the
         // kept hand IS that 7; otherwise the first thrown-back hand is. (Isolates whether
@@ -1341,6 +1349,7 @@ mod tests {
             let out = g.cast_turn.map(|t| format!("send T{t}")).unwrap_or("no send".into());
             println!("\n#{i}  keep {} [{}]  → {out}", 7 - g.mulls, g.hand.join(", "));
             for step in &g.line { println!("     {step}"); }
+            for c in &g.cantrips { println!("       dig: {c}"); }
         }
     }
 

@@ -115,6 +115,9 @@
       background: #0e2137; border: 1px solid #143152; border-radius: 3px; padding: 0.04rem 0.32rem; }
     .step.pop { color: #ffd479; background: #3a2a0f; border-color: #6a4a15; font-weight: bold; }
     .step.draw { color: #86c69a; background: #0f2418; border-color: #1d3a26; }
+    /* Cantrip reasoning — a muted sub-line under its turn's steps. */
+    .dig-note { margin: 0.02rem 0 0.12rem 1.9rem; font-size: 0.66rem; color: #8296a6;
+      font-style: italic; line-height: 1.35; }
   </style>
 </head>
 <body>
@@ -192,15 +195,47 @@
       <details id="solver-help" class="mode-desc">
         <summary>The cut-off and the solver</summary>
         <div>
-          <p><b>Cut-off turn.</b> The deadline for the combo. A Doomsday cast after it is treated as
-          too slow to matter, since by then the opponent has raced you or destroyed your mana. Every
-          result is scored as <code>P(cast Doomsday by the cut-off)</code>, so a lower cut-off
-          rewards faster decks.</p>
-          <p class="note"><b>Backwards solver.</b> For any game state, it reasons backward from
-          Doomsday to estimate that probability: the mana it can assemble for certain, plus the
-          chance of drawing a missing piece, counting each cantrip as a few extra cards seen. The
-          same estimate guides play &mdash; it runs a guaranteed line when one finishes by the
-          cut-off, and otherwise develops a black source and digs toward the combo.</p>
+          <p><b>Cut-off turn.</b> The deadline for the combo. A send after it is treated as too slow
+          to matter, since by then the opponent has raced you or destroyed your mana. Every result is
+          scored as <code>P(send by the cut-off)</code> &mdash; resolve Doomsday <i>or</i> pop the
+          Fantasticar &mdash; so a lower cut-off rewards faster decks.</p>
+          <p class="note"><b>How <code>P(send)</code> is computed &mdash; a hypergeometric
+          approximation.</b> For any game state the solver reasons backward from the payoff. If a
+          guaranteed line lands by the cut-off with no draws, <code>P(send) = 1</code>. Otherwise it
+          estimates: for each missing piece (a black source, the payoff, the car's fuel) it counts
+          the matching cards still in the library (the &ldquo;outs&rdquo;) and takes the
+          <b>hypergeometric</b> chance of drawing enough of them by the cut-off &mdash; drawing
+          <i>without replacement</i> &mdash; where each castable cantrip adds to the draw budget (the
+          extra cards it sees). The pieces are combined by multiplying their marginal probabilities,
+          and the two win-conditions as <code>P(send) = 1 &minus; (1&minus;P<sub>DD</sub>)(1&minus;P<sub>car</sub>)</code>.
+          It's deliberately an approximation &mdash; it assumes the pieces (and the two win-cons) are
+          independent and treats cantrips as blind extra draws rather than modelling chained
+          selection exactly &mdash; tractable, and good enough to rank hands and guide play (it runs a
+          guaranteed line when one finishes by the cut-off, else develops mana and digs).</p>
+        </div>
+      </details>
+      <details id="cantrip-help" class="mode-desc">
+        <summary>How the pilot digs (cantrips)</summary>
+        <div>
+          <p>Every card-selection decision falls out of one number: <b><code>P(send by the
+          cut-off)</code></b>, re-derived from the current game state. The pilot never uses a card
+          value table &mdash; it picks the option that leaves that probability highest.</p>
+          <ul>
+            <li><b>Ponder</b> reveals three. It compares the best <i>arrangement</i> of those three
+            on top (draw them over the next turns) against <i>shuffling them away</i> and keeps
+            whichever scores higher &mdash; so a brick top gets shuffled, a live top gets kept.</li>
+            <li><b>Brainstorm</b> draws three, then puts back the two cards the line needs least,
+            keeping payoffs, mana, and fuel.</li>
+            <li><b>Consider / surveil</b> keeps the revealed card on top only if it scores at least
+            as high as a fresh unknown draw; otherwise it bins it.</li>
+            <li><b>Scry / Preordain</b> keeps the arrangement (rest to the bottom) that scores
+            highest.</li>
+            <li><b>Fetch / tutor / dig</b> pick the target that most raises the probability &mdash; a
+            dual that pays the <i>next</i> pip, or staging the payoff itself on top.</li>
+          </ul>
+          <p class="note">In <b>Sample games</b> below, each turn's cantrip decisions are shown in
+          italics under the plays &mdash; what it saw, what it did, and the resulting
+          <code>P(send)</code>.</p>
         </div>
       </details>
       <label for="onplay">Play / draw</label>
@@ -227,8 +262,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260701-found';
-    const WASM_VER = '20260701-found';
+      from '../pkg/libmtg_doomsday.js?v=20260701-cantrips';
+    const WASM_VER = '20260701-cantrips';
 
     const REPO = 'boryas/libmtg';
 
@@ -476,27 +511,29 @@
           const mulls = (g.mulligans || []).map(h =>
             `<div class="srow mull"><span class="tag">mull</span> ${cardChips(h)}</div>`).join('');
           // The play sequence, ONE ROW PER TURN: the turn label, then that turn's steps as
-          // chips. Payoff (⚡) highlighted; cards drawn (natural "draw" / off a cantrip "↳")
-          // tinted apart from casts. `g.line` entries are "T{n} · {action}".
-          let seq = '';
-          if (g.line && g.line.length) {
-            const byTurn = new Map();
-            for (const step of g.line) {
-              const i = step.indexOf(' · ');
-              const turn = i >= 0 ? step.slice(0, i) : '';
-              const action = i >= 0 ? step.slice(i + 3) : step;
-              if (!byTurn.has(turn)) byTurn.set(turn, []);
-              byTurn.get(turn).push(action);
-            }
-            seq = [...byTurn].map(([turn, actions]) =>
-              `<div class="turn-row"><span class="turn-label">${turn}</span>`
-              + actions.map(a => {
-                  const cls = a.includes('⚡') ? ' pop'
-                    : (a.startsWith('↳') || a.startsWith('draw ')) ? ' draw' : '';
-                  return `<span class="step${cls}">${a}</span>`;
-                }).join('')
-              + `</div>`).join('');
+          // chips (payoff ⚡ highlighted; draws tinted), followed by the solver's cantrip
+          // reasoning for that turn as muted sub-lines. `g.line` / `g.cantrips` entries are
+          // "T{n} · {…}".
+          const put = (m, k, v) => { (m.get(k) || m.set(k, []).get(k)).push(v); };
+          const stepsByTurn = new Map(), digsByTurn = new Map();
+          for (const step of (g.line || [])) {
+            const i = step.indexOf(' · ');
+            put(stepsByTurn, i >= 0 ? step.slice(0, i) : '', i >= 0 ? step.slice(i + 3) : step);
           }
+          for (const c of (g.cantrips || [])) {
+            const i = c.indexOf(' · ');
+            put(digsByTurn, i >= 0 ? c.slice(0, i) : '', i >= 0 ? c.slice(i + 3) : c);
+          }
+          const tnum = (t) => parseInt(String(t).replace(/[^0-9]/g, ''), 10) || 0;
+          const turns = [...new Set([...stepsByTurn.keys(), ...digsByTurn.keys()])].sort((a, b) => tnum(a) - tnum(b));
+          const seq = turns.map(turn => {
+            const chips = (stepsByTurn.get(turn) || []).map(a => {
+              const cls = a.includes('⚡') ? ' pop' : (a.startsWith('↳') || a.startsWith('draw ')) ? ' draw' : '';
+              return `<span class="step${cls}">${a}</span>`;
+            }).join('');
+            const digs = (digsByTurn.get(turn) || []).map(d => `<div class="dig-note">${d}</div>`).join('');
+            return `<div class="turn-row"><span class="turn-label">${turn}</span>${chips}</div>${digs}`;
+          }).join('');
           return `<div class="sample">${mulls}`
             + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${cardChips(g.hand)} &rarr; ${outcome}</div>`
             + seq + `</div>`;
