@@ -839,11 +839,13 @@ impl Strategy for DDGoldfishStrategy {
         let keep_p = recipe::p_send_by_with_known_top(state, who, &[key.as_str()], true, self.cutoff);
         let base_p = recipe::p_send_by(state, who, self.cutoff);
         let principled_bin = keep_p < base_p; // a known keep worse than an unknown draw → bin
+        // NOTE: this is the generic surveil handler — it fires for Consider AND for surveil
+        // lands (Undercity Sewers), and isn't told which. So label it "surveil", not "Consider".
         self.dlog(if principled_bin {
-            format!("DIG T{} · Consider binned {} (keep P {:.0}% < a fresh draw {:.0}%)",
+            format!("DIG T{} · surveil binned {} (keep P {:.0}% < a fresh draw {:.0}%)",
                 state.current_turn, key, keep_p * 100.0, base_p * 100.0)
         } else {
-            format!("DIG T{} · Consider kept {} on top (P {:.0}% ≥ a fresh draw {:.0}%)",
+            format!("DIG T{} · surveil kept {} on top (P {:.0}% ≥ a fresh draw {:.0}%)",
                 state.current_turn, key, keep_p * 100.0, base_p * 100.0)
         });
         if self.compare {
