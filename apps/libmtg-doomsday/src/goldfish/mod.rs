@@ -116,6 +116,10 @@ pub struct GoldfishStats {
     /// cutoff — i.e. we DREW/played a payoff, whether or not we managed to send. `found_payoff
     /// − sends` is the execution gap: found the wincon but couldn't assemble it in time.
     pub found_payoff: u32,
+    /// Of the sends (terminal games), how many resolved Doomsday vs popped The Fantasticar.
+    /// `dd_sends + car_sends == sends`; the split shows which wincon actually carried the deck.
+    pub dd_sends: u32,
+    pub car_sends: u32,
     /// A handful of sample games (the first few of the run) for flavor: the kept
     /// opening hand, mulligans taken, and the cast turn (or none = never cast).
     pub samples: Vec<SampleGame>,
@@ -321,6 +325,11 @@ where
         let cast_by_cutoff = state.terminal && cutoff > 0 && state.current_turn <= cutoff;
         if state.terminal {
             *stats.cast_turn.entry(state.current_turn).or_insert(0) += 1;
+            // Which wincon carried it? The car pop leaves Fantasticar Construct tokens on the
+            // battlefield at the (immediate) send; a Doomsday send leaves none.
+            let via_car = count_car
+                && state.objects.values().any(|o| o.catalog_key == "Fantasticar Construct");
+            if via_car { stats.car_sends += 1; } else { stats.dd_sends += 1; }
             let prot = state
                 .hand_of(PlayerId::Us)
                 .filter(|c| protection.contains(&c.catalog_key.as_str()))
@@ -1347,9 +1356,13 @@ mod tests {
         let deck = vroomsday_deck();
         let stats = run_goldfish_send(&deck, 2000, DEFAULT_PROTECTION, 3, MullMode::Realistic, Some(true), true);
         let g = stats.games as f64;
+        let sends = (stats.dd_sends + stats.car_sends).max(1) as f64;
         println!("send by T3 = {:.1}%   found a payoff = {:.1}%   (found-but-stuck = {:.1}%)",
             100.0 * stats.cast_by(3), 100.0 * stats.found_payoff as f64 / g,
             100.0 * (stats.found_payoff as f64 / g - stats.cast_by(3)));
+        println!("of sends: Doomsday {:.0}% ({})  ·  Fantasticar {:.0}% ({})",
+            100.0 * stats.dd_sends as f64 / sends, stats.dd_sends,
+            100.0 * stats.car_sends as f64 / sends, stats.car_sends);
         for (i, g) in stats.samples.iter().enumerate() {
             let out = g.cast_turn.map(|t| format!("send T{t}")).unwrap_or("no send".into());
             println!("\n#{i}  keep {} [{}]  → {out}", 7 - g.mulls, g.hand.join(", "));

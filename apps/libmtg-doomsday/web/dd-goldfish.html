@@ -21,6 +21,10 @@
     .subhead { font-size: 0.82rem; margin-bottom: 0.7rem; padding-bottom: 0.6rem;
       border-bottom: 1px solid #0f3460; color: #b9c6cf; }
     .subhead b { color: #86c69a; font-size: 1.1rem; margin: 0 0.15rem; }
+    .split { font-size: 0.86rem; margin: 0.15rem 0 0.4rem; color: #9fb0bd; }
+    .split b { font-size: 1.0rem; margin: 0 0.1rem; }
+    .split b.dd { color: #8fb8e0; }
+    .split b.car { color: #f5b041; }
     tr.cutoff td { color: #f5b041; font-weight: bold; }
     tr.cutoff .bar { background: #8a5a1a; }
     button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 0.45rem 0.9rem;
@@ -275,8 +279,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260701-linear';
-    const WASM_VER = '20260701-linear';
+      from '../pkg/libmtg_doomsday.js?v=20260701-split';
+    const WASM_VER = '20260701-split';
 
     const REPO = 'boryas/libmtg';
 
@@ -414,12 +418,14 @@
     function emptyStats() {
       return { games: 0, fails: 0, cast_turn: {}, protection: {},
                cutoff: 0, mull_count: {}, mull_pred_sum: {}, deterministic_cast: 0, stochastic_cast: 0,
-               miss_mana: 0, miss_payoff: 0, miss_both: 0, miss_neither: 0, found_payoff: 0, samples: [] };
+               miss_mana: 0, miss_payoff: 0, miss_both: 0, miss_neither: 0, found_payoff: 0,
+               dd_sends: 0, car_sends: 0, samples: [] };
     }
     function mergeStats(a, p) {
       a.games += p.games; a.fails += p.fails;
       a.cutoff = p.cutoff || a.cutoff;
       a.found_payoff += (p.found_payoff || 0);
+      a.dd_sends += (p.dd_sends || 0); a.car_sends += (p.car_sends || 0);
       a.deterministic_cast += (p.deterministic_cast || 0);
       a.stochastic_cast += (p.stochastic_cast || 0);
       a.miss_mana += (p.miss_mana || 0); a.miss_payoff += (p.miss_payoff || 0);
@@ -608,6 +614,13 @@
       const pFound = (s.found_payoff || 0) / Math.max(1, s.games);
       const pStuck = Math.max(0, pFound - pByCutoff);
       const payoffNoun = hasCar ? 'Doomsday or Fantasticar' : 'Doomsday';
+      // Of the sends, which wincon carried it (car decks only).
+      const nSends = (s.dd_sends || 0) + (s.car_sends || 0);
+      const ddShare = nSends ? Math.round(100 * s.dd_sends / nSends) : 0;
+      const carShare = nSends ? Math.round(100 * s.car_sends / nSends) : 0;
+      const splitLine = hasCar && nSends
+        ? `<div class="split">of the sends: <b class="dd">Doomsday ${ddShare}%</b> &middot; <b class="car">Fantasticar ${carShare}%</b></div>`
+        : '';
 
       $('results').className = '';
       $('results').innerHTML = `
@@ -615,6 +628,7 @@
         <div class="panel">
           <div class="headline">P(${goal} by T${cutoff}) <b>${(pByCutoff * 100).toFixed(1)}%</b>
             <span class="muted">&mdash; the cut-off objective${hasCar ? ' (Doomsday or Fantasticar pop)' : ''}</span></div>
+          ${splitLine}
           <div class="subhead">found a payoff <b>${(pFound * 100).toFixed(1)}%</b>
             <span class="muted">&mdash; drew a ${payoffNoun}: ${(pByCutoff * 100).toFixed(1)}% sent, ${(pStuck * 100).toFixed(1)}% found it but couldn't assemble by T${cutoff}</span></div>
           <div class="summary">
