@@ -103,6 +103,7 @@
     .step { font-family: ui-monospace, monospace; font-size: 0.68rem; color: #a9c7e0;
       background: #0e2137; border: 1px solid #143152; border-radius: 3px; padding: 0.04rem 0.32rem; }
     .step.pop { color: #ffd479; background: #3a2a0f; border-color: #6a4a15; font-weight: bold; }
+    .step.draw { color: #86c69a; background: #0f2418; border-color: #1d3a26; }
   </style>
 </head>
 <body>
@@ -137,9 +138,8 @@
         with real mana <i>and</i> a concrete plan: a guaranteed line; Doomsday + a black source + a
         dig; a deterministic Tamiyo flip by turn&nbsp;2; or, unflooded, two looks (or one look + a
         supporter). It ships no-mana / flooded / do-nothing hands &mdash; an explicit, inspectable
-        rule that does <i>not</i> consult <code>g</code>. <b>Keep 7</b> never mulligans (raw deck speed). <b>Aggressive</b> re-draws
-        any hand below a high <code>g</code> threshold (0.55 / 0.38 / 0.20 by mulligan) &mdash;
-        fast but it ships almost every imperfect seven and so flattens deck differences.</p>
+        rule that does <i>not</i> consult <code>g</code>. <b>Keep 7</b> never mulligans &mdash; the
+        deck's raw speed, with no mulligan decisions mixed in.</p>
 
       <p class="caveats"><b>Structural caveats (true for any deck).</b></p>
       <ul class="caveats">
@@ -154,9 +154,9 @@
         <li><b>Cantrip "looks" are a heuristic.</b> Non-additive and time-capped, with no true
           modeling of chained cantrips.</li>
         <li><b>Mulligan modes change the result.</b> The headline rate is reported <i>for the
-          selected mode</i>; comparing a deck across modes (Keep 7 → Realistic → Aggressive) is the
-          honest read. Only the Aggressive mode consults <code>g</code>; Realistic is a pure
-          card-shape rule.</li>
+          selected mode</i>; comparing a deck across both modes (Keep 7 → Realistic) is the honest
+          read. Neither consults <code>g</code> &mdash; Realistic is a pure card-shape rule, Keep 7
+          never mulligans.</li>
         <li>The per-hand predicted P is the model's <i>own estimate</i> of <code>g</code>; the
           <b>headline % is the measured simulation rate</b> &mdash; the honest number, free of that bias.</li>
       </ul>
@@ -171,7 +171,6 @@
       <select id="mull">
         <option value="realistic" selected>Realistic &mdash; keep a real plan</option>
         <option value="keep7">Keep 7 &mdash; never mulligan</option>
-        <option value="aggressive">Aggressive &mdash; race bar</option>
       </select>
       <details id="mull-help" class="mode-desc">
         <summary>How this mode decides</summary>
@@ -217,8 +216,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260701-seq';
-    const WASM_VER = '20260701-seq';
+      from '../pkg/libmtg_doomsday.js?v=20260701-draws';
+    const WASM_VER = '20260701-draws';
 
     const REPO = 'boryas/libmtg';
 
@@ -244,39 +243,35 @@
         <i>supporter</i> is interaction or a threat body (Tamiyo / Murktide / …).</p>`,
       keep7: `<p>Never mulligans &mdash; it always keeps the opening seven. This shows the deck's
         raw speed, with no mulligan decisions mixed in.</p>`,
-      aggressive: `<p>The fanatical race bar: keep only a guaranteed-or-nearly-guaranteed fast
-        payoff, and mulligan anything speculative. A hand stays if the solver finds a
-        <em>deterministic</em> line by the cut-off, or if it holds Doomsday + two black sources +
-        a castable cantrip to dig the last black. No probability threshold; it always keeps at four
-        cards. <span class="note">Its deterministic branch already counts a Fantasticar pop, but its
-        speculative-keep is Doomsday-shaped &mdash; for car decks, Realistic is the tuned one.</span></p>`,
     };
 
-    // Default deck: "vroomsday 8 guys" — the two-wincon Doomsday + The Fantasticar list,
-    // so the page shows off car exploration out of the box (all cards in-catalog).
+    // Default deck: the current car-focused Doomsday + The Fantasticar list
+    // (moxfield.com/decks/6Q6fAV_uhXiGfpTg2Lcvbw), mainboard, so the page shows off car
+    // exploration out of the box (all cards in-catalog).
     const SAMPLE = `4 Underground Sea
 4 Polluted Delta
-1 Verdant Catacombs
 1 Flooded Strand
 1 Misty Rainforest
 1 Scalding Tarn
+1 Marsh Flats
 1 Island
 1 Swamp
 1 Undercity Sewers
 1 Cavern of Souls
 4 Lotus Petal
 1 Lion's Eye Diamond
-4 Mishra's Bauble
+2 Mishra's Bauble
 4 Dark Ritual
 4 Doomsday
 4 The Fantasticar
 4 Brainstorm
 4 Ponder
+3 Flow State
 1 Consider
 1 Edge of Autumn
 1 Street Wraith
 4 Force of Will
-4 Daze
+3 Daze
 3 Thoughtseize
 1 Thassa's Oracle`;
 
@@ -424,7 +419,7 @@
         `<tr><td>${p} layer${p === 1 ? '' : 's'}</td><td>${bar(s.protection[p] / successes, 'prot')}</td></tr>`);
 
       const pilot = 'cast-ASAP solver &middot; ' +
-        ({ realistic: 'Realistic mull', keep7: 'Keep-7', aggressive: 'Aggressive mull' }[mull] || mull);
+        ({ realistic: 'Realistic mull', keep7: 'Keep-7' }[mull] || mull);
 
       const hasRich = s.mull_count && Object.keys(s.mull_count).length > 0;
       let secs = '';
@@ -460,10 +455,14 @@
           const outcome = `<span class="seg ${cast ? 'det' : 'miss'}">${cast ? `${noun} T${g.cast_turn}` : `no ${noun}`}</span>`;
           const mulls = (g.mulligans || []).map(h =>
             `<div class="srow mull"><span class="tag">mull</span> ${h.join(', ')}</div>`).join('');
-          // The play sequence — highlight the payoff step (⚡) so the send is obvious.
+          // The play sequence — highlight the payoff step (⚡), and tint the cards drawn
+          // (naturally "draw" / off a cantrip "↳") so digs read apart from casts.
           const seq = (g.line && g.line.length)
-            ? `<div class="srow seq">` + g.line.map(step =>
-                `<span class="step${step.includes('⚡') ? ' pop' : ''}">${step}</span>`).join('') + `</div>`
+            ? `<div class="srow seq">` + g.line.map(step => {
+                const cls = step.includes('⚡') ? ' pop'
+                  : (step.includes('↳') || step.includes(' · draw ')) ? ' draw' : '';
+                return `<span class="step${cls}">${step}</span>`;
+              }).join('') + `</div>`
             : '';
           return `<div class="sample">${mulls}`
             + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${g.hand.join(', ')} &rarr; ${outcome}</div>`

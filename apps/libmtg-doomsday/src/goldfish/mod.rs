@@ -193,10 +193,11 @@ pub fn dd_goldfish_evaluator() -> Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 
 /// Doomsday player's strategy is built fresh per game by `make_us`, with
 /// `evaluator` installed as the card evaluator.
 /// Condense the engine play-by-play (`state.log`) into OUR side's legible sequence:
-/// each land drop and cast (turn-stamped), plus a single payoff marker (Doomsday
-/// resolving / the car pop with its Construct count). Engine lines are
-/// `T{n} [{who}|{phase}] {action} [hand: k]`; we keep only `[us` actors, strip the
-/// phase tag and the trailing hand count, and drop mana/resolve/ETB noise.
+/// each land drop and cast (turn-stamped), the cards drawn — naturally (`draw {card}`)
+/// or off a cantrip (`↳ {card}`) — and a single payoff marker (Doomsday resolving / the
+/// car pop with its Construct count). Engine lines are `T{n} [{who}|{phase}] {action}
+/// [hand: k]`; we keep only `[us` actors, strip the phase tag and trailing hand count,
+/// drop mana/resolve/ETB noise, and skip the T0 opening-hand + mulligan draws.
 fn send_sequence(log: &[String]) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     let mut pop: Option<(String, u32)> = None; // (turn, Construct count)
@@ -208,6 +209,14 @@ fn send_sequence(log: &[String]) -> Vec<String> {
         let action = l[close + 1..].split(" [hand:").next().unwrap_or("").trim();
         if action.starts_with("Play ") || action.starts_with("Cast ") {
             steps.push(format!("T{turn} · {}", action.replace("(ir alt cost)", "(alt. cost)")));
+        } else if turn != "0" && action.starts_with("Draw ") {
+            // Natural draw-step draw (T0 = opening hand / mulligans, skipped).
+            steps.push(format!("T{turn} · draw {}", &action["Draw ".len()..]));
+        } else if turn != "0" && action.starts_with("draw (") {
+            // Extra / cantrip draw: "draw (2) Lotus Petal" → the card found off a cantrip.
+            if let Some(card) = action.splitn(3, ' ').nth(2) {
+                steps.push(format!("T{turn} · ↳ {card}"));
+            }
         } else if action.contains("Construct created") {
             let e = pop.get_or_insert((turn.to_string(), 0));
             e.1 += 1;
@@ -1298,6 +1307,42 @@ mod tests {
             "T1 · Cast Lotus Petal (0)",
             "T1 · Cast Daze (alt. cost) targeting Lotus Petal",
             "T1 · ⚡ pop — 4 Constructs",
+        ]);
+    }
+
+    /// DEBUG (`cargo test dbg_send_sequence_live -- --ignored --nocapture`): run real car
+    /// games and print the captured send sequence, to eyeball it against real logs.
+    #[test]
+    #[ignore]
+    fn dbg_send_sequence_live() {
+        let deck = vroomsday_deck();
+        let stats = run_goldfish_send(&deck, 400, DEFAULT_PROTECTION, 3, MullMode::Realistic, Some(true), true);
+        for (i, g) in stats.samples.iter().enumerate() {
+            let out = g.cast_turn.map(|t| format!("send T{t}")).unwrap_or("no send".into());
+            println!("\n#{i}  keep {} [{}]  → {out}", 7 - g.mulls, g.hand.join(", "));
+            for step in &g.line { println!("     {step}"); }
+        }
+    }
+
+    /// `send_sequence` surfaces cards drawn — off a cantrip (`↳`) and naturally (`draw`) —
+    /// while skipping the T0 opening-hand / mulligan draws.
+    #[test]
+    fn send_sequence_shows_drawn_cards() {
+        let log: Vec<String> = [
+            "T0 [us|us/Draw] draw (1) Island [hand: 1]",            // opening hand — skipped
+            "T0 [us|us/Draw] draw (7) Doomsday [hand: 7]",          // opening hand — skipped
+            "T1 [us|us/PreCombatMain] Play Underground Sea [hand: 6]",
+            "T1 [us|us/PreCombatMain] Cast Ponder (U) [hand: 5]",
+            "T1 [us|us/PreCombatMain] Ponder resolves",
+            "T1 [us|us/PreCombatMain] draw (2) Lotus Petal [hand: 6]",   // off the cantrip
+            "T2 [opp|opp/Draw] Draw Forest [hand: 7]",              // opponent — skipped
+            "T2 [us|us/Draw] Draw Dark Ritual [hand: 6]",          // natural draw
+        ].iter().map(|s| s.to_string()).collect();
+        assert_eq!(send_sequence(&log), vec![
+            "T1 · Play Underground Sea",
+            "T1 · Cast Ponder (U)",
+            "T1 · ↳ Lotus Petal",
+            "T2 · draw Dark Ritual",
         ]);
     }
 
