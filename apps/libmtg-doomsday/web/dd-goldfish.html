@@ -94,12 +94,16 @@
     table.breakdown-tbl tr.sub td.pct { color: #889; font-weight: normal; }
     .sample { border-bottom: 1px solid #0f3460; padding: 0.35rem 0; }
     .sample:last-child { border-bottom: none; }
-    .srow { font-size: 0.74rem; margin: 0.12rem 0; word-break: break-word; }
-    .srow .tag { display: inline-block; min-width: 3.4rem; font-size: 0.68rem; color: #889; }
+    .srow { display: flex; flex-wrap: wrap; align-items: center; gap: 0.18rem 0.3rem;
+      font-size: 0.74rem; margin: 0.12rem 0; }
+    .srow .tag { min-width: 3.4rem; font-size: 0.68rem; color: #889; }
     .srow.mull .tag { color: #cf8f6f; }
     .srow .tag.keep { color: #6fcf9f; }
-    .srow.seq { display: flex; flex-wrap: wrap; align-items: center; gap: 0.22rem 0.3rem;
-      margin: 0.2rem 0 0.1rem 0.4rem; padding-left: 0.4rem; border-left: 2px solid #0f3460; }
+    /* One row per turn: the turn label, then that turn's steps as chips. */
+    .turn-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.3rem;
+      margin: 0.1rem 0; padding-left: 0.4rem; border-left: 2px solid #0f3460; }
+    .turn-label { font-family: ui-monospace, monospace; font-size: 0.68rem; font-weight: bold;
+      color: #f5b041; min-width: 1.4rem; }
     .step { font-family: ui-monospace, monospace; font-size: 0.68rem; color: #a9c7e0;
       background: #0e2137; border: 1px solid #143152; border-radius: 3px; padding: 0.04rem 0.32rem; }
     .step.pop { color: #ffd479; background: #3a2a0f; border-color: #6a4a15; font-weight: bold; }
@@ -450,22 +454,37 @@
       // step-by-step sequence that led to the send (land drops, casts, the payoff).
       if (s.samples && s.samples.length) {
         const noun = hasCar ? 'send' : 'cast';
+        // Card names get the same chip treatment everywhere (hands + the sequence).
+        const cardChips = (cards) => cards.map(c => `<span class="step">${c}</span>`).join('');
         const body = s.samples.map(g => {
           const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
           const outcome = `<span class="seg ${cast ? 'det' : 'miss'}">${cast ? `${noun} T${g.cast_turn}` : `no ${noun}`}</span>`;
           const mulls = (g.mulligans || []).map(h =>
-            `<div class="srow mull"><span class="tag">mull</span> ${h.join(', ')}</div>`).join('');
-          // The play sequence — highlight the payoff step (⚡), and tint the cards drawn
-          // (naturally "draw" / off a cantrip "↳") so digs read apart from casts.
-          const seq = (g.line && g.line.length)
-            ? `<div class="srow seq">` + g.line.map(step => {
-                const cls = step.includes('⚡') ? ' pop'
-                  : (step.includes('↳') || step.includes(' · draw ')) ? ' draw' : '';
-                return `<span class="step${cls}">${step}</span>`;
-              }).join('') + `</div>`
-            : '';
+            `<div class="srow mull"><span class="tag">mull</span> ${cardChips(h)}</div>`).join('');
+          // The play sequence, ONE ROW PER TURN: the turn label, then that turn's steps as
+          // chips. Payoff (⚡) highlighted; cards drawn (natural "draw" / off a cantrip "↳")
+          // tinted apart from casts. `g.line` entries are "T{n} · {action}".
+          let seq = '';
+          if (g.line && g.line.length) {
+            const byTurn = new Map();
+            for (const step of g.line) {
+              const i = step.indexOf(' · ');
+              const turn = i >= 0 ? step.slice(0, i) : '';
+              const action = i >= 0 ? step.slice(i + 3) : step;
+              if (!byTurn.has(turn)) byTurn.set(turn, []);
+              byTurn.get(turn).push(action);
+            }
+            seq = [...byTurn].map(([turn, actions]) =>
+              `<div class="turn-row"><span class="turn-label">${turn}</span>`
+              + actions.map(a => {
+                  const cls = a.includes('⚡') ? ' pop'
+                    : (a.startsWith('↳') || a.startsWith('draw ')) ? ' draw' : '';
+                  return `<span class="step${cls}">${a}</span>`;
+                }).join('')
+              + `</div>`).join('');
+          }
           return `<div class="sample">${mulls}`
-            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${g.hand.join(', ')} &rarr; ${outcome}</div>`
+            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${cardChips(g.hand)} &rarr; ${outcome}</div>`
             + seq + `</div>`;
         }).join('');
         secs += section(`Sample games <span class="muted">&mdash; openers + the ${noun} sequence</span>`, body, false);
