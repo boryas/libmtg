@@ -714,20 +714,24 @@ impl Strategy for DDGoldfishStrategy {
         let revealed: Vec<String> = cards.iter()
             .filter_map(|id| state.objects.get(id).map(|c| c.catalog_key.clone()))
             .collect();
-        // Ponder offers a shuffle (a `MayDo` follows this `OrderTop`).
+        // Ponder offers a shuffle (a `MayDo` follows this `OrderTop`). The DIG line carries a
+        // card-free reason plus a ` ‖ `-delimited list of per-card fate tokens (see/top/…) that
+        // the UI renders as chips; keep the card names OUT of the reason (they're in the chips).
         let (choice, p) = recipe::best_top_choice(state, who, &revealed, true, self.cutoff);
-        let seen = revealed.join(", ");
         match choice {
             recipe::TopChoice::Shuffle => {
                 self.pending_shuffle = true;
-                self.dlog(format!("DIG T{} · Ponder saw {} → shuffled (kept top scored below a fresh draw; P {:.0}%)",
-                    state.current_turn, seen, p * 100.0));
+                let toks: Vec<String> = revealed.iter().map(|r| format!("see:{r}"))
+                    .chain(std::iter::once("shuffle".to_string())).collect();
+                self.dlog(format!("DIG T{} · Ponder: the top scored below a fresh draw, so shuffled it away (P {:.0}%) ‖ {}",
+                    state.current_turn, p * 100.0, toks.join(";")));
                 cards.to_vec() // order is irrelevant — we'll shuffle it away
             }
             recipe::TopChoice::Keep(order_keys) => {
                 self.pending_shuffle = false;
-                self.dlog(format!("DIG T{} · Ponder saw {} → kept {} on top (draw next; P {:.0}%)",
-                    state.current_turn, seen, order_keys.join(", "), p * 100.0));
+                let toks: Vec<String> = order_keys.iter().map(|k| format!("top:{k}")).collect();
+                self.dlog(format!("DIG T{} · Ponder: kept the top in this order to draw into (P {:.0}%) ‖ {}",
+                    state.current_turn, p * 100.0, toks.join(";")));
                 // Map the chosen key ordering back onto the actual card ids.
                 let mut remaining: Vec<ObjId> = cards.to_vec();
                 let mut out: Vec<ObjId> = Vec::new();
@@ -811,8 +815,15 @@ impl Strategy for DDGoldfishStrategy {
             })
         };
         if let Some(pick) = principled {
-            let verb = if is_fetch { "fetched" } else if to_top { "tutored (staged on top)" } else { "dug to hand" };
-            self.dlog(format!("DIG T{} · {} {}", state.current_turn, verb, DDGoldfishStrategy::nm(state, pick)));
+            let name = DDGoldfishStrategy::nm(state, pick);
+            let (reason, tok) = if is_fetch {
+                ("fetched the source the next spell needs", format!("play:{name}"))
+            } else if to_top {
+                ("tutored the payoff onto the top", format!("top:{name}"))
+            } else {
+                ("dug the best card to hand", format!("draw:{name}"))
+            };
+            self.dlog(format!("DIG T{} · {} ‖ {}", state.current_turn, reason, tok));
         }
         if self.compare {
             let heur = heur_pick(state, who, choices);
@@ -845,14 +856,14 @@ impl Strategy for DDGoldfishStrategy {
         // draw); lead with that gap (the two absolute rates often round to the same %).
         let (kp, dp) = (keep_p * 100.0, base_p * 100.0);
         self.dlog(if principled_bin {
-            format!("DIG T{} · surveil binned {} — a fresh draw wins by {:.1}pp ({:.1}% vs keeping {:.1}%)",
-                state.current_turn, key, dp - kp, dp, kp)
+            format!("DIG T{} · surveil: a fresh draw wins by {:.1}pp ({:.1}% vs keeping {:.1}%) ‖ gy:{}",
+                state.current_turn, dp - kp, dp, kp, key)
         } else if kp - dp < 0.05 {
-            format!("DIG T{} · surveil kept {} — about even with a fresh draw (≈{:.1}%), kept by default",
-                state.current_turn, key, kp)
+            format!("DIG T{} · surveil: about even with a fresh draw (≈{:.1}%), kept by default ‖ top:{}",
+                state.current_turn, kp, key)
         } else {
-            format!("DIG T{} · surveil kept {} — beats a fresh draw by {:.1}pp ({:.1}% vs {:.1}%)",
-                state.current_turn, key, kp - dp, kp, dp)
+            format!("DIG T{} · surveil: keeping it beats a fresh draw by {:.1}pp ({:.1}% vs {:.1}%) ‖ top:{}",
+                state.current_turn, kp - dp, kp, dp, key)
         });
         if self.compare {
             let heur_bin = heur_surveil_bin(state, who, id);
@@ -884,10 +895,10 @@ impl Strategy for DDGoldfishStrategy {
             }
         }
         let bottom: Vec<ObjId> = top.iter().copied().filter(|id| !best_keep.contains(id)).collect();
-        let kept = if best_keep.is_empty() { "nothing".to_string() } else { names(state, &best_keep) };
-        self.dlog(format!("DIG T{} · scry {} → kept {} on top, bottomed {} (P {:.0}%)",
-            state.current_turn, names(state, top), kept,
-            if bottom.is_empty() { "nothing".to_string() } else { names(state, &bottom) }, best_p * 100.0));
+        let toks: Vec<String> = best_keep.iter().map(|&id| format!("top:{}", DDGoldfishStrategy::nm(state, id)))
+            .chain(bottom.iter().map(|&id| format!("bot:{}", DDGoldfishStrategy::nm(state, id)))).collect();
+        self.dlog(format!("DIG T{} · scry: kept the highest-scoring arrangement on top, rest to the bottom (P {:.0}%) ‖ {}",
+            state.current_turn, best_p * 100.0, toks.join(";")));
         if self.compare {
             let heur_keep = heur_scry_keep(state, who, top);
             if heur_keep != best_keep {
@@ -924,9 +935,9 @@ impl Strategy for DDGoldfishStrategy {
             }
         }
         buried.truncate(count);
-        let putback = buried.iter().map(|&id| DDGoldfishStrategy::nm(state, id)).collect::<Vec<_>>().join(", ");
-        self.dlog(format!("DIG T{} · Brainstorm put back {} (kept the pieces the line needs)",
-            state.current_turn, putback));
+        let toks: Vec<String> = buried.iter().map(|&id| format!("top:{}", DDGoldfishStrategy::nm(state, id))).collect();
+        self.dlog(format!("DIG T{} · Brainstorm: put back the cards the line needs least, kept the rest ‖ {}",
+            state.current_turn, toks.join(";")));
         if self.compare {
             let heur = heur_bury(state, self.player_id, count, candidates);
             let pa: std::collections::HashSet<ObjId> = buried.iter().copied().collect();

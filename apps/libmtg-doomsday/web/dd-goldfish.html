@@ -115,9 +115,17 @@
       background: #0e2137; border: 1px solid #143152; border-radius: 3px; padding: 0.04rem 0.32rem; }
     .step.pop { color: #ffd479; background: #3a2a0f; border-color: #6a4a15; font-weight: bold; }
     .step.draw { color: #86c69a; background: #0f2418; border-color: #1d3a26; }
-    /* Cantrip reasoning — a muted sub-line under its turn's steps. */
-    .dig-note { margin: 0.02rem 0 0.12rem 1.9rem; font-size: 0.66rem; color: #8296a6;
-      font-style: italic; line-height: 1.35; }
+    /* A cantrip decision under its turn: per-card fate-chips + a muted reason (the cherry).
+       Fate language: 👁 seen · 📖 to top of library · 🪦 graveyard · ⤓ to bottom · 🔀 shuffled. */
+    .dig { display: flex; flex-wrap: wrap; align-items: center; gap: 0.18rem 0.3rem;
+      margin: 0.06rem 0 0.14rem 1.6rem; }
+    .dig-note { font-size: 0.66rem; color: #8296a6; font-style: italic; line-height: 1.35; }
+    .step.fate-see { color: #9aa7b2; background: #171d24; border-color: #2b333c; border-style: dashed; }
+    .step.fate-top { color: #8fb8e0; background: #10233a; border-color: #234a6e; }
+    .step.fate-gy  { color: #d59a9a; background: #271414; border-color: #4a2222; }
+    .step.fate-bot { color: #8a94a0; background: #181c22; border-color: #2a3038; }
+    .step.fate-shuffle { color: #e3b878; background: #2a2010; border-color: #4c3a15; }
+    .step.fate-play { color: #a6c2a0; background: #16241a; border-color: #274229; }
   </style>
 </head>
 <body>
@@ -233,9 +241,11 @@
             <li><b>Fetch / tutor / dig</b> pick the target that most raises the probability &mdash; a
             dual that pays the <i>next</i> pip, or staging the payoff itself on top.</li>
           </ul>
-          <p class="note">In <b>Sample games</b> below, each turn's cantrip decisions are shown in
-          italics under the plays &mdash; what it saw, what it did, and the resulting
-          <code>P(send)</code>.</p>
+          <p class="note">In <b>Sample games</b> below, each turn's cantrip decisions are shown as
+          per-card <b>fate-chips</b> under the plays &mdash; <b>👁</b> seen, <b>📖</b> put on top of
+          the library, <b>🪦</b> to the graveyard, <b>⤓</b> to the bottom, <b>🔀</b> shuffled away,
+          and drawn (green) &mdash; with the reasoning and the resulting <code>P(send)</code> as a
+          note beside them.</p>
         </div>
       </details>
       <label for="onplay">Play / draw</label>
@@ -262,8 +272,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260701-margin';
-    const WASM_VER = '20260701-margin';
+      from '../pkg/libmtg_doomsday.js?v=20260701-fates';
+    const WASM_VER = '20260701-fates';
 
     const REPO = 'boryas/libmtg';
 
@@ -499,6 +509,25 @@
         const noun = hasCar ? 'send' : 'cast';
         // Card names get the same chip treatment everywhere (hands + the sequence).
         const cardChips = (cards) => cards.map(c => `<span class="step">${c}</span>`).join('');
+        // A cantrip decision "…reason… ‖ code:Card;code:Card;shuffle" → a row of fate-chips
+        // (each card's destiny) plus the reason as a muted cherry. Fate visual language:
+        // 👁 seen · 📖 put on top of library · 🪦 to graveyard · ⤓ to bottom · 🔀 shuffled ·
+        // drawn (green).
+        const FATE = { see: '👁', top: '📖', gy: '🪦', bot: '⤓', draw: '', play: '' };
+        const FCLS = { see: 'fate-see', top: 'fate-top', gy: 'fate-gy', bot: 'fate-bot', draw: 'draw', play: 'fate-play' };
+        const renderDig = (d) => {
+          const b = d.indexOf(' ‖ ');
+          const note = b >= 0 ? d.slice(0, b) : d;
+          const toks = b >= 0 ? d.slice(b + 3).split(';').filter(Boolean) : [];
+          const chips = toks.map(t => {
+            if (t === 'shuffle') return `<span class="step fate-shuffle">🔀 shuffled</span>`;
+            const ci = t.indexOf(':');
+            const code = ci >= 0 ? t.slice(0, ci) : t, card = ci >= 0 ? t.slice(ci + 1) : '';
+            const em = FATE[code] || '';
+            return `<span class="step ${FCLS[code] || ''}">${em ? em + ' ' : ''}${card}</span>`;
+          }).join('');
+          return `<div class="dig">${chips}<span class="dig-note">${note}</span></div>`;
+        };
         const body = s.samples.map(g => {
           const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
           // For a non-send, note whether we at least FOUND a payoff (drew a car/DD) — the
@@ -531,7 +560,7 @@
               const cls = a.includes('⚡') ? ' pop' : (a.startsWith('↳') || a.startsWith('draw ')) ? ' draw' : '';
               return `<span class="step${cls}">${a}</span>`;
             }).join('');
-            const digs = (digsByTurn.get(turn) || []).map(d => `<div class="dig-note">${d}</div>`).join('');
+            const digs = (digsByTurn.get(turn) || []).map(renderDig).join('');
             return `<div class="turn-row"><span class="turn-label">${turn}</span>${chips}</div>${digs}`;
           }).join('');
           return `<div class="sample">${mulls}`
