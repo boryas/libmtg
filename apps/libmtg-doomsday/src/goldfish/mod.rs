@@ -210,32 +210,34 @@ pub fn dd_goldfish_evaluator() -> Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 
 /// drop mana/resolve/ETB noise, and skip the T0 opening-hand + mulligan draws.
 fn send_sequence(log: &[String]) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
-    let mut pop: Option<(String, u32)> = None; // (turn, Construct count)
-    for l in log {
+    let mut pop: Option<(usize, String, u32)> = None; // (raw log index, turn, Construct count)
+    // Each kept step is prefixed with "@{raw log index}" so the UI can interleave the
+    // separately-logged cantrip decisions (also position-stamped) in exact temporal order.
+    for (ri, l) in log.iter().enumerate() {
         let Some(close) = l.find(']') else { continue };
         let tag = &l[..close];
         if !tag.contains("[us") { continue; } // our actions only (any turn)
         let turn = tag.trim_start_matches('T').split_whitespace().next().unwrap_or("?");
         let action = l[close + 1..].split(" [hand:").next().unwrap_or("").trim();
         if action.starts_with("Play ") || action.starts_with("Cast ") {
-            steps.push(format!("T{turn} · {}", action.replace("(ir alt cost)", "(alt. cost)")));
+            steps.push(format!("@{ri} T{turn} · {}", action.replace("(ir alt cost)", "(alt. cost)")));
         } else if turn != "0" && action.starts_with("Draw ") {
             // Natural draw-step draw (T0 = opening hand / mulligans, skipped).
-            steps.push(format!("T{turn} · draw {}", &action["Draw ".len()..]));
+            steps.push(format!("@{ri} T{turn} · draw {}", &action["Draw ".len()..]));
         } else if turn != "0" && action.starts_with("draw (") {
             // Extra / cantrip draw: "draw (2) Lotus Petal" → the card found off a cantrip.
             if let Some(card) = action.splitn(3, ' ').nth(2) {
-                steps.push(format!("T{turn} · ↳ {card}"));
+                steps.push(format!("@{ri} T{turn} · ↳ {card}"));
             }
         } else if action.contains("Construct created") {
-            let e = pop.get_or_insert((turn.to_string(), 0));
-            e.1 += 1;
+            let e = pop.get_or_insert((ri, turn.to_string(), 0));
+            e.2 += 1;
         } else if action == "Doomsday resolves" {
-            steps.push(format!("T{turn} · ⚡ Doomsday resolves"));
+            steps.push(format!("@{ri} T{turn} · ⚡ Doomsday resolves"));
         }
     }
-    if let Some((t, n)) = pop {
-        steps.push(format!("T{t} · ⚡ pop — {n} Constructs"));
+    if let Some((ri, t, n)) = pop {
+        steps.push(format!("@{ri} T{t} · ⚡ pop — {n} Constructs"));
     }
     steps
 }
@@ -1324,7 +1326,10 @@ mod tests {
             "T1 [us|us/PreCombatMain] Fantasticar Construct created",
             "T1 [us|us/PreCombatMain] Fantasticar Construct created",
         ].iter().map(|s| s.to_string()).collect();
-        assert_eq!(send_sequence(&log), vec![
+        // Strip the "@{idx}" position prefix for the comparison.
+        let got: Vec<String> = send_sequence(&log).iter()
+            .map(|s| s.splitn(2, ' ').nth(1).unwrap().to_string()).collect();
+        assert_eq!(got, vec![
             "T1 · Play Underground Sea",
             "T1 · Cast Dark Ritual (B)",
             "T1 · Cast The Fantasticar (3)",
@@ -1367,7 +1372,9 @@ mod tests {
             "T2 [opp|opp/Draw] Draw Forest [hand: 7]",              // opponent — skipped
             "T2 [us|us/Draw] Draw Dark Ritual [hand: 6]",          // natural draw
         ].iter().map(|s| s.to_string()).collect();
-        assert_eq!(send_sequence(&log), vec![
+        let got: Vec<String> = send_sequence(&log).iter()
+            .map(|s| s.splitn(2, ' ').nth(1).unwrap().to_string()).collect();
+        assert_eq!(got, vec![
             "T1 · Play Underground Sea",
             "T1 · Cast Ponder (U)",
             "T1 · ↳ Lotus Petal",

@@ -106,20 +106,20 @@
     .srow .tag { min-width: 3.4rem; font-size: 0.68rem; color: #889; }
     .srow.mull .tag { color: #cf8f6f; }
     .srow .tag.keep { color: #6fcf9f; }
-    /* One row per turn: the turn label, then that turn's steps as chips. */
-    .turn-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.3rem;
-      margin: 0.1rem 0; padding-left: 0.4rem; border-left: 2px solid #0f3460; }
-    .turn-label { font-family: ui-monospace, monospace; font-size: 0.68rem; font-weight: bold;
-      color: #f5b041; min-width: 1.4rem; }
+    /* ONE temporally-linear flow: turn markers + play/draw/fate chips, all inline. */
+    .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.28rem;
+      margin: 0.15rem 0 0.1rem 0.4rem; padding-left: 0.4rem; border-left: 2px solid #0f3460; }
+    .turn-chip { font-family: ui-monospace, monospace; font-size: 0.64rem; font-weight: bold;
+      color: #0a1520; background: #f5b041; border-radius: 3px; padding: 0.03rem 0.36rem; }
     .step { font-family: ui-monospace, monospace; font-size: 0.68rem; color: #a9c7e0;
       background: #0e2137; border: 1px solid #143152; border-radius: 3px; padding: 0.04rem 0.32rem; }
     .step.pop { color: #ffd479; background: #3a2a0f; border-color: #6a4a15; font-weight: bold; }
     .step.draw { color: #86c69a; background: #0f2418; border-color: #1d3a26; }
-    /* A cantrip decision under its turn: per-card fate-chips + a muted reason (the cherry).
+    /* Cantrip reasons: a full-width line that breaks the flow (so it lands before the next
+       turn), each reason in small italics. The fate-chips carry the same text on hover.
        Fate language: 👁 seen · 📖 to top of library · 🪦 graveyard · ⤓ to bottom · 🔀 shuffled. */
-    .dig { display: flex; flex-wrap: wrap; align-items: center; gap: 0.18rem 0.3rem;
-      margin: 0.06rem 0 0.14rem 1.6rem; }
-    .dig-note { font-size: 0.66rem; color: #8296a6; font-style: italic; line-height: 1.35; }
+    .dig-notes { flex-basis: 100%; margin: 0.02rem 0 0.05rem 0.9rem; }
+    .dig-note { display: block; font-size: 0.62rem; color: #6f8090; font-style: italic; line-height: 1.4; }
     .step.fate-see { color: #9aa7b2; background: #171d24; border-color: #2b333c; border-style: dashed; }
     .step.fate-top { color: #8fb8e0; background: #10233a; border-color: #234a6e; }
     .step.fate-gy  { color: #d59a9a; background: #271414; border-color: #4a2222; }
@@ -272,8 +272,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260701-fates';
-    const WASM_VER = '20260701-fates';
+      from '../pkg/libmtg_doomsday.js?v=20260701-linear';
+    const WASM_VER = '20260701-linear';
 
     const REPO = 'boryas/libmtg';
 
@@ -515,18 +515,21 @@
         // drawn (green).
         const FATE = { see: '👁', top: '📖', gy: '🪦', bot: '⤓', draw: '', play: '' };
         const FCLS = { see: 'fate-see', top: 'fate-top', gy: 'fate-gy', bot: 'fate-bot', draw: 'draw', play: 'fate-play' };
-        const renderDig = (d) => {
-          const b = d.indexOf(' ‖ ');
-          const note = b >= 0 ? d.slice(0, b) : d;
-          const toks = b >= 0 ? d.slice(b + 3).split(';').filter(Boolean) : [];
-          const chips = toks.map(t => {
-            if (t === 'shuffle') return `<span class="step fate-shuffle">🔀 shuffled</span>`;
+        // A cantrip decision body "{reason} ‖ {tokens}" → just the fate-chips for the timeline
+        // (each carries the reason as a hover title). The reason text is rendered separately as
+        // a small-italics note on the next line.
+        const digReason = (body) => { const b = body.indexOf(' ‖ '); return b >= 0 ? body.slice(0, b) : body; };
+        const renderDig = (body) => {
+          const note = digReason(body).replace(/"/g, '&quot;');
+          const b = body.indexOf(' ‖ ');
+          const toks = b >= 0 ? body.slice(b + 3).split(';').filter(Boolean) : [];
+          return toks.map(t => {
+            if (t === 'shuffle') return `<span class="step fate-shuffle" title="${note}">🔀 shuffled</span>`;
             const ci = t.indexOf(':');
             const code = ci >= 0 ? t.slice(0, ci) : t, card = ci >= 0 ? t.slice(ci + 1) : '';
             const em = FATE[code] || '';
-            return `<span class="step ${FCLS[code] || ''}">${em ? em + ' ' : ''}${card}</span>`;
+            return `<span class="step ${FCLS[code] || ''}" title="${note}">${em ? em + ' ' : ''}${card}</span>`;
           }).join('');
-          return `<div class="dig">${chips}<span class="dig-note">${note}</span></div>`;
         };
         const body = s.samples.map(g => {
           const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
@@ -539,30 +542,40 @@
                                : ` <span class="seg none">· no payoff</span>`);
           const mulls = (g.mulligans || []).map(h =>
             `<div class="srow mull"><span class="tag">mull</span> ${cardChips(h)}</div>`).join('');
-          // The play sequence, ONE ROW PER TURN: the turn label, then that turn's steps as
-          // chips (payoff ⚡ highlighted; draws tinted), followed by the solver's cantrip
-          // reasoning for that turn as muted sub-lines. `g.line` / `g.cantrips` entries are
-          // "T{n} · {…}".
-          const put = (m, k, v) => { (m.get(k) || m.set(k, []).get(k)).push(v); };
-          const stepsByTurn = new Map(), digsByTurn = new Map();
-          for (const step of (g.line || [])) {
-            const i = step.indexOf(' · ');
-            put(stepsByTurn, i >= 0 ? step.slice(0, i) : '', i >= 0 ? step.slice(i + 3) : step);
+          // ONE continuous, temporally-linear flow: play steps and cantrip decisions merged
+          // by their logged position (`@pos`), turn boundaries marked by an inline chip — no
+          // per-turn row breaks. Entries are "@{pos} T{n} · {body}"; a dig at pos P sorts just
+          // before the play at raw index P (it happened before that line was appended).
+          const parseEv = (s, kind) => {
+            const sp = s.indexOf(' '), dot = s.indexOf(' · ');
+            if (sp < 0 || dot < 0) return null;
+            return { pos: +s.slice(1, sp), turn: s.slice(sp + 1, dot).trim(), body: s.slice(dot + 3), kind };
+          };
+          const evs = [];
+          for (const s of (g.line || [])) { const e = parseEv(s, 'play'); if (e) evs.push(e); }
+          for (const c of (g.cantrips || [])) { const e = parseEv(c, 'dig'); if (e) evs.push(e); }
+          const key = (e) => e.kind === 'dig' ? e.pos - 0.5 : e.pos;
+          evs.sort((a, b) => key(a) - key(b));
+          // Fate-chips flow inline in temporal order; each turn's cantrip REASONS flush out on
+          // their own line (small italics) at the turn boundary — before the next turn.
+          let html = '', curTurn = null, notes = [];
+          const flush = () => {
+            if (notes.length) html += `<div class="dig-notes">` + notes.map(n => `<span class="dig-note">${n}</span>`).join('') + `</div>`;
+            notes = [];
+          };
+          for (const e of evs) {
+            if (e.turn !== curTurn) { flush(); html += `<span class="turn-chip">${e.turn}</span>`; curTurn = e.turn; }
+            if (e.kind === 'play') {
+              const cls = e.body.includes('⚡') ? ' pop'
+                : (e.body.startsWith('↳') || e.body.startsWith('draw ')) ? ' draw' : '';
+              html += `<span class="step${cls}">${e.body}</span>`;
+            } else {
+              html += renderDig(e.body);
+              notes.push(digReason(e.body));
+            }
           }
-          for (const c of (g.cantrips || [])) {
-            const i = c.indexOf(' · ');
-            put(digsByTurn, i >= 0 ? c.slice(0, i) : '', i >= 0 ? c.slice(i + 3) : c);
-          }
-          const tnum = (t) => parseInt(String(t).replace(/[^0-9]/g, ''), 10) || 0;
-          const turns = [...new Set([...stepsByTurn.keys(), ...digsByTurn.keys()])].sort((a, b) => tnum(a) - tnum(b));
-          const seq = turns.map(turn => {
-            const chips = (stepsByTurn.get(turn) || []).map(a => {
-              const cls = a.includes('⚡') ? ' pop' : (a.startsWith('↳') || a.startsWith('draw ')) ? ' draw' : '';
-              return `<span class="step${cls}">${a}</span>`;
-            }).join('');
-            const digs = (digsByTurn.get(turn) || []).map(renderDig).join('');
-            return `<div class="turn-row"><span class="turn-label">${turn}</span>${chips}</div>${digs}`;
-          }).join('');
+          flush();
+          const seq = `<div class="flow">${html}</div>`;
           return `<div class="sample">${mulls}`
             + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${cardChips(g.hand)} &rarr; ${outcome}</div>`
             + seq + `</div>`;
