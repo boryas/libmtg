@@ -22,7 +22,7 @@ use libmtg_engine::{
 #[cfg(target_arch = "wasm32")]
 use libmtg_decklist::Decklist;
 #[cfg(target_arch = "wasm32")]
-use crate::{generate_scenario, run_goldfish_asap_mode, MullMode, DEFAULT_PROTECTION};
+use crate::{generate_scenario, run_goldfish_asap_mode, run_goldfish_send, MullMode, DEFAULT_PROTECTION};
 #[cfg(target_arch = "wasm32")]
 use crate::goldfish::{
     deal_opening_hands,
@@ -234,7 +234,15 @@ pub fn run_goldfish_asap_web(
         "draw" => Some(false),
         _ => None,
     };
-    let stats = run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, cutoff, mode, on_play);
+    // Two-wincon when the deck runs The Fantasticar: the pilot also pursues the car pop and
+    // a pop counts as a "send", so the headline is P(send by cutoff) = P(Doomsday OR car).
+    // A car-less deck runs the Doomsday-only path unchanged.
+    let has_car = deck.iter().any(|(name, _, _)| name == "The Fantasticar");
+    let stats = if has_car {
+        run_goldfish_send(&deck, games, DEFAULT_PROTECTION, cutoff, mode, on_play, true)
+    } else {
+        run_goldfish_asap_mode(&deck, games, DEFAULT_PROTECTION, cutoff, mode, on_play)
+    };
     serde_json::to_string(&stats).unwrap()
 }
 

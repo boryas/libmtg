@@ -167,8 +167,6 @@
         <option value="realistic" selected>Realistic &mdash; keep a real plan</option>
         <option value="keep7">Keep 7 &mdash; never mulligan</option>
         <option value="aggressive">Aggressive &mdash; race bar</option>
-        <option value="learned-speed">Learned (max speed) &mdash; the model, raw speed</option>
-        <option value="learned-interactive">Learned-Interactive &mdash; speed + keep protection</option>
       </select>
       <details id="mull-help" class="mode-desc">
         <summary>How this mode decides</summary>
@@ -214,8 +212,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260624-learned';
-    const WASM_VER = '20260624-learned';
+      from '../pkg/libmtg_doomsday.js?v=20260701-car';
+    const WASM_VER = '20260701-car';
 
     const REPO = 'boryas/libmtg';
 
@@ -242,58 +240,40 @@
       keep7: `<p>Never mulligans &mdash; it always keeps the opening seven. This shows the deck's
         raw speed, with no mulligan decisions mixed in.</p>`,
       aggressive: `<p>The fanatical race bar: keep only a guaranteed-or-nearly-guaranteed fast
-        Doomsday, and mulligan anything speculative. A hand stays if the solver finds a
+        payoff, and mulligan anything speculative. A hand stays if the solver finds a
         <em>deterministic</em> line by the cut-off, or if it holds Doomsday + two black sources +
         a castable cantrip to dig the last black. No probability threshold; it always keeps at four
-        cards.</p>`,
-      'learned-speed': `<p>A <b>trained</b> keep-value: for any hand it estimates
-        <code>P(cast by T3)</code> from <em>measured</em> outcomes &mdash; thousands of simulated
-        games per hand-shape, not a written rule &mdash; and its keep thresholds are the
-        <b>provably optimal</b> stopping policy for raw speed (backward induction over every hand
-        size, verified to sit at a peak: keeping more or less <i>both</i> cast slower).</p>
-        <p>The behavior it settles on: keep once you have Doomsday plus a way to power it out
-        (a black source, or a ritual standing in for one), or enough card selection to reliably dig
-        to the missing piece; otherwise ship and re-draw &mdash; even down to a three-card combo
-        core. The fastest mulligan here (it beats Aggressive), at the price of shipping protection.</p>`,
-      'learned-interactive': `<p>The same trained values and the same optimal-stopping recursion,
-        but scoring each hand by <code>P(cast) &times; the protection you'd still hold</code> when
-        you combo &mdash; so it optimizes <em>resolving</em> the Doomsday, not merely casting it.</p>
-        <p>The behavior: it keeps fast hands <i>and</i> slower hands that arrive with
-        counters/disruption, and ships only the genuinely slow-and-naked ones. Same cast-speed as
-        Aggressive, but it shows up to the combo with far more interaction in hand &mdash; it won't
-        dig past a Force of Will to find a land.</p>`,
+        cards. <span class="note">Its deterministic branch already counts a Fantasticar pop, but its
+        speculative-keep is Doomsday-shaped &mdash; for car decks, Realistic is the tuned one.</span></p>`,
     };
 
-    // Default deck: Eureka22422's 3-Wasteland / 3-Ponder tempo Doomsday list
-    // (so the page works out of the box on a real, current build).
+    // Default deck: "vroomsday 8 guys" — the two-wincon Doomsday + The Fantasticar list,
+    // so the page shows off car exploration out of the box (all cards in-catalog).
     const SAMPLE = `4 Underground Sea
 4 Polluted Delta
+1 Verdant Catacombs
+1 Flooded Strand
 1 Misty Rainforest
 1 Scalding Tarn
-1 Flooded Strand
-1 Bloodstained Mire
-1 Undercity Sewers
-1 Cavern of Souls
 1 Island
 1 Swamp
-3 Wasteland
-2 Lotus Petal
+1 Undercity Sewers
+1 Cavern of Souls
+4 Lotus Petal
 1 Lion's Eye Diamond
+4 Mishra's Bauble
 4 Dark Ritual
 4 Doomsday
-1 Thassa's Oracle
-1 Jace, Wielder of Mysteries
+4 The Fantasticar
 4 Brainstorm
-3 Ponder
+4 Ponder
 1 Consider
-4 Flow State
 1 Edge of Autumn
 1 Street Wraith
-4 Tamiyo, Inquisitive Student
-2 Murktide Regent
 4 Force of Will
-2 Daze
-2 Thoughtseize`;
+4 Daze
+3 Thoughtseize
+1 Thassa's Oracle`;
 
     const $ = (id) => document.getElementById(id);
     $('deck').value = SAMPLE;
@@ -404,7 +384,11 @@
     }
 
     function renderStats(s, opts) {
-      const { mull, cutoff } = opts;
+      const { mull, cutoff, hasCar } = opts;
+      // Two-wincon decks (The Fantasticar) score P(send) = P(Doomsday OR car pop); the
+      // Doomsday-only decks keep the "cast Doomsday" wording.
+      const goal = hasCar ? 'send' : 'cast Doomsday';
+      const goalPast = hasCar ? 'sent' : 'cast Doomsday';
       const successes = s.games - s.fails;
       const turns = Object.keys(s.cast_turn).map(Number).sort((a, b) => a - b);
       const maxT = cutoff; // sim is capped at the cut-off, so that's the last turn
@@ -440,7 +424,9 @@
       const hasRich = s.mull_count && Object.keys(s.mull_count).length > 0;
       let secs = '';
 
-      if (hasRich) {
+      // The outcome breakdown (guaranteed line / missing BBB / missing DD) is Doomsday-shaped
+      // — its internals count only the DD line — so it's hidden for two-wincon (car) decks.
+      if (hasRich && !hasCar) {
         const det = s.deterministic_cast || 0, sto = s.stochastic_cast || 0;
         const miss = Math.max(0, s.games - det - sto);
         const mm = s.miss_mana || 0, mp = s.miss_payoff || 0, mb = s.miss_both || 0, mn = s.miss_neither || 0;
@@ -457,8 +443,8 @@
         secs += section(`Outcomes (by T${cutoff})`, bd, true);
       }
 
-      secs += section(`P(Doomsday cast on turn t) &mdash; density (PDF)`, `<table>${pdfRows.join('')}</table>`, true);
-      secs += section(`P(Doomsday cast by turn t) &mdash; cumulative (CDF)`, `<table>${cdfRows.join('')}</table>`, true);
+      secs += section(`P(${goalPast} on turn t) &mdash; density (PDF)`, `<table>${pdfRows.join('')}</table>`, true);
+      secs += section(`P(${goalPast} by turn t) &mdash; cumulative (CDF)`, `<table>${cdfRows.join('')}</table>`, true);
 
       // Sample games: a few openers — thrown-back mulligans + the kept hand + outcome.
       if (s.samples && s.samples.length) {
@@ -483,18 +469,18 @@
           mullRows.push(`<tr><td>${7 - k} cards${k ? ` <span class="muted">(${k} mull)</span>` : ''}</td>`
             + `<td>${bar(n / totalKeeps)}</td><td class="muted">avg predicted ${(avg * 100).toFixed(0)}%</td></tr>`);
         }
-        secs += section(`Mulligans &mdash; kept hand size + avg predicted P(cast by T${cutoff})`,
+        secs += section(`Mulligans &mdash; kept hand size + avg predicted P(${goal} by T${cutoff})`,
           `<table>${mullRows.join('')}</table>`, false);
       }
 
-      secs += section(`Protection layers in hand at cast`, `<table>${protRows.join('')}</table>`, false);
+      secs += section(`Protection layers in hand at ${hasCar ? 'send' : 'cast'}`, `<table>${protRows.join('')}</table>`, false);
 
       $('results').className = '';
       $('results').innerHTML = `
         <h2>Goldfish results <span class="muted">&mdash; ${pilot}</span></h2>
         <div class="panel">
-          <div class="headline">P(cast Doomsday by T${cutoff}) <b>${(pByCutoff * 100).toFixed(1)}%</b>
-            <span class="muted">&mdash; the cut-off objective</span></div>
+          <div class="headline">P(${goal} by T${cutoff}) <b>${(pByCutoff * 100).toFixed(1)}%</b>
+            <span class="muted">&mdash; the cut-off objective${hasCar ? ' (Doomsday or Fantasticar pop)' : ''}</span></div>
           <div class="summary">
             <div class="stat">mean cast turn <b>${meanCast.toFixed(2)}</b></div>
             <div class="stat">mean protection <b>${meanProt.toFixed(2)}</b></div>
@@ -532,7 +518,8 @@
           plabel.textContent = `simulating… ${done.toLocaleString()} / ${games.toLocaleString()} games`;
           await new Promise(r => setTimeout(r, 0));
         }
-        renderStats(agg, { mull, cutoff });
+        const hasCar = /the fantasticar/i.test(deck);
+        renderStats(agg, { mull, cutoff, hasCar });
       } finally {
         prog.hidden = true; plabel.textContent = '';
         btn.disabled = false; btn.textContent = 'Goldfish it';
