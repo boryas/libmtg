@@ -112,6 +112,10 @@ pub struct GoldfishStats {
     pub miss_payoff: u32,
     pub miss_both: u32,
     pub miss_neither: u32,
+    /// Games where a payoff (Doomsday OR The Fantasticar) reached a non-library zone by the
+    /// cutoff — i.e. we DREW/played a payoff, whether or not we managed to send. `found_payoff
+    /// − sends` is the execution gap: found the wincon but couldn't assemble it in time.
+    pub found_payoff: u32,
     /// A handful of sample games (the first few of the run) for flavor: the kept
     /// opening hand, mulligans taken, and the cast turn (or none = never cast).
     pub samples: Vec<SampleGame>,
@@ -128,6 +132,9 @@ pub struct SampleGame {
     pub mulligans: Vec<Vec<String>>,
     /// Turn Doomsday resolved, or None if it never did by the cutoff.
     pub cast_turn: Option<u32>,
+    /// Whether a payoff (Doomsday / The Fantasticar) was found (reached hand or play) by the
+    /// cutoff — lets a non-send sample show "found a payoff" vs "no payoff drawn".
+    pub found_payoff: bool,
     /// The condensed play sequence for OUR side — land drops, casts, and the payoff
     /// (Doomsday resolving / the car pop) — so the send is legible step by step.
     pub line: Vec<String>,
@@ -271,6 +278,15 @@ where
             fixed_us_hand: None,
         };
         let state = run_game(scenario, &mut rng);
+        // Did we FIND a payoff (Doomsday / The Fantasticar reached hand or play) by the
+        // cutoff, whether or not we sent? Non-library presence = drew or played it.
+        let found_payoff = {
+            let pay = |k: &str| k == "Doomsday" || k == "The Fantasticar";
+            state.hand_of(PlayerId::Us).any(|c| pay(&c.catalog_key))
+                || state.permanents_of(PlayerId::Us).any(|c| pay(&c.catalog_key))
+                || state.graveyard_of(PlayerId::Us).any(|c| pay(&c.catalog_key))
+        };
+        if found_payoff { stats.found_payoff += 1; }
         // Keep a few sample games (the first handful) for flavor: opening hand + outcome.
         const SAMPLE_LIMIT: usize = 8;
         if stats.samples.len() < SAMPLE_LIMIT {
@@ -279,7 +295,7 @@ where
             let mulls = mulligans.len() as u8;
             let cast_turn = state.terminal.then_some(state.current_turn as u32);
             let line = send_sequence(&state.log);
-            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn, line });
+            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn, found_payoff, line });
         }
         // Air content of the FIRST opening 7, by its fate. If no mulligan was taken the
         // kept hand IS that 7; otherwise the first thrown-back hand is. (Isolates whether
@@ -1316,7 +1332,11 @@ mod tests {
     #[ignore]
     fn dbg_send_sequence_live() {
         let deck = vroomsday_deck();
-        let stats = run_goldfish_send(&deck, 400, DEFAULT_PROTECTION, 3, MullMode::Realistic, Some(true), true);
+        let stats = run_goldfish_send(&deck, 2000, DEFAULT_PROTECTION, 3, MullMode::Realistic, Some(true), true);
+        let g = stats.games as f64;
+        println!("send by T3 = {:.1}%   found a payoff = {:.1}%   (found-but-stuck = {:.1}%)",
+            100.0 * stats.cast_by(3), 100.0 * stats.found_payoff as f64 / g,
+            100.0 * (stats.found_payoff as f64 / g - stats.cast_by(3)));
         for (i, g) in stats.samples.iter().enumerate() {
             let out = g.cast_turn.map(|t| format!("send T{t}")).unwrap_or("no send".into());
             println!("\n#{i}  keep {} [{}]  → {out}", 7 - g.mulls, g.hand.join(", "));
