@@ -82,10 +82,13 @@
     .seg.det b { color: #6fcf6f; }
     .seg.sto b { color: #5dade2; }
     .seg.miss b { color: #cf6f6f; }
-    .sample .seg.det { color: #6fcf6f; }
-    .sample .seg.miss { color: #cf8f6f; }
-    .sample .seg.found { color: #f5b041; }
-    .sample .seg.none { color: #6a7580; }
+    /* Verdict sigil — its own line after the timeline. */
+    .verdict-row { margin: 0.28rem 0 0.1rem 0.4rem; }
+    .verdict { font-family: ui-monospace, monospace; font-size: 0.72rem; font-weight: bold;
+      letter-spacing: 0.04em; border-radius: 3px; padding: 0.08rem 0.44rem; }
+    .verdict.sent   { color: #0d1a0d; background: #6fcf6f; }
+    .verdict.found  { color: #241a06; background: #f5b041; }
+    .verdict.failed { color: #cf9a9a; background: #2a1616; border: 1px solid #4a2222; }
     details.sec { border-top: 1px solid #0f3460; }
     details.sec > summary { cursor: pointer; color: #5dade2; font-size: 0.95rem; font-weight: 600;
       padding: 0.6rem 0 0.4rem; list-style-position: inside; }
@@ -533,13 +536,13 @@
         };
         const body = s.samples.map(g => {
           const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
-          // For a non-send, note whether we at least FOUND a payoff (drew a car/DD) — the
-          // "found but couldn't assemble" case, distinct from "no payoff drawn".
-          const outcome = cast
-            ? `<span class="seg det">${noun} T${g.cast_turn}</span>`
-            : `<span class="seg miss">no ${noun}</span>`
-              + (g.found_payoff ? ` <span class="seg found">· found payoff</span>`
-                               : ` <span class="seg none">· no payoff</span>`);
+          // Verdict sigil (its own line, after the timeline): SENT · sent by the cut-off;
+          // FOUND · drew a payoff but couldn't assemble it in time; FAILED · no payoff drawn.
+          const verdict = cast
+            ? `<span class="verdict sent">✓ SENT · T${g.cast_turn}</span>`
+            : g.found_payoff
+              ? `<span class="verdict found">◐ FOUND · a payoff, but no ${noun} in time</span>`
+              : `<span class="verdict failed">✗ FAILED · no payoff drawn</span>`;
           const mulls = (g.mulligans || []).map(h =>
             `<div class="srow mull"><span class="tag">mull</span> ${cardChips(h)}</div>`).join('');
           // ONE continuous, temporally-linear flow: play steps and cantrip decisions merged
@@ -577,8 +580,9 @@
           flush();
           const seq = `<div class="flow">${html}</div>`;
           return `<div class="sample">${mulls}`
-            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${cardChips(g.hand)} &rarr; ${outcome}</div>`
-            + seq + `</div>`;
+            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${cardChips(g.hand)}</div>`
+            + seq
+            + `<div class="verdict-row">${verdict}</div></div>`;
         }).join('');
         secs += section(`Sample games <span class="muted">&mdash; openers + the ${noun} sequence</span>`, body, false);
       }
