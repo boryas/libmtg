@@ -128,6 +128,9 @@ pub struct SampleGame {
     pub mulligans: Vec<Vec<String>>,
     /// Turn Doomsday resolved, or None if it never did by the cutoff.
     pub cast_turn: Option<u32>,
+    /// The condensed play sequence for OUR side — land drops, casts, and the payoff
+    /// (Doomsday resolving / the car pop) — so the send is legible step by step.
+    pub line: Vec<String>,
 }
 
 impl GoldfishStats {
@@ -189,6 +192,35 @@ pub fn dd_goldfish_evaluator() -> Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 
 /// (`AlwaysPass`), aggregating the cast-turn + protection distributions. The
 /// Doomsday player's strategy is built fresh per game by `make_us`, with
 /// `evaluator` installed as the card evaluator.
+/// Condense the engine play-by-play (`state.log`) into OUR side's legible sequence:
+/// each land drop and cast (turn-stamped), plus a single payoff marker (Doomsday
+/// resolving / the car pop with its Construct count). Engine lines are
+/// `T{n} [{who}|{phase}] {action} [hand: k]`; we keep only `[us` actors, strip the
+/// phase tag and the trailing hand count, and drop mana/resolve/ETB noise.
+fn send_sequence(log: &[String]) -> Vec<String> {
+    let mut steps: Vec<String> = Vec::new();
+    let mut pop: Option<(String, u32)> = None; // (turn, Construct count)
+    for l in log {
+        let Some(close) = l.find(']') else { continue };
+        let tag = &l[..close];
+        if !tag.contains("[us") { continue; } // our actions only (any turn)
+        let turn = tag.trim_start_matches('T').split_whitespace().next().unwrap_or("?");
+        let action = l[close + 1..].split(" [hand:").next().unwrap_or("").trim();
+        if action.starts_with("Play ") || action.starts_with("Cast ") {
+            steps.push(format!("T{turn} · {}", action.replace("(ir alt cost)", "(alt. cost)")));
+        } else if action.contains("Construct created") {
+            let e = pop.get_or_insert((turn.to_string(), 0));
+            e.1 += 1;
+        } else if action == "Doomsday resolves" {
+            steps.push(format!("T{turn} · ⚡ Doomsday resolves"));
+        }
+    }
+    if let Some((t, n)) = pop {
+        steps.push(format!("T{t} · ⚡ pop — {n} Constructs"));
+    }
+    steps
+}
+
 fn run_goldfish_inner<F>(
     deck: &[(String, i32, String)],
     games: u32,
@@ -237,7 +269,8 @@ where
             let mulligans = state.mulliganed_hands_us.clone();
             let mulls = mulligans.len() as u8;
             let cast_turn = state.terminal.then_some(state.current_turn as u32);
-            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn });
+            let line = send_sequence(&state.log);
+            stats.samples.push(SampleGame { mulls, hand, mulligans, cast_turn, line });
         }
         // Air content of the FIRST opening 7, by its fate. If no mulligan was taken the
         // kept hand IS that 7; otherwise the first thrown-back hand is. (Isolates whether
@@ -1234,6 +1267,38 @@ mod tests {
             println!("  {label:<26} shortfall={shortfall}  P(send by T3) = {:.1}%  ({sends}/{n})",
                 100.0 * sends as f64 / n as f64);
         }
+    }
+
+    /// `send_sequence` condenses the engine play-by-play into OUR legible line: opp lines
+    /// dropped, mana/resolve/ETB noise removed, "ir alt cost" cleaned, and the four Construct
+    /// tokens collapsed into a single pop marker.
+    #[test]
+    fn send_sequence_condenses_the_car_line() {
+        let log: Vec<String> = [
+            "T0 [opp] draw (7) [hand: 7]",
+            "T1 [us|us/PreCombatMain] Play Underground Sea [hand: 5]",
+            "T1 [us|us/PreCombatMain] → add B to pool",
+            "T1 [us|us/PreCombatMain] Cast Dark Ritual (B) [hand: 3]",
+            "T1 [us|us/PreCombatMain] Dark Ritual resolves",
+            "T1 [us|us/PreCombatMain] Cast The Fantasticar (3) [hand: 2]",
+            "T1 [us|us/PreCombatMain] The Fantasticar enters play",
+            "T1 [us|us/PreCombatMain] Cast Lotus Petal (0) [hand: 1]",
+            "T1 [us|us/PreCombatMain] → Underground Sea returned to us's hand",
+            "T1 [us|us/PreCombatMain] Cast Daze (ir alt cost) targeting Lotus Petal [hand: 1]",
+            "T1 [us|us/PreCombatMain] → The Fantasticar destroyed",
+            "T1 [us|us/PreCombatMain] Fantasticar Construct created",
+            "T1 [us|us/PreCombatMain] Fantasticar Construct created",
+            "T1 [us|us/PreCombatMain] Fantasticar Construct created",
+            "T1 [us|us/PreCombatMain] Fantasticar Construct created",
+        ].iter().map(|s| s.to_string()).collect();
+        assert_eq!(send_sequence(&log), vec![
+            "T1 · Play Underground Sea",
+            "T1 · Cast Dark Ritual (B)",
+            "T1 · Cast The Fantasticar (3)",
+            "T1 · Cast Lotus Petal (0)",
+            "T1 · Cast Daze (alt. cost) targeting Lotus Petal",
+            "T1 · ⚡ pop — 4 Constructs",
+        ]);
     }
 
     /// Strategy-level acceptance for the self-Daze line: the SOLVER already finds it

@@ -98,6 +98,11 @@
     .srow .tag { display: inline-block; min-width: 3.4rem; font-size: 0.68rem; color: #889; }
     .srow.mull .tag { color: #cf8f6f; }
     .srow .tag.keep { color: #6fcf9f; }
+    .srow.seq { display: flex; flex-wrap: wrap; align-items: center; gap: 0.22rem 0.3rem;
+      margin: 0.2rem 0 0.1rem 0.4rem; padding-left: 0.4rem; border-left: 2px solid #0f3460; }
+    .step { font-family: ui-monospace, monospace; font-size: 0.68rem; color: #a9c7e0;
+      background: #0e2137; border: 1px solid #143152; border-radius: 3px; padding: 0.04rem 0.32rem; }
+    .step.pop { color: #ffd479; background: #3a2a0f; border-color: #6a4a15; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -212,8 +217,8 @@
     // names, so a stale .js against a new .wasm would otherwise hang at "Loading wasm").
     // Bump this string on every deploy.
     import init, { run_goldfish_asap_web, missing_cards_web }
-      from '../pkg/libmtg_doomsday.js?v=20260701-car';
-    const WASM_VER = '20260701-car';
+      from '../pkg/libmtg_doomsday.js?v=20260701-seq';
+    const WASM_VER = '20260701-seq';
 
     const REPO = 'boryas/libmtg';
 
@@ -446,17 +451,25 @@
       secs += section(`P(${goalPast} on turn t) &mdash; density (PDF)`, `<table>${pdfRows.join('')}</table>`, true);
       secs += section(`P(${goalPast} by turn t) &mdash; cumulative (CDF)`, `<table>${cdfRows.join('')}</table>`, true);
 
-      // Sample games: a few openers — thrown-back mulligans + the kept hand + outcome.
+      // Sample games: a few openers — thrown-back mulligans + the kept hand + the
+      // step-by-step sequence that led to the send (land drops, casts, the payoff).
       if (s.samples && s.samples.length) {
+        const noun = hasCar ? 'send' : 'cast';
         const body = s.samples.map(g => {
           const cast = (g.cast_turn !== null && g.cast_turn !== undefined);
-          const outcome = `<span class="seg ${cast ? 'det' : 'miss'}">${cast ? `cast T${g.cast_turn}` : 'no cast'}</span>`;
+          const outcome = `<span class="seg ${cast ? 'det' : 'miss'}">${cast ? `${noun} T${g.cast_turn}` : `no ${noun}`}</span>`;
           const mulls = (g.mulligans || []).map(h =>
             `<div class="srow mull"><span class="tag">mull</span> ${h.join(', ')}</div>`).join('');
+          // The play sequence — highlight the payoff step (⚡) so the send is obvious.
+          const seq = (g.line && g.line.length)
+            ? `<div class="srow seq">` + g.line.map(step =>
+                `<span class="step${step.includes('⚡') ? ' pop' : ''}">${step}</span>`).join('') + `</div>`
+            : '';
           return `<div class="sample">${mulls}`
-            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${g.hand.join(', ')} &rarr; ${outcome}</div></div>`;
+            + `<div class="srow"><span class="tag keep">keep ${7 - g.mulls}</span> ${g.hand.join(', ')} &rarr; ${outcome}</div>`
+            + seq + `</div>`;
         }).join('');
-        secs += section(`Sample games <span class="muted">&mdash; openers + outcomes</span>`, body, false);
+        secs += section(`Sample games <span class="muted">&mdash; openers + the ${noun} sequence</span>`, body, false);
       }
 
       if (hasRich) {
