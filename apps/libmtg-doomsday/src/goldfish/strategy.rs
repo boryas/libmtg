@@ -841,12 +841,18 @@ impl Strategy for DDGoldfishStrategy {
         let principled_bin = keep_p < base_p; // a known keep worse than an unknown draw → bin
         // NOTE: this is the generic surveil handler — it fires for Consider AND for surveil
         // lands (Undercity Sewers), and isn't told which. So label it "surveil", not "Consider".
+        // The decision is MARGINAL — keep iff P(send | this card on top) ≥ P(send | a fresh
+        // draw); lead with that gap (the two absolute rates often round to the same %).
+        let (kp, dp) = (keep_p * 100.0, base_p * 100.0);
         self.dlog(if principled_bin {
-            format!("DIG T{} · surveil binned {} (keep P {:.0}% < a fresh draw {:.0}%)",
-                state.current_turn, key, keep_p * 100.0, base_p * 100.0)
+            format!("DIG T{} · surveil binned {} — a fresh draw wins by {:.1}pp ({:.1}% vs keeping {:.1}%)",
+                state.current_turn, key, dp - kp, dp, kp)
+        } else if kp - dp < 0.05 {
+            format!("DIG T{} · surveil kept {} — about even with a fresh draw (≈{:.1}%), kept by default",
+                state.current_turn, key, kp)
         } else {
-            format!("DIG T{} · surveil kept {} on top (P {:.0}% ≥ a fresh draw {:.0}%)",
-                state.current_turn, key, keep_p * 100.0, base_p * 100.0)
+            format!("DIG T{} · surveil kept {} — beats a fresh draw by {:.1}pp ({:.1}% vs {:.1}%)",
+                state.current_turn, key, kp - dp, kp, dp)
         });
         if self.compare {
             let heur_bin = heur_surveil_bin(state, who, id);
