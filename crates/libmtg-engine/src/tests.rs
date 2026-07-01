@@ -1931,7 +1931,7 @@
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
 
-        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 1, is_natural: true };
+        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 1, is_natural: true, card: None };
         let (result, _) = fire_triggers(&ev, &state);
         assert!(result.is_empty(), "no trigger on first natural draw");
     }
@@ -1941,7 +1941,7 @@
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
 
-        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 1, is_natural: false };
+        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 1, is_natural: false, card: None };
         let (result, _) = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1, "cantrip draw triggers Bowmasters");
     }
@@ -2038,9 +2038,9 @@
         // Three draws this turn logged; the third draw event fires Tamiyo's flip.
         // ("Third card this turn" = EventCount over the log, not the draw_index field.)
         for i in 1..=3u8 {
-            state.event_log.push(1, GameEvent::Draw { controller: PlayerId::Us, draw_index: i, is_natural: false });
+            state.event_log.push(1, GameEvent::Draw { controller: PlayerId::Us, draw_index: i, is_natural: false, card: None });
         }
-        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false };
+        let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false, card: None };
         let (result, _) = fire_triggers(&ev, &state);
         let ctx = result.iter().find(|c| c.source_name == "Tamiyo, Inquisitive Student").cloned()
             .expect("third draw fires Tamiyo's flip trigger");

@@ -395,11 +395,13 @@ pub enum GameEvent {
         controller: PlayerId,
     },
     /// A player draws a card. `draw_index` is which draw this is this turn (1-based).
-    /// `is_natural` is true only for the draw-step draw.
+    /// `is_natural` is true only for the draw-step draw. `card` is the drawn card's id
+    /// (the library top peeked at fire time), for naming it in the log.
     Draw {
         controller: PlayerId,
         draw_index: u8,
         is_natural: bool,
+        card: Option<ObjId>,
     },
     /// Fired after step-specific actions complete and before priority begins.
     /// Only fires for named steps that have a priority round (not Untap or Cleanup).
@@ -2829,13 +2831,17 @@ fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: PlayerId) {
                 _ => {}
             }
         }
-        GameEvent::Draw { controller, draw_index, is_natural } => {
+        GameEvent::Draw { controller, draw_index, is_natural, card } => {
             let controller = *controller;
             let hand = state.hand_size(controller);
+            // Name the drawn card so the play-by-play shows what was found (naturally or
+            // off a cantrip); fall back to "a card" if the library was empty.
+            let name = card.and_then(|id| state.objects.get(&id))
+                .map(|o| o.catalog_key.as_str()).unwrap_or("a card");
             if *is_natural {
-                state.log(t, controller, format!("Draw [hand: {}]", hand));
+                state.log(t, controller, format!("Draw {} [hand: {}]", name, hand));
             } else {
-                state.log(t, controller, format!("draw ({}) [hand: {}]", draw_index, hand));
+                state.log(t, controller, format!("draw ({}) {} [hand: {}]", draw_index, name, hand));
             }
         }
         GameEvent::ManaProduced { who, ref spec } => {
@@ -2912,7 +2918,10 @@ fn sim_draw(state: &mut SimState, who: PlayerId, t: u8, is_natural: bool) {
     }
     state.player_mut(who).draws_this_turn += 1;
     let draw_index = state.player(who).draws_this_turn;
-    let ev = GameEvent::Draw { controller: who, draw_index, is_natural };
+    // Peek the card about to be drawn (do_effect pops this same library top) so the log
+    // can name it. Absent only on an empty library (no card is drawn then anyway).
+    let card = state.player(who).library_order.front().copied();
+    let ev = GameEvent::Draw { controller: who, draw_index, is_natural, card };
     fire_event(ev, state, t, who);
 }
 
